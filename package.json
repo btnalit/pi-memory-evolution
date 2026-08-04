@@ -1,0 +1,30 @@
+{
+	"name": "pi-memory-evolution",
+	"version": "0.1.0",
+	"description": "Memory self-evolution system for the PI Coding Agent: signal collection, memory evaluation, agenda maturation, and runtime digest injection.",
+	"type": "module",
+	"keywords": [
+		"pi-package",
+		"pi",
+		"pi-agent",
+		"memory",
+		"self-evolution"
+	],
+	"files": [
+		"src",
+		"docs",
+		"README.md",
+		"package.json"
+	],
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"scripts": {
+		"test": "node --test \"src/**/*.test.ts\""
+	}
+}
