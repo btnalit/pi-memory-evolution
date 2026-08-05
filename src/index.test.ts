@@ -47,6 +47,15 @@ describe("memoryEvolution extension entry", () => {
 		assert.equal(registered.length, 0);
 	});
 
+	test("does not throw when pi.on itself throws", () => {
+		const pi = {
+			on: () => {
+				throw new Error("on failed");
+			},
+		} as unknown as ExtensionAPI;
+		assert.doesNotThrow(() => memoryEvolution(pi));
+	});
+
 	test("before_agent_start handler returns undefined without failing", async () => {
 		const { pi, registered } = recordingPi();
 		memoryEvolution(pi as ExtensionAPI);

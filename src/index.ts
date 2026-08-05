@@ -3,6 +3,7 @@ import {
 	probeCapabilities,
 	type CapabilityProbeResult,
 } from "./adapter/capability-probe.ts";
+import { isMemoryEvolutionHost } from "./adapter/pi-api.ts";
 
 /** Event hook name that carries the assembled system prompt into every session. */
 const BEFORE_AGENT_START_EVENT = "before_agent_start";
@@ -10,14 +11,18 @@ const BEFORE_AGENT_START_EVENT = "before_agent_start";
 /** Registers the memory-evolution lifecycle hooks with capability-aware degradation. */
 export default function memoryEvolution(pi: ExtensionAPI): void {
 	const probe = probeCapabilities(pi);
-	if (!probe.ok) {
+	if (!probe.ok || !isMemoryEvolutionHost(pi)) {
 		return;
 	}
 
-	pi.on(BEFORE_AGENT_START_EVENT, () => {
-		handleBeforeAgentStart(probe);
-		return undefined;
-	});
+	try {
+		pi.on(BEFORE_AGENT_START_EVENT, () => {
+			handleBeforeAgentStart(probe);
+			return undefined;
+		});
+	} catch {
+		return;
+	}
 }
 
 /** Placeholder for future runtime-digest injection (design phase P3). */
