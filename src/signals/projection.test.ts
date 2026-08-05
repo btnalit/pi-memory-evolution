@@ -1,10 +1,10 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { PiAgentMessage } from "../adapter/pi-api.ts";
 import { countProjectionNotices } from "./projection.ts";
 
 /** Builds a tool result message carrying the given text. */
-function toolResultWithText(text: string): AgentMessage {
+function toolResultWithText(text: string): PiAgentMessage {
 	return {
 		role: "toolResult",
 		toolCallId: "call-0",
@@ -12,12 +12,12 @@ function toolResultWithText(text: string): AgentMessage {
 		content: [{ type: "text", text }],
 		isError: false,
 		timestamp: 1,
-	} as unknown as AgentMessage;
+	} as unknown as PiAgentMessage;
 }
 
 /** Builds a minimal user message. */
-function userMessage(text: string): AgentMessage {
-	return { role: "user", content: text, timestamp: 2 } as AgentMessage;
+function userMessage(text: string): PiAgentMessage {
+	return { role: "user", content: text, timestamp: 2 } as PiAgentMessage;
 }
 
 describe("countProjectionNotices", () => {
@@ -27,7 +27,22 @@ describe("countProjectionNotices", () => {
 				"Result omitted. Run tool again for full result.",
 			),
 			toolResultWithText("normal output"),
-			toolResultWithText("Result omitted. Run tool again for full result."),
+			toolResultWithText(
+				"Result omitted. Run tool again for full result.",
+			),
+		];
+		assert.equal(countProjectionNotices(messages), 2);
+	});
+
+	test("counts tool results with the summary-notice text", () => {
+		const messages = [
+			toolResultWithText(
+				"Full result omitted. Summary below. Run tool again for full result.",
+			),
+			toolResultWithText(
+				"Full result omitted. Summary below. Run tool again for full result. MUST NOT rely on summary when making critical decisions.",
+			),
+			toolResultWithText("normal output"),
 		];
 		assert.equal(countProjectionNotices(messages), 2);
 	});

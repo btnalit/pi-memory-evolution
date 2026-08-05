@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { PiAgentMessage } from "../adapter/pi-api.ts";
 
 /** Session-level statistics collected from one agent-end message batch. */
 export interface SessionStats {
@@ -11,7 +11,7 @@ export interface SessionStats {
 
 /** Counts messages by role and assistant tool calls. */
 export function collectSessionStats(
-	messages: readonly AgentMessage[],
+	messages: readonly PiAgentMessage[],
 ): SessionStats {
 	let messageCount = 0;
 	let userCount = 0;
@@ -45,7 +45,9 @@ export function collectSessionStats(
 }
 
 /** Counts tool-call content parts in one assistant message. */
-function countToolCalls(message: Extract<AgentMessage, { role: "assistant" }>): number {
+function countToolCalls(
+	message: Extract<PiAgentMessage, { role: "assistant" }>,
+): number {
 	const content = message.content;
 	if (!Array.isArray(content)) {
 		return 0;

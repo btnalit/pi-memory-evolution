@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { PiAgentMessage } from "../adapter/pi-api.ts";
 
 /** Correction keywords that indicate user dissatisfaction with prior output. */
 const CORRECTION_KEYWORDS = [
@@ -13,7 +13,7 @@ const CORRECTION_KEYWORDS = [
 
 /** Extracts correction keywords found in one user message. */
 export function extractCorrectionKeywords(
-	message: AgentMessage,
+	message: PiAgentMessage,
 ): readonly string[] {
 	if (message.role !== "user") {
 		return [];
@@ -26,7 +26,9 @@ export function extractCorrectionKeywords(
 }
 
 /** Extracts plain text from a user message content of either shape. */
-function messageText(message: Extract<AgentMessage, { role: "user" }>): string {
+function messageText(
+	message: Extract<PiAgentMessage, { role: "user" }>,
+): string {
 	if (typeof message.content === "string") {
 		return message.content;
 	}

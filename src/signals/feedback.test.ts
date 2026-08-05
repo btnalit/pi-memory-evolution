@@ -1,11 +1,11 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { PiAgentMessage } from "../adapter/pi-api.ts";
 import { extractCorrectionKeywords } from "./feedback.ts";
 
 /** Builds a minimal user message with the given text. */
-function userMessage(text: string): AgentMessage {
-	return { role: "user", content: text, timestamp: 1 } as AgentMessage;
+function userMessage(text: string): PiAgentMessage {
+	return { role: "user", content: text, timestamp: 1 } as PiAgentMessage;
 }
 
 describe("extractCorrectionKeywords", () => {
@@ -30,7 +30,7 @@ describe("extractCorrectionKeywords", () => {
 			usage: { input: 1, output: 1, totalTokens: 2 },
 			stopReason: "stop",
 			timestamp: 1,
-		} as unknown as AgentMessage);
+		} as unknown as PiAgentMessage);
 		assert.deepEqual(keywords, []);
 	});
 });

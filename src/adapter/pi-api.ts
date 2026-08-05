@@ -1,3 +1,5 @@
+import type { AgentEndEvent } from "@earendil-works/pi-coding-agent";
+
 /**
  * Extension-owned pi dependency surface.
  *
@@ -13,6 +15,9 @@ export interface MemoryEvolutionHost {
 		handler: (...args: unknown[]) => unknown,
 	) => void;
 }
+
+/** Agent message type narrowed from the pi agent-end event contract. */
+export type PiAgentMessage = AgentEndEvent["messages"][number];
 
 /** Narrowing guard that proves a value satisfies MemoryEvolutionHost. */
 export function isMemoryEvolutionHost(

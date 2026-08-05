@@ -1,15 +1,15 @@
 import { describe, test } from "node:test";
 import { strict as assert } from "node:assert";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { PiAgentMessage } from "../adapter/pi-api.ts";
 import { collectSessionStats } from "./collector.ts";
 
 /** Builds a minimal user message. */
-function userMessage(text: string): AgentMessage {
-	return { role: "user", content: text, timestamp: 1 } as AgentMessage;
+function userMessage(text: string): PiAgentMessage {
+	return { role: "user", content: text, timestamp: 1 } as PiAgentMessage;
 }
 
 /** Builds a minimal assistant message with optional tool calls. */
-function assistantMessage(toolCalls: number): AgentMessage {
+function assistantMessage(toolCalls: number): PiAgentMessage {
 	return {
 		role: "assistant",
 		content: [
@@ -29,11 +29,11 @@ function assistantMessage(toolCalls: number): AgentMessage {
 		usage: { input: 1, output: 1, totalTokens: 2 },
 		stopReason: "stop",
 		timestamp: 2,
-	} as unknown as AgentMessage;
+	} as unknown as PiAgentMessage;
 }
 
 /** Builds a minimal tool result message. */
-function toolResultMessage(): AgentMessage {
+function toolResultMessage(): PiAgentMessage {
 	return {
 		role: "toolResult",
 		toolCallId: "call-0",
@@ -41,7 +41,7 @@ function toolResultMessage(): AgentMessage {
 		content: [{ type: "text", text: "output" }],
 		isError: false,
 		timestamp: 3,
-	} as unknown as AgentMessage;
+	} as unknown as PiAgentMessage;
 }
 
 describe("collectSessionStats", () => {
