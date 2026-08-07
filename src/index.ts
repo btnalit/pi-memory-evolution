@@ -15,10 +15,11 @@ import { collectSessionStats } from "./signals/collector.ts";
 import { countProjectionNotices } from "./signals/projection.ts";
 import { extractCorrectionKeywords } from "./signals/feedback.ts";
 import {
-	createStateStore,
-	getStateDir,
-	type StateStore,
-} from "./store/state-store.ts";
+	createAgendaStore,
+	type AgendaStore,
+} from "./store/agenda-store.ts";
+import { getStateDir } from "./store/state-store.ts";
+import { runMaturationPipeline } from "./agenda/pipeline.ts";
 
 /** Event hook name that carries the assembled system prompt into every session. */
 const BEFORE_AGENT_START_EVENT = "before_agent_start";
@@ -34,6 +35,9 @@ const TURN_END_EVENT = "turn_end";
 
 /** Event fired when a session shuts down. */
 const SESSION_SHUTDOWN_EVENT = "session_shutdown";
+
+/** Minimum collected sessions before the maturation pipeline may run. */
+const MIN_SESSIONS_BEFORE_EVALUATION = 3;
 
 /** Injectable dependencies that isolate state location and subagent detection. */
 export interface MemoryEvolutionDependencies {
@@ -56,7 +60,7 @@ export default function memoryEvolution(
 		return;
 	}
 
-	const store = createStateStore(dependencies?.stateDir ?? getStateDir());
+	const store = createAgendaStore(dependencies?.stateDir ?? getStateDir());
 	let collectionEnabled = false;
 
 	registerHook(pi, SESSION_COMPACT_EVENT, (_event) => {
@@ -69,6 +73,7 @@ export default function memoryEvolution(
 			return;
 		}
 		handleAgentEnd(store, (event as AgentEndEvent).messages);
+		maybeRunEvaluation(store);
 	});
 	registerHook(pi, TURN_END_EVENT, (event) => {
 		if (!collectionEnabled) {
@@ -106,7 +111,7 @@ function registerHook(
 
 /** Enables collection after the first compaction and records the audit trail. */
 function handleSessionCompact(
-	store: StateStore,
+	store: AgendaStore,
 	enable: () => void,
 ): void {
 	enable();
@@ -116,7 +121,7 @@ function handleSessionCompact(
 }
 
 /** Records session statistics and projection notices from one agent batch. */
-function handleAgentEnd(store: StateStore, messages: AgentEndEvent["messages"]): void {
+function handleAgentEnd(store: AgendaStore, messages: AgentEndEvent["messages"]): void {
 	const stats = collectSessionStats(messages);
 	store.appendSignal({
 		ts: nowIso(),
@@ -138,7 +143,7 @@ function handleAgentEnd(store: StateStore, messages: AgentEndEvent["messages"]):
 
 /** Records user correction feedback from one turn message. */
 function handleTurnEnd(
-	store: StateStore,
+	store: AgendaStore,
 	message: TurnEndEvent["message"],
 ): void {
 	const keywords = extractCorrectionKeywords(message);
@@ -155,12 +160,24 @@ function handleTurnEnd(
 
 /** Records the session shutdown in the audit trail. */
 function handleSessionShutdown(
-	store: StateStore,
+	store: AgendaStore,
 	reason: SessionShutdownEvent["reason"],
 ): void {
 	store.appendJournal(
 		`- ${nowIso()} session ended (${reason})`,
 	);
+}
+
+/** Runs the maturation pipeline once enough sessions have been collected. */
+function maybeRunEvaluation(store: AgendaStore): void {
+	const signals = store.readSignals();
+	const sessionCount = signals.filter(
+		(signal) => signal.type === "session_stats",
+	).length;
+	if (sessionCount < MIN_SESSIONS_BEFORE_EVALUATION) {
+		return;
+	}
+	runMaturationPipeline(store, nowIso());
 }
 
 /** Placeholder for future runtime-digest injection (design phase P3). */

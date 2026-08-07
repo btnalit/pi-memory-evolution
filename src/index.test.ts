@@ -261,3 +261,55 @@ describe("memoryEvolution extension entry (P1)", () => {
 		}
 	});
 });
+
+describe("memoryEvolution extension entry (P2 maturation)", () => {
+	test("does not run evaluation before three sessions are collected", async () => {
+		const stateDir = await createTempStateDir();
+		try {
+			const { pi, registered } = recordingPi();
+			memoryEvolution(pi as ExtensionAPI, { stateDir, env: {} });
+			await trigger(registered, "session_compact", [
+				{ type: "session_compact", reason: "threshold", fromExtension: false },
+			]);
+			await trigger(registered, "agent_end", [
+				{ type: "agent_end", messages: agentMessages() },
+				mockCtx(),
+			]);
+			await assert.rejects(
+				readFile(join(stateDir, "agenda_candidates.yaml"), "utf8"),
+				{ code: "ENOENT" },
+			);
+		} finally {
+			await rm(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	test("runs the maturation pipeline after three sessions are collected", async () => {
+		const stateDir = await createTempStateDir();
+		try {
+			const { pi, registered } = recordingPi();
+			memoryEvolution(pi as ExtensionAPI, { stateDir, env: {} });
+			await trigger(registered, "session_compact", [
+				{ type: "session_compact", reason: "threshold", fromExtension: false },
+			]);
+			for (let index = 0; index < 3; index++) {
+				await trigger(registered, "agent_end", [
+					{ type: "agent_end", messages: agentMessages() },
+					mockCtx(),
+				]);
+			}
+			const candidates = await readFile(
+				join(stateDir, "agenda_candidates.yaml"),
+				"utf8",
+			);
+			assert.ok(candidates.includes("shadow_mode"));
+			const journal = await readFile(
+				join(stateDir, "evolution_journal.md"),
+				"utf8",
+			);
+			assert.ok(journal.includes("maturation"));
+		} finally {
+			await rm(stateDir, { recursive: true, force: true });
+		}
+	});
+});
