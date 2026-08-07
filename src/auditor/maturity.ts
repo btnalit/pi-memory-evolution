@@ -2,10 +2,12 @@
 export interface MaturityEvidence {
 	readonly at: string;
 	readonly source: string;
+	readonly summary: string;
 	readonly weight: number;
 	readonly qualified: boolean;
 	readonly actionable: boolean;
 	readonly relevance: number;
+	readonly contribution: number;
 }
 
 /** Inputs required to compute one agenda item maturity score. */

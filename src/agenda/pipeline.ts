@@ -99,12 +99,24 @@ export function runMaturationPipeline(
 	return { evaluatedItems, newCandidates, newAgendaProposals };
 }
 
-/** Merges existing and newly matched evidence, keeping source order. */
+/** Merges existing and newly matched evidence, dropping duplicates by source+summary. */
 function mergeEvidence(
 	existing: AgendaItem["evidence"],
 	fresh: AgendaItem["evidence"],
 ): AgendaItem["evidence"] {
-	return [...existing, ...fresh];
+	const seen = new Set(
+		existing.map((item) => `${item.source}:${item.summary}`),
+	);
+	const merged = [...existing];
+	for (const item of fresh) {
+		const key = `${item.source}:${item.summary}`;
+		if (seen.has(key)) {
+			continue;
+		}
+		seen.add(key);
+		merged.push(item);
+	}
+	return merged;
 }
 
 /** Counts evidence records with distinct sources. */

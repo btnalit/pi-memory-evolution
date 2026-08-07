@@ -47,6 +47,7 @@ export function matchSignalsToAgenda(
 		evidence.push({
 			at: signal.ts,
 			source: signal.type,
+			summary: serializeSignalSummary(signal),
 			weight,
 			qualified: classification.qualified,
 			actionable: classification.actionable,
@@ -87,4 +88,10 @@ function matchesSignal(
 /** Clamps an evidence weight into the allowed range. */
 function clampWeight(weight: number): number {
 	return Math.max(MIN_EVIDENCE_WEIGHT, Math.min(MAX_EVIDENCE_WEIGHT, weight));
+}
+
+/** Builds a stable evidence summary from one signal record. */
+function serializeSignalSummary(signal: SignalRecord): string {
+	const { ts: _ts, type: _type, source: _source, ...rest } = signal;
+	return JSON.stringify(rest);
 }

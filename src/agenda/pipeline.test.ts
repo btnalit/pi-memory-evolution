@@ -150,6 +150,59 @@ describe("runMaturationPipeline", () => {
 		}
 	});
 
+	test("reaches candidate_ready through real signals with distinct summaries", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			// An item observed for 21 days with matchers for feedback signals.
+			store.writeAgenda([
+				agendaItem({
+					firstSeenAt: "2026-07-15T00:00:00.000Z",
+					lastEvidenceAt: "2026-07-15T00:00:00.000Z",
+					evidenceMatchers: {
+						signalTypes: ["feedback"],
+						includeKeywords: [],
+						excludeKeywords: [],
+					},
+				}),
+			]);
+			// Five distinct feedback signals -> five distinct evidence summaries.
+			seedSignals(store, [
+				{ ts: "2026-08-01T00:00:00.000Z", type: "feedback", source: "turn_end", keywords: ["不对"] },
+				{ ts: "2026-08-02T00:00:00.000Z", type: "feedback", source: "turn_end", keywords: ["错误"] },
+				{ ts: "2026-08-03T00:00:00.000Z", type: "feedback", source: "turn_end", keywords: ["错了"] },
+				{ ts: "2026-08-03T00:00:00.000Z", type: "feedback", source: "turn_end", keywords: ["应该改成"] },
+				{ ts: "2026-08-04T00:00:00.000Z", type: "feedback", source: "turn_end", keywords: ["不要"] },
+			]);
+			const result = runMaturationPipeline(store, "2026-08-05T00:00:00.000Z");
+			assert.ok(result.newCandidates >= 1, "expected at least one matured candidate");
+			const items = store.readAgenda();
+			assert.equal(items[0].status, "candidate_ready");
+			const candidates = await readFile(
+				join(dir, "agenda_candidates.yaml"),
+				"utf8",
+			);
+			assert.ok(candidates.includes("candidate_ready"));
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("does not duplicate evidence across repeated runs", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeAgenda([agendaItem()]);
+			seedSignals(store, [
+				{ ts: "2026-08-02T00:00:00.000Z", type: "feedback", source: "turn_end", keywords: ["不对"] },
+			]);
+			runMaturationPipeline(store, "2026-08-05T00:00:00.000Z");
+			runMaturationPipeline(store, "2026-08-05T00:00:00.000Z");
+			const items = store.readAgenda();
+			assert.equal(items[0].counters.evidenceCount, 1);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("appends an audit line to the journal", async () => {
 		const { store, dir } = await createTempStore();
 		try {
