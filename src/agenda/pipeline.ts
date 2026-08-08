@@ -119,7 +119,7 @@ function mergeEvidence(
 	return merged;
 }
 
-/** Counts evidence records with distinct sources. */
+/** Counts evidence records with distinct source+summary pairs. */
 function countUniqueSources(
 	evidence: AgendaItem["evidence"],
 ): number {

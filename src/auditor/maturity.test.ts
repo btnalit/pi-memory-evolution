@@ -27,10 +27,12 @@ function evidence(
 	return {
 		at: "2026-08-05T00:00:00.000Z",
 		source: "feedback",
+		summary: "test evidence",
 		weight: 0.3,
 		qualified: true,
 		actionable: true,
 		relevance: 1.0,
+		contribution: 0.3,
 		...overrides,
 	};
 }
