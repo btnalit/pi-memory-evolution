@@ -168,22 +168,23 @@ flowchart LR
 - 可追溯：每个决策输出 `decision_reason` 步骤数组 + `would_have_spoken_without_quota`（区分"质量不够"和"容量不够"）
 - 输出动作：`speak_now` / `speak_now_with_approval` / `proposal_queue` / `daily_digest` / `silent_log_only` / `risk_alert_only`
 
-**提案状态机**（P5 已实施，自动审批闭环）：
+**提案状态机**（P5 已实施自动审批，P6 已实施 verified 信号 + 词边界加固）：
 
 ```
 pending_user_approval → approved | rejected   (agent 消息引用提案 id + 批准/拒绝关键词)
 pending_user_approval → rejected               (expires_at 到期未决策)
 approved → implemented                          (执行器生成执行计划文件)
 approved → rejected                             (手动/未来)
-implemented → verified | failed | rollback_required
+implemented → verified | failed | rollback_required   (verified：agent 消息 + 验证关键词)
 failed → rollback_required
 ```
 
 - 终态：`verified` / `rejected` / `rollback_required`；`draft` 保留供未来非交互路径
 - 审批窗口：创建时设定 `expires_at = createdAt + 24h`（Hermes 对齐）；无定时器，到期检查在 `agent_end` 事件边界完成
 - 审批通道：digest 的「Proposals Awaiting Approval」section 呈现待审提案（id/标题/expiry）；主 agent（LLM）在会话中引用提案 id 表达批准/拒绝，扩展在 `agent_end` 分析消息捕捉决策
-- 保守匹配：仅“提案 id + 明确关键词”触发决策；无决策不阻塞（到期自动拒绝兑底）
-- 安全论证：执行器是 record-first（只产出执行计划文件），审批误判风险有限（多/少一份计划文件，无行为副作用）
+- 保守匹配（P6 加固）：仅“提案 id + 明确关键词”触发决策；英文关键词词边界匹配（`approved`/`token`/`okay` 不误命中）；否定形态优先（`不执行`/`不批准` 判定拒绝，不因含 `执行`/`批准` 而误判）；矛盾表达（批准+拒绝词同现）→ 不决策，留给到期拒绝
+- verified 信号（P6）：implemented 提案由 agent 消息 + 验证关键词（`已验证`/`验证通过`/`verified`/`verification passed`）推进到 verified；本轮新 implemented 的提案下轮才可验证（需执行结果）
+- 安全论证：执行器是 record-first（只产出执行计划文件），审批/验证误判风险有限（多/少一份计划文件，无行为副作用）
 
 **安全边界**（写死，不靠提示词）：
 
@@ -197,9 +198,11 @@ failed → rollback_required
 
 - 批准的提案 → 生成 markdown 执行计划文件到 `executions/P-<id>.md`（本扩展自有目录）
 - 每个执行计划带：变更描述、`rollback` 方案、`verification` 方法、证据路径（Hermes 模板字段移植）、手动执行 checklist
+- **证据路径（P6）**：候选携带真实证据记录（pipeline 从议程项贯通），执行计划 Evidence section 引用真实收集的证据，不再恒为空
 - 真实行为变更保持手动：用户在扩展外按执行计划操作（不自动写配置/规则，安全边界不破）
 - 单提案写失败 → `failed`（journal 记录原因），其余提案继续执行；无 approved 提案 → 静默
-- 触发时机：`agent_end`（speak gate → 自动审批 → 执行器，同一事件边界）
+- **归档（P6）**：终态提案（verified/rejected/rollback_required）的执行计划移入 `executions/archive/`（journal 记录），保留 90 天后自动清除；implemented 的计划不归档（用户可能仍在手动执行）
+- 触发时机：`agent_end`（speak gate → 自动审批 → 验证信号 → 执行器 → 归档，同一事件边界）
 - 未来若 pi 暴露 rules 写入能力：可探测后升级为自动写回（探测式能力升级，不破坏现有流程）
 
 ### 4.8 注入器（injector/）— 闭环的"输出"端
@@ -375,6 +378,7 @@ pi-memory-evolution/
 | P3 | digest 注入 | 每次会话注入 <2KB digest，过期/空值静默跳过，子代理进程不注入 |
 | P4 | 议程 + speak gate | 候选正确分级，决策可追溯，配额生效，提案写入 `pending_user_approval`（审批移交 P5 自动通道） |
 | P5 | 进化执行 + 闭环 | ✅ 已实施：自动审批（digest 呈现 + agent 消息决策捕捉 + 24h 到期拒绝）+ record-first 执行器（`executions/` 执行计划文件） |
+| P6 | 加固 + 部署验证 | ✅ 已实施：词边界匹配 + 否定优先、evidence 携带、终态归档（90 天保留）、verified 信号触发 |
 
 P0-P1 是骨架，P2-P3 是观察能力，P4-P5 才引入"改变行为"的进化能力。**用户批准边界从 P0 就写死**，不后补。
 

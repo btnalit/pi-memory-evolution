@@ -10,6 +10,7 @@ Memory self-evolution system for the PI Coding Agent.
 - **P3** (done): runtime digest injection into every session (`before_agent_start`), <2KB, expiry-stamped, advisory-only
 - **P4** (done): speak gate consuming matured candidates — scoring, quotas, traceable decisions, proposal queue
 - **P5** (done): proposal lifecycle — auto-approval via agent messages (with 24h expiry), evolution executor writing record-first execution plans
+- **P6** (done): hardening — word-boundary approval matching, evidence carried into execution plans, archived terminal plans, verified signal trigger
 
 ## Features
 
@@ -39,11 +40,12 @@ State files are written to `~/.pi/agent/agent-suite/memory-evolution/`:
 memory-evolution/
 ├── signals.jsonl              # append-only signal records
 ├── self_agenda.yaml           # agenda items with maturity scores
-├── agenda_candidates.yaml     # matured candidates
+├── agenda_candidates.yaml     # matured candidates (with evidence records)
 ├── speak_decisions.jsonl      # traceable speak-gate decisions
 ├── speak_quota.json           # daily speak quota usage
 ├── proposal_queue.yaml        # proposals in lifecycle states
 ├── executions/                # record-first execution plans (one md per implemented proposal)
+│   └── archive/               # plans of terminal proposals (auto-purged after 90 days)
 └── evolution_journal.md       # audit trail
 ```
 
@@ -95,16 +97,18 @@ pending_user_approval → approved | rejected   (agent references the proposal i
 pending_user_approval → rejected               (expired without a decision)
 approved → implemented                          (executor writes an execution plan)
 approved → rejected                             (manual)
-implemented → verified | failed | rollback_required
+implemented → verified | failed | rollback_required   (verified via agent message with a verification keyword)
 failed → rollback_required
 ```
 
 Approval flow:
 
 1. The digest lists pending proposals as `Proposals Awaiting Approval` with their id and expiry.
-2. The agent approves or rejects one by mentioning its id together with a keyword (e.g. `批准 P-20260805-0001` or `拒绝 P-20260805-0001`) in a session message.
+2. The agent approves or rejects one by mentioning its id together with a keyword (e.g. `批准 P-20260805-0001` or `拒绝 P-20260805-0001`) in a session message. English keywords are word-boundary matched (`approved`/`token`/`okay` do not trigger); negated forms (`不执行`/`不批准`) reject instead of approve.
 3. Unexpired proposals without a decision stay pending; expired ones are auto-rejected.
-4. Approved proposals are executed by writing a markdown execution plan to `executions/P-<id>.md` (change, rollback, verification, evidence, manual checklist). Execution is record-first: the plan is the deliverable, and real behavior changes are applied by the user outside the extension.
+4. Approved proposals are executed by writing a markdown execution plan to `executions/P-<id>.md` (change, rollback, verification, evidence, manual checklist). The plan's evidence section cites the real collected evidence records. Execution is record-first: the plan is the deliverable, and real behavior changes are applied by the user outside the extension.
+5. Once the user has executed the plan, the agent verifies the proposal by mentioning its id with a verification keyword (e.g. `已验证 P-20260805-0001`) — it advances to `verified`.
+6. Plans of terminal proposals (verified/rejected/rollback_required) are moved to `executions/archive/` and auto-purged after 90 days. Implemented plans stay active for manual execution.
 
 ## Design
 
