@@ -114,12 +114,23 @@ export interface SpeakDecision {
 	readonly decisionReason: readonly string[];
 }
 
-/** One user-approved proposal waiting for lifecycle handling (P5). */
+/** Lifecycle states of one proposal (approved P5 plan). */
+export type ProposalStatus =
+	| "draft"
+	| "pending_user_approval"
+	| "approved"
+	| "implemented"
+	| "verified"
+	| "rejected"
+	| "failed"
+	| "rollback_required";
+
+/** One proposal waiting for approval and lifecycle handling. */
 export interface ProposalRecord {
 	readonly id: string;
 	readonly title: string;
 	readonly type: string;
-	readonly status: string;
+	readonly status: ProposalStatus;
 	readonly evidence: readonly AgendaEvidence[];
 	readonly approval: {
 		readonly required: boolean;
@@ -129,6 +140,7 @@ export interface ProposalRecord {
 	readonly timestamps: {
 		readonly createdAt: string;
 		readonly updatedAt: string;
+		readonly expiresAt: string;
 	};
 }
 
@@ -148,6 +160,8 @@ export interface AgendaStore {
 	appendDecision(decision: SpeakDecision): void;
 	readProposalQueue(): ProposalRecord[];
 	writeProposalQueue(proposals: readonly ProposalRecord[]): void;
+	writeExecutionPlan(planId: string, content: string): void;
+	readExecutionPlan(planId: string): string | undefined;
 }
 
 /** Creates an agenda store writing into the given state directory. */
@@ -171,6 +185,10 @@ export function createAgendaStore(stateDir: string): AgendaStore {
 		readProposalQueue: () => readProposalQueue(stateDir),
 		writeProposalQueue: (proposals) =>
 			writeProposalQueue(stateDir, proposals),
+		writeExecutionPlan: (planId, content) =>
+			writeExecutionPlan(stateDir, planId, content),
+		readExecutionPlan: (planId) =>
+			readExecutionPlan(stateDir, planId),
 	};
 }
 
@@ -336,6 +354,32 @@ function writeProposalQueue(
 			2,
 		)}\n`,
 	);
+}
+
+/** Subdirectory holding one markdown execution plan per implemented proposal. */
+const EXECUTIONS_DIR = "executions";
+
+/** Writes one execution plan markdown file for a proposal. */
+function writeExecutionPlan(
+	stateDir: string,
+	planId: string,
+	content: string,
+): void {
+	ensureStateDir(stateDir);
+	mkdirSync(join(stateDir, EXECUTIONS_DIR), { recursive: true });
+	writeFileSync(
+		join(stateDir, EXECUTIONS_DIR, `${planId}.md`),
+		content,
+	);
+}
+
+/** Reads one execution plan markdown file, or undefined when missing. */
+function readExecutionPlan(stateDir: string, planId: string): string | undefined {
+	const file = join(stateDir, EXECUTIONS_DIR, `${planId}.md`);
+	if (!fileExists(file)) {
+		return undefined;
+	}
+	return readFileSync(file, "utf8");
 }
 
 /** Reads every line of a JSONL file as parsed records. */

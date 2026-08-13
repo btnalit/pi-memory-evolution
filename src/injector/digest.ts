@@ -1,5 +1,6 @@
 import type {
 	AgendaCandidate,
+	ProposalRecord,
 	SpeakDecision,
 } from "../store/agenda-store.ts";
 
@@ -8,6 +9,7 @@ export interface DigestInput {
 	readonly now: string;
 	readonly candidates: readonly AgendaCandidate[];
 	readonly decisions: readonly SpeakDecision[];
+	readonly proposals: readonly ProposalRecord[];
 }
 
 /** Maximum digest size in characters (~2KB token budget). */
@@ -18,7 +20,14 @@ const DIGEST_VALID_HOURS = 24;
 
 /** Builds the session-injected runtime digest, or undefined when empty. */
 export function buildRuntimeDigest(input: DigestInput): string | undefined {
-	if (input.candidates.length === 0 && input.decisions.length === 0) {
+	const pendingProposals = input.proposals.filter(
+		(proposal) => proposal.status === "pending_user_approval",
+	);
+	if (
+		input.candidates.length === 0 &&
+		input.decisions.length === 0 &&
+		pendingProposals.length === 0
+	) {
 		return undefined;
 	}
 
@@ -43,6 +52,16 @@ export function buildRuntimeDigest(input: DigestInput): string | undefined {
 		for (const decision of input.decisions.slice(0, 3)) {
 			lines.push(
 				`- ${decision.title} → ${decision.action} (priority=${decision.priorityScore.toFixed(2)})`,
+			);
+		}
+		lines.push("");
+	}
+
+	if (pendingProposals.length > 0) {
+		lines.push("## Proposals Awaiting Approval");
+		for (const proposal of pendingProposals.slice(0, 3)) {
+			lines.push(
+				`- **${proposal.id}** ${proposal.title} (expires ${formatStamp(proposal.timestamps.expiresAt)})`,
 			);
 		}
 		lines.push("");

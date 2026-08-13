@@ -1,14 +1,18 @@
 import type {
 	AgendaCandidate,
 	AgendaEvidence,
+	ProposalStatus,
 } from "../store/agenda-store.ts";
 
-/** One user-approved proposal waiting for lifecycle handling (P5). */
+/** Hours until a pending proposal expires without an approval decision. */
+export const PROPOSAL_APPROVAL_HOURS = 24;
+
+/** One proposal waiting for user approval (approved P5 plan). */
 export interface ProposalDraft {
 	readonly id: string;
 	readonly title: string;
 	readonly type: string;
-	readonly status: "draft";
+	readonly status: ProposalStatus;
 	readonly evidence: readonly AgendaEvidence[];
 	readonly approval: {
 		readonly required: true;
@@ -18,10 +22,11 @@ export interface ProposalDraft {
 	readonly timestamps: {
 		readonly createdAt: string;
 		readonly updatedAt: string;
+		readonly expiresAt: string;
 	};
 }
 
-/** Creates a draft proposal from a user-approved agenda candidate. */
+/** Creates a pending proposal from a speak-gate approved agenda candidate. */
 export function createProposalFromCandidate(
 	candidate: AgendaCandidate,
 	evidence: readonly AgendaEvidence[],
@@ -31,7 +36,7 @@ export function createProposalFromCandidate(
 		id: `P-${now.replace(/\D/g, "").slice(0, 8)}-${randomSuffix()}`,
 		title: candidate.title,
 		type: candidate.type,
-		status: "draft",
+		status: "pending_user_approval",
 		evidence: [...evidence],
 		approval: {
 			required: true,
@@ -41,6 +46,9 @@ export function createProposalFromCandidate(
 		timestamps: {
 			createdAt: now,
 			updatedAt: now,
+			expiresAt: new Date(
+				Date.parse(now) + PROPOSAL_APPROVAL_HOURS * 3_600_000,
+			).toISOString(),
 		},
 	};
 }

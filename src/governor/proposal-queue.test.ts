@@ -37,19 +37,19 @@ function evidenceItem(): AgendaEvidence {
 }
 
 describe("createProposalFromCandidate", () => {
-	test("creates a draft proposal with candidate identity", () => {
+	test("creates a pending proposal awaiting user approval", () => {
 		const proposal = createProposalFromCandidate(
 			approvedCandidate(),
 			[evidenceItem()],
 			"2026-08-05T00:00:00.000Z",
 		);
-		assert.equal(proposal.status, "draft");
+		assert.equal(proposal.status, "pending_user_approval");
 		assert.equal(proposal.title, "测试候选");
 		assert.equal(proposal.type, "quality_improvement");
 		assert.ok(proposal.id.startsWith("P-"));
 	});
 
-	test("requires approval and records approval fields as null", () => {
+	test("requires approval and leaves approval fields null until decided", () => {
 		const proposal = createProposalFromCandidate(
 			approvedCandidate(),
 			[evidenceItem()],
@@ -58,6 +58,15 @@ describe("createProposalFromCandidate", () => {
 		assert.equal(proposal.approval.required, true);
 		assert.equal(proposal.approval.approvedBy, null);
 		assert.equal(proposal.approval.approvedAt, null);
+	});
+
+	test("sets an expiry 24 hours after creation", () => {
+		const proposal = createProposalFromCandidate(
+			approvedCandidate(),
+			[],
+			"2026-08-05T00:00:00.000Z",
+		);
+		assert.equal(proposal.timestamps.expiresAt, "2026-08-06T00:00:00.000Z");
 	});
 
 	test("carries candidate evidence into the proposal", () => {
@@ -100,7 +109,7 @@ describe("ProposalDraft shape", () => {
 		assert.ok(id.length > 0);
 		assert.equal(typeof title, "string");
 		assert.equal(typeof type, "string");
-		assert.equal(status, "draft");
+		assert.equal(status, "pending_user_approval");
 		assert.ok(Array.isArray(evidence));
 		assert.equal(typeof approval.required, "boolean");
 		assert.equal(typeof timestamps.createdAt, "string");

@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { buildRuntimeDigest, type DigestInput } from "./digest.ts";
 import type {
 	AgendaCandidate,
+	ProposalRecord,
 	SpeakDecision,
 } from "../store/agenda-store.ts";
 
@@ -12,6 +13,7 @@ function baseInput(overrides: Partial<DigestInput> = {}): DigestInput {
 		now: "2026-08-13T04:00:00.000Z",
 		candidates: [],
 		decisions: [],
+		proposals: [],
 		...overrides,
 	};
 }
@@ -36,12 +38,30 @@ function pendingCandidate(): AgendaCandidate {
 function approvedDecision(): SpeakDecision {
 	return {
 		candidateId: "C-000001",
+		agendaId: "A-000001",
 		title: "测试候选",
 		priorityScore: 0.7,
 		speakScore: 0.65,
 		action: "speak_now",
 		wouldHaveSpokenWithoutQuota: false,
 		decisionReason: ["weighted = 0.7"],
+	};
+}
+
+/** Builds one proposal awaiting user approval. */
+function pendingProposal(): ProposalRecord {
+	return {
+		id: "P-20260805-0001",
+		title: "测试提案",
+		type: "quality_improvement",
+		status: "pending_user_approval",
+		evidence: [],
+		approval: { required: true, approvedBy: null, approvedAt: null },
+		timestamps: {
+			createdAt: "2026-08-05T00:00:00.000Z",
+			updatedAt: "2026-08-05T00:00:00.000Z",
+			expiresAt: "2026-08-06T00:00:00.000Z",
+		},
 	};
 }
 
@@ -66,6 +86,21 @@ describe("buildRuntimeDigest", () => {
 		);
 		assert.ok(digest !== undefined);
 		assert.ok(digest.includes("speak_now"));
+	});
+
+	test("includes a pending-approval proposal section with id and expiry", () => {
+		const digest = buildRuntimeDigest(
+			baseInput({ proposals: [pendingProposal()] }),
+		);
+		assert.ok(digest !== undefined);
+		assert.ok(digest.includes("P-20260805-0001"));
+		assert.ok(digest.includes("测试提案"));
+		assert.ok(digest.includes("2026-08-06"));
+	});
+
+	test("omits the pending-approval section when no proposal exists", () => {
+		const digest = buildRuntimeDigest(baseInput());
+		assert.equal(digest, undefined);
 	});
 
 	test("stays below the 2KB budget", () => {

@@ -160,16 +160,44 @@ describe("AgendaStore proposal queue", () => {
 				id: "P-20260805-0001",
 				title: "测试提案",
 				type: "quality_improvement",
-				status: "draft",
+				status: "pending_user_approval",
 				evidence: [],
 				approval: { required: true, approvedBy: null, approvedAt: null },
-				timestamps: { createdAt: "2026-08-05T00:00:00.000Z", updatedAt: "2026-08-05T00:00:00.000Z" },
+				timestamps: {
+					createdAt: "2026-08-05T00:00:00.000Z",
+					updatedAt: "2026-08-05T00:00:00.000Z",
+					expiresAt: "2026-08-06T00:00:00.000Z",
+				},
 			};
 			store.writeProposalQueue([proposal]);
 			const loaded = store.readProposalQueue();
 			assert.equal(loaded.length, 1);
 			assert.equal(loaded[0].id, "P-20260805-0001");
-			assert.equal(loaded[0].status, "draft");
+			assert.equal(loaded[0].status, "pending_user_approval");
+			assert.equal(loaded[0].timestamps.expiresAt, "2026-08-06T00:00:00.000Z");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("AgendaStore execution plans", () => {
+	test("returns undefined when an execution plan does not exist", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			assert.equal(store.readExecutionPlan("P-20260805-0001"), undefined);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("round-trips an execution plan through executions/", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			const markdown = "# Execution Plan\n\n- proposal: P-20260805-0001\n";
+			store.writeExecutionPlan("P-20260805-0001", markdown);
+			const loaded = store.readExecutionPlan("P-20260805-0001");
+			assert.equal(loaded, markdown);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
