@@ -109,6 +109,46 @@ describe("runAutoApproval decision capture", () => {
 			await rm(dir, { recursive: true, force: true });
 		}
 	});
+
+	test("ignores tool result messages so data output cannot trigger approval", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeProposalQueue([pendingProposal()]);
+			// A tool result dumping proposal_queue.yaml contains the pending id
+			// and another proposal's "approved" status; it must not decide.
+			const toolDump = JSON.stringify({
+				version: 1,
+				proposals: [
+					{ id: "P-20260805-0001", title: "x", status: "approved" },
+				],
+			});
+			await runAutoApproval(
+				store,
+				[message("toolResult", toolDump)],
+				"2026-08-05T12:00:00.000Z",
+			);
+			const [proposal] = store.readProposalQueue();
+			assert.equal(proposal.status, "pending_user_approval");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("captures decisions from user messages as well as assistant messages", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeProposalQueue([pendingProposal()]);
+			await runAutoApproval(
+				store,
+				[message("user", "我批准 P-20260805-0001")],
+				"2026-08-05T12:00:00.000Z",
+			);
+			const [proposal] = store.readProposalQueue();
+			assert.equal(proposal.status, "approved");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("runAutoApproval expiry policy", () => {

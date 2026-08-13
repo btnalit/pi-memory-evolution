@@ -25,16 +25,18 @@ const REJECT_KEYWORDS = [
 	"不执行",
 ] as const;
 
-/** Minimum prefix of a proposal id referenced inside a message. */
-const PROPOSAL_ID_PREFIX = "P-";
+/** Roles whose messages may carry an approval decision. Tool output is data, not intent. */
+const DECISION_ROLES = new Set(["assistant", "user"]);
 
 /**
  * Decides pending proposals from agent messages and expiry.
  *
- * Decision capture: a message that references a proposal id AND carries an
- * explicit approval/rejection keyword moves that proposal forward. Messages
- * without the id never decide. Proposals past `expiresAt` are rejected.
- * Proposals that stay unexpired and undecided remain pending.
+ * Decision capture: only assistant/user messages that reference a proposal id
+ * AND carry an explicit approval/rejection keyword move that proposal forward.
+ * Tool result messages are excluded so data output (e.g. a queue dump) can
+ * never trigger a decision. Messages without the id never decide. Proposals
+ * past `expiresAt` are rejected. Proposals that stay unexpired and undecided
+ * remain pending.
  */
 export function runAutoApproval(
 	store: AgendaStore,
@@ -42,7 +44,10 @@ export function runAutoApproval(
 	now: string,
 ): void {
 	const queue = store.readProposalQueue();
-	const texts = messages.map(messageText).filter((text) => text.length > 0);
+	const texts = messages
+		.filter((message) => DECISION_ROLES.has(message.role))
+		.map(messageText)
+		.filter((text) => text.length > 0);
 	let changed = false;
 
 	const updated = queue.map((proposal) => {
