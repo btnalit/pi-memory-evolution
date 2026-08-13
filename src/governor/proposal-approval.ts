@@ -10,20 +10,32 @@ import { transitionProposal } from "./proposal-state.ts";
 const APPROVE_KEYWORDS = [
 	"批准",
 	"同意",
-	"approve",
-	"ok",
 	"可以",
 	"执行",
+] as const;
+
+/** Negated approval forms that must reject, not approve. */
+const NEGATED_APPROVALS = [
+	"不批准",
+	"不同意",
+	"不可以",
+	"不执行",
 ] as const;
 
 /** Keywords that indicate the agent rejects a referenced proposal. */
 const REJECT_KEYWORDS = [
 	"拒绝",
 	"驳回",
-	"reject",
 	"不要",
+	"不批准",
+	"不同意",
+	"不可以",
 	"不执行",
 ] as const;
+
+/** English keywords matched on word boundaries so "approved"/"token" do not hit. */
+const APPROVE_PATTERNS = [/\bapprove\b/i, /\bok\b/i] as const;
+const REJECT_PATTERNS = [/\breject\b/i] as const;
 
 /** Roles whose messages may carry an approval decision. Tool output is data, not intent. */
 const DECISION_ROLES = new Set(["assistant", "user"]);
@@ -86,10 +98,10 @@ function decideFromMessages(
 ): ProposalStatus | undefined {
 	const id = proposal.id;
 	const approving = texts.some(
-		(text) => text.includes(id) && APPROVE_KEYWORDS.some((kw) => text.includes(kw)),
+		(text) => text.includes(id) && hasApprovalIntent(text),
 	);
 	const rejecting = texts.some(
-		(text) => text.includes(id) && REJECT_KEYWORDS.some((kw) => text.includes(kw)),
+		(text) => text.includes(id) && hasRejectionIntent(text),
 	);
 	if (approving && !rejecting) {
 		return "approved";
@@ -98,6 +110,24 @@ function decideFromMessages(
 		return "rejected";
 	}
 	return undefined;
+}
+
+/** Returns true when the text carries an approval intent (negations excluded). */
+function hasApprovalIntent(text: string): boolean {
+	const stripped = NEGATED_APPROVALS.reduce(
+		(acc, negated) => acc.split(negated).join(""),
+		text,
+	);
+	const chineseHit = APPROVE_KEYWORDS.some((kw) => stripped.includes(kw));
+	const englishHit = APPROVE_PATTERNS.some((pattern) => pattern.test(stripped));
+	return chineseHit || englishHit;
+}
+
+/** Returns true when the text carries a rejection intent. */
+function hasRejectionIntent(text: string): boolean {
+	const chineseHit = REJECT_KEYWORDS.some((kw) => text.includes(kw));
+	const englishHit = REJECT_PATTERNS.some((pattern) => pattern.test(text));
+	return chineseHit || englishHit;
 }
 
 /** Returns true when the proposal approval window has passed. */

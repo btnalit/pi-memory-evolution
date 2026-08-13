@@ -149,6 +149,88 @@ describe("runAutoApproval decision capture", () => {
 			await rm(dir, { recursive: true, force: true });
 		}
 	});
+
+	test("does not approve when a message only echoes an approved status", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeProposalQueue([pendingProposal()]);
+			// "approved" must not match the approve keyword (word boundary).
+			await runAutoApproval(
+				store,
+				[message("assistant", "P-20260805-0001 状态是 approved")],
+				"2026-08-05T12:00:00.000Z",
+			);
+			const [proposal] = store.readProposalQueue();
+			assert.equal(proposal.status, "pending_user_approval");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("does not treat token/okay as an ok approval", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeProposalQueue([pendingProposal()]);
+			await runAutoApproval(
+				store,
+				[message("assistant", "P-20260805-0001 的 token 计数 okay")],
+				"2026-08-05T12:00:00.000Z",
+			);
+			const [proposal] = store.readProposalQueue();
+			assert.equal(proposal.status, "pending_user_approval");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("rejects when an approval keyword appears negated", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeProposalQueue([pendingProposal()]);
+			// "不执行" contains "执行" but must reject, not approve (negation priority).
+			await runAutoApproval(
+				store,
+				[message("assistant", "不执行 P-20260805-0001")],
+				"2026-08-05T12:00:00.000Z",
+			);
+			const [proposal] = store.readProposalQueue();
+			assert.equal(proposal.status, "rejected");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("rejects when 不批准 appears", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeProposalQueue([pendingProposal()]);
+			await runAutoApproval(
+				store,
+				[message("user", "不批准 P-20260805-0001")],
+				"2026-08-05T12:00:00.000Z",
+			);
+			const [proposal] = store.readProposalQueue();
+			assert.equal(proposal.status, "rejected");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("stays undecided on contradictory approval and rejection", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeProposalQueue([pendingProposal()]);
+			await runAutoApproval(
+				store,
+				[message("assistant", "拒绝但批准 P-20260805-0001")],
+				"2026-08-05T12:00:00.000Z",
+			);
+			const [proposal] = store.readProposalQueue();
+			assert.equal(proposal.status, "pending_user_approval");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("runAutoApproval expiry policy", () => {
