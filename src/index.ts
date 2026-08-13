@@ -155,6 +155,25 @@ function handleAgentEnd(store: AgendaStore, messages: AgentEndEvent["messages"])
 			count: projectionCount,
 		});
 	}
+
+	// Real pi sends the user input inside agent_end.messages; turn_end.message
+	// carries the assistant reply instead, so user corrections are extracted
+	// from the agent batch here.
+	for (const message of messages) {
+		if (message.role !== "user") {
+			continue;
+		}
+		const keywords = extractCorrectionKeywords(message);
+		if (keywords.length === 0) {
+			continue;
+		}
+		store.appendSignal({
+			ts: nowIso(),
+			type: "feedback",
+			source: "agent_end",
+			keywords: [...keywords],
+		});
+	}
 }
 
 /** Records user correction feedback from one turn message. */

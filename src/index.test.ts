@@ -232,6 +232,66 @@ describe("memoryEvolution extension entry (P1)", () => {
 		}
 	});
 
+	test("collects feedback from user messages inside the agent_end batch", async () => {
+		const stateDir = await createTempStateDir();
+		try {
+			const { pi, registered } = recordingPi();
+			memoryEvolution(pi as ExtensionAPI, { stateDir, env: {} });
+			await trigger(registered, "session_compact", [
+				{ type: "session_compact", reason: "threshold", fromExtension: false },
+			]);
+			// Real pi: agent_end.messages carries the full batch including the user
+			// correction; turn_end.message is the assistant reply, not the user input.
+			const messages = [
+				{ role: "user", content: "这个方案不对，应该改成本地优先", timestamp: 1 },
+				{ role: "assistant", content: "好的，我调整方案。", timestamp: 2 },
+			];
+			await trigger(registered, "agent_end", [
+				{ type: "agent_end", messages },
+				mockCtx(),
+			]);
+			const content = await readFile(join(stateDir, "signals.jsonl"), "utf8");
+			const records = content
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			const feedback = records.find((r) => r.type === "feedback");
+			assert.ok(feedback !== undefined);
+			assert.ok(feedback.keywords.includes("不对"));
+			assert.ok(feedback.keywords.includes("应该改成"));
+		} finally {
+			await rm(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	test("does not collect feedback when the agent_end batch has no user correction", async () => {
+		const stateDir = await createTempStateDir();
+		try {
+			const { pi, registered } = recordingPi();
+			memoryEvolution(pi as ExtensionAPI, { stateDir, env: {} });
+			await trigger(registered, "session_compact", [
+				{ type: "session_compact", reason: "threshold", fromExtension: false },
+			]);
+			const messages = [
+				{ role: "user", content: "继续吧", timestamp: 1 },
+				{ role: "assistant", content: "好的。", timestamp: 2 },
+			];
+			await trigger(registered, "agent_end", [
+				{ type: "agent_end", messages },
+				mockCtx(),
+			]);
+			const content = await readFile(join(stateDir, "signals.jsonl"), "utf8");
+			const records = content
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			const feedback = records.find((r) => r.type === "feedback");
+			assert.equal(feedback, undefined);
+		} finally {
+			await rm(stateDir, { recursive: true, force: true });
+		}
+	});
+
 	test("writes a journal entry on session shutdown", async () => {
 		const stateDir = await createTempStateDir();
 		try {
