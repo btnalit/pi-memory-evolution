@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), grouped 
 - Evidence contribution derived as `weight × relevance` (replaces hardcoded 0) and read into maturity scoring
 - Configurable speak-gate thresholds (`thresholds.json`): speakThreshold / priorityQueueThreshold / dailyDigestThreshold / suggestionLimit / strategicLimit, defaulting to Hermes values
 - Real-environment drill evidence: current pi session verified to emit agent_end signals and maturation runs in real time
+- Real pi compact fix: rpc sessions now compact successfully via multi-message accumulation (10+ alternating turns), firing a real session_compact event
 
 ### Changed
 
@@ -19,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), grouped 
 ### Fixed
 
 - Contribution field was a hardcoded 0 in evidence records (P2 gap)
+- Feedback collection (P1 gap): real pi `turn_end.message` carries the assistant reply, not the user input, so correction keywords were never extracted in production; feedback is now collected from user-role messages in the `agent_end` batch (verified in a real rpc session)
 
 ## [P7] - 2026-08-13
 

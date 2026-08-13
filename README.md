@@ -59,10 +59,10 @@ memory-evolution/
 ```json
 {"version":1,"ts":"2026-08-04T00:00:00.000Z","type":"session_stats","source":"agent_end","messageCount":3,"userCount":1,"assistantCount":1,"toolResultCount":1,"toolCallCount":1}
 {"version":1,"ts":"2026-08-04T00:00:00.000Z","type":"projection","source":"agent_end","count":2}
-{"version":1,"ts":"2026-08-04T00:00:00.000Z","type":"feedback","source":"turn_end","keywords":["不对"]}
+{"version":1,"ts":"2026-08-04T00:00:00.000Z","type":"feedback","source":"agent_end","keywords":["不对"]}
 ```
 
-Record types: `session_stats` (message/role/tool-call counts), `projection` (omitted or summarized tool results), `feedback` (user correction keywords).
+Record types: `session_stats` (message/role/tool-call counts), `projection` (omitted or summarized tool results), `feedback` (user correction keywords). Feedback keywords are extracted from user-role messages in the `agent_end` batch — pi's `turn_end` message is the assistant reply, so collection happens at agent end (P8 fix).
 
 ## Maturity scoring
 

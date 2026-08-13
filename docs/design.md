@@ -267,8 +267,10 @@ state/memory-evolution/
 **P8 真实演练实证（本仓库运行环境 = 当前 pi 交互会话）**：
 
 - ✅ 已验证：当前会话（真实 pi 交互）中 `agent_end` 实时写 `session_stats` 信号（signals.jsonl 随会话持续增长）、`maturation run` 每次 agent_end 触发（journal 实时记录）——事件链真实工作
-- ⚠️ 已验证：rpc 独立进程无法产生 feedback——`collectionEnabled` 是进程内内存标志（每个 pi 进程独立），rpc 会话自动压缩触发不可靠（P6 L3 偶发成功、后续全失败）、手动 `compact` 报 "session too small" → 纠正消息未被采集
-- ⛔ 待真实用户配合：feedback 信号只能来自**当前主会话的真实 user 消息**（`extractCorrectionKeywords` 仅处理 user 角色）——真实用户在当前会话表达纠正（如"这个方案不对"）即产生真实 feedback → 议程项 → 候选 → speak gate 全链
+- ✅ compact 修复（P8）：rpc 会话多消息累积（≥10 条交替 user/assistant）后 `compact` 成功 → `session_compact` 事件 → `collectionEnabled` 置 true（journal 记录 `signal collection enabled after session compaction`）；单条大输入无效（cut 点落在第一条 user 消息前仅元数据 entry，`messagesToSummarize` 为空）
+- ✅ **P1 采集缺陷发现与修复（P8）**：真实 pi 的 `turn_end` 事件携带 **assistant 回复**（agent-loop.js 实证），而非 user 输入 → 原 `turn_end` 通道永不采集 feedback；修复为从 `agent_end.messages`（含完整 user 输入）提取纠正关键词——真实 rpc 会话验证 feedback 信号出现（keywords=[不对,应该改成]）
+- ⛔ 议程聚类需 ≥3 条同类型信号且跨 ≥2 天（cluster.ts MIN_CLUSTER_SIGNALS=3 / MIN_DISTINCT_DAYS=2）——单会话内无法满足，符合 shadow 校准期纪律（design.md:159 2-3 天）；本次演练验证到 feedback 信号产生，议程/候选/提案链需真实交互多日积累
+- ⚠️ 已验证：rpc 独立进程可触发事件链（compact → session_compact → collectionEnabled → agent_end → feedback），但 `collectionEnabled` 是进程内内存标志（每个 pi 进程独立）
 
 ---
 
