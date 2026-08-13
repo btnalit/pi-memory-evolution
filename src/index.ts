@@ -21,6 +21,8 @@ import { getStateDir } from "./store/state-store.ts";
 import { runMaturationPipeline } from "./agenda/pipeline.ts";
 import { evaluateCandidate } from "./governor/speak-gate.ts";
 import { createProposalFromCandidate } from "./governor/proposal-queue.ts";
+import { runAutoApproval } from "./governor/proposal-approval.ts";
+import { executeApprovedProposals } from "./executor/proposal-executor.ts";
 import { buildRuntimeDigest } from "./injector/digest.ts";
 
 /** Event hook name that carries the assembled system prompt into every session. */
@@ -70,13 +72,16 @@ export default function memoryEvolution(
 			collectionEnabled = true;
 		});
 	});
-	registerHook(pi, AGENT_END_EVENT, async (event, ctx) => {
+	registerHook(pi, AGENT_END_EVENT, async (event, _ctx) => {
 		if (!collectionEnabled) {
 			return;
 		}
-		handleAgentEnd(store, (event as AgentEndEvent).messages);
+		const messages = (event as AgentEndEvent).messages;
+		handleAgentEnd(store, messages);
 		maybeRunEvaluation(store);
-		await runSpeakGate(store, ctx);
+		runSpeakGate(store);
+		runAutoApproval(store, messages, nowIso());
+		executeApprovedProposals(store, nowIso());
 	});
 	registerHook(pi, TURN_END_EVENT, (event) => {
 		if (!collectionEnabled) {
@@ -187,8 +192,8 @@ function maybeRunEvaluation(store: AgendaStore): void {
 	runMaturationPipeline(store, nowIso());
 }
 
-/** Evaluates pending candidates through the speak gate and asks the user to approve. */
-async function runSpeakGate(store: AgendaStore, ctx: unknown): Promise<void> {
+/** Evaluates pending candidates through the speak gate and writes pending proposals. */
+function runSpeakGate(store: AgendaStore): void {
 	const candidates = store.readCandidates();
 	if (candidates.length === 0) {
 		return;
@@ -206,14 +211,12 @@ async function runSpeakGate(store: AgendaStore, ctx: unknown): Promise<void> {
 		store.appendDecision(result.decision);
 		quota = result.quota;
 		if (result.quotaConsumed && result.decision.action !== "risk_alert_only") {
-			const approved = await awaitConfirm(ctx, candidate.suggestedMessage);
-			if (approved) {
-				const proposal = createProposalFromCandidate(candidate, [], nowIso());
-				store.writeProposalQueue([
-					...store.readProposalQueue(),
-					proposal,
-				]);
-			}
+			// Q4-1: approval is deferred to the auto-approval channel; no ui.confirm here.
+			const proposal = createProposalFromCandidate(candidate, [], nowIso());
+			store.writeProposalQueue([
+				...store.readProposalQueue(),
+				proposal,
+			]);
 		}
 		markSurfaced(store, candidate.agendaId);
 	}
@@ -236,20 +239,6 @@ function markSurfaced(store: AgendaStore, agendaId: string): void {
 	}
 }
 
-/** Shows the approval dialog and resolves false when no UI is available. */
-async function awaitConfirm(ctx: unknown, message: string): Promise<boolean> {
-	const ui = (ctx as { ui?: { confirm?: (title: string, msg: string) => Promise<boolean> } })
-		?.ui;
-	if (ui?.confirm === undefined) {
-		return false;
-	}
-	try {
-		return await ui.confirm("Memory Evolution", message);
-	} catch {
-		return false;
-	}
-}
-
 /** Appends the runtime digest to the assembled system prompt when available. */
 function injectRuntimeDigest(
 	store: AgendaStore,
@@ -265,6 +254,7 @@ function injectRuntimeDigest(
 		now: nowIso(),
 		candidates: pendingCandidates,
 		decisions: store.readDecisions().slice(-3),
+		proposals: store.readProposalQueue(),
 	});
 	if (digest === undefined) {
 		return undefined;

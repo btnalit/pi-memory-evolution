@@ -336,7 +336,7 @@ describe("memoryEvolution extension entry (P3/P4 speak gate + digest)", () => {
 		]);
 	}
 
-	test("writes a proposal to the queue after ui.confirm approval", async () => {
+	test("writes a pending proposal after speak gate without ui.confirm", async () => {
 		const stateDir = await createTempStateDir();
 		try {
 			const { pi, registered } = recordingPi();
@@ -345,21 +345,23 @@ describe("memoryEvolution extension entry (P3/P4 speak gate + digest)", () => {
 			await trigger(registered, "session_compact", [
 				{ type: "session_compact", reason: "threshold", fromExtension: false },
 			]);
+			// No UI context: approval is deferred to the auto-approval channel (Q4-1).
 			await trigger(registered, "agent_end", [
 				{ type: "agent_end", messages: agentMessages() },
-				mockCtx("/tmp/project", true),
+				mockCtx("/tmp/project", false),
 			]);
 			const queue = await readFile(
 				join(stateDir, "proposal_queue.yaml"),
 				"utf8",
 			);
 			assert.ok(queue.includes("测试候选"));
+			assert.ok(queue.includes("pending_user_approval"));
 		} finally {
 			await rm(stateDir, { recursive: true, force: true });
 		}
 	});
 
-	test("does not write a proposal when ui.confirm is rejected", async () => {
+	test("advances a pending proposal through approval to implemented on agent_end", async () => {
 		const stateDir = await createTempStateDir();
 		try {
 			const { pi, registered } = recordingPi();
@@ -368,14 +370,62 @@ describe("memoryEvolution extension entry (P3/P4 speak gate + digest)", () => {
 			await trigger(registered, "session_compact", [
 				{ type: "session_compact", reason: "threshold", fromExtension: false },
 			]);
+			// First agent_end: speak gate writes a pending proposal.
 			await trigger(registered, "agent_end", [
 				{ type: "agent_end", messages: agentMessages() },
-				mockCtx("/tmp/project", false),
+				mockCtx(),
 			]);
-			await assert.rejects(
-				readFile(join(stateDir, "proposal_queue.yaml"), "utf8"),
-				{ code: "ENOENT" },
+			const store = createAgendaStore(stateDir);
+			const [pending] = store.readProposalQueue();
+			assert.equal(pending.status, "pending_user_approval");
+			// Second agent_end: the agent message approves the proposal by id.
+			const approving = agentMessages().map((message) =>
+				message.role === "assistant"
+					? { ...message, content: [{ type: "text", text: `批准 ${pending.id} 这个提案` }] }
+					: message,
 			);
+			await trigger(registered, "agent_end", [
+				{ type: "agent_end", messages: approving },
+				mockCtx(),
+			]);
+			const [decided] = store.readProposalQueue();
+			assert.equal(decided.status, "implemented");
+			assert.ok(store.readExecutionPlan(pending.id) !== undefined);
+		} finally {
+			await rm(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	test("rejects a pending proposal after its approval window expires", async () => {
+		const stateDir = await createTempStateDir();
+		try {
+			const { pi, registered } = recordingPi();
+			memoryEvolution(pi as ExtensionAPI, { stateDir, env: {} });
+			await seedCandidate(stateDir);
+			await trigger(registered, "session_compact", [
+				{ type: "session_compact", reason: "threshold", fromExtension: false },
+			]);
+			// First agent_end: speak gate writes a pending proposal.
+			await trigger(registered, "agent_end", [
+				{ type: "agent_end", messages: agentMessages() },
+				mockCtx(),
+			]);
+			const store = createAgendaStore(stateDir);
+			const [pending] = store.readProposalQueue();
+			assert.equal(pending.status, "pending_user_approval");
+			// Backdate the expiry so the next agent_end rejects the proposal.
+			store.writeProposalQueue([
+				{
+					...pending,
+					timestamps: { ...pending.timestamps, expiresAt: "2020-01-01T00:00:00.000Z" },
+				},
+			]);
+			await trigger(registered, "agent_end", [
+				{ type: "agent_end", messages: agentMessages() },
+				mockCtx(),
+			]);
+			const [decided] = store.readProposalQueue();
+			assert.equal(decided.status, "rejected");
 		} finally {
 			await rm(stateDir, { recursive: true, force: true });
 		}
