@@ -7,6 +7,8 @@ Memory self-evolution system for the PI Coding Agent.
 - **P0** (done): extension manifest, capability-aware adapter layer, `before_agent_start` lifecycle hook
 - **P1** (done): signal collection (session stats, projection notices, user feedback) + evolution journal, with compaction-gated trigger and subagent skip
 - **P2** (done): memory evaluation (Hermes maturation formula) + agenda engine (state machine, unmatched-signal clustering), running in shadow mode
+- **P3** (done): runtime digest injection into every session (`before_agent_start`), <2KB, expiry-stamped, advisory-only
+- **P4** (done): speak gate consuming matured candidates — scoring, quotas, traceable decisions, `ui.confirm()` user approval, proposal queue
 
 ## Features
 
@@ -16,7 +18,10 @@ Memory self-evolution system for the PI Coding Agent.
 - Evaluates memory maturity after 3 collected sessions using the Hermes maturation formula (evidence-driven, "time is not evidence")
 - Tracks long-term agenda items through a state machine (`observing → accumulating_evidence → candidate_ready → surfaced → resolved → archived`)
 - Discovers new agenda items from recurring unmatched signal clusters
-- Runs in shadow mode: evaluation writes candidates and journal only, never triggers user-visible actions (speak gate is a later phase)
+- Runs in shadow mode: evaluation writes candidates and journal only, never triggers user-visible actions
+- Evaluates matured candidates through the speak gate (priority/speak scoring, risk dampeners, daily quotas) and asks the user to approve via `ui.confirm()`
+- Writes approved proposals to `proposal_queue.yaml` (lifecycle handling is a later phase)
+- Injects a runtime digest into every session (`before_agent_start`), carrying pending candidates and recent speak decisions
 - Skips collection inside subagent processes (`PI_SUBAGENT_AGENT_ID` env)
 - Zero core patches; everything runs as a pi extension
 
@@ -32,7 +37,10 @@ State files are written to `~/.pi/agent/agent-suite/memory-evolution/`:
 memory-evolution/
 ├── signals.jsonl              # append-only signal records
 ├── self_agenda.yaml           # agenda items with maturity scores
-├── agenda_candidates.yaml     # matured candidates (shadow mode)
+├── agenda_candidates.yaml     # matured candidates
+├── speak_decisions.jsonl      # traceable speak-gate decisions
+├── speak_quota.json           # daily speak quota usage
+├── proposal_queue.yaml        # user-approved proposals
 └── evolution_journal.md       # audit trail
 ```
 
@@ -59,6 +67,21 @@ maturity_score = 0.30×evidence_strength + 0.25×trend_strength + 0.20×recurren
 ```
 
 Signal-to-evidence mapping (fixed weights): `feedback` 0.30, `projection` 0.15, `session_stats` 0.05.
+
+## Speak gate
+
+Matured candidates are scored before user interruption:
+
+```
+priority = (impact×0.40 + recurrence×0.25 + confidence×0.35) × risk_dampener + bonuses
+speak = priority − 0.20(interruption) − repeat_penalty
+```
+
+Decision routing: `speak_now` / `speak_now_with_approval` / `proposal_queue` / `daily_digest` / `silent_log_only` / `risk_alert_only`. Daily quota: 3 suggestions, 1 strategic. Every decision is logged with a traceable `decision_reason` and `would_have_spoken_without_quota`.
+
+## Runtime digest
+
+The session-injected digest (<2KB, advisory-only, `Valid until` 24h) carries pending candidates and recent speak decisions. Sections are omitted when empty; nothing hardcoded.
 
 ## Design
 

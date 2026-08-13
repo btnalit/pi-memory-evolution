@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import memoryEvolution from "./index.ts";
+import { createAgendaStore } from "./store/agenda-store.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 /** Records pi.on registrations for assertion and manual triggering. */
@@ -43,9 +44,10 @@ async function createTempStateDir(): Promise<string> {
 }
 
 /** Mock ctx with a session manager exposing cwd. */
-function mockCtx(cwd = "/tmp/project") {
+function mockCtx(cwd = "/tmp/project", confirmResult = false) {
 	return {
 		sessionManager: { getCwd: () => cwd },
+		ui: { confirm: async () => confirmResult },
 	};
 }
 
@@ -308,6 +310,132 @@ describe("memoryEvolution extension entry (P2 maturation)", () => {
 				"utf8",
 			);
 			assert.ok(journal.includes("maturation"));
+		} finally {
+			await rm(stateDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("memoryEvolution extension entry (P3/P4 speak gate + digest)", () => {
+	/** Writes a pre-matured candidate directly into the store. */
+	async function seedCandidate(stateDir: string): Promise<void> {
+		const store = createAgendaStore(stateDir);
+		store.writeCandidates([
+			{
+				candidateId: "C-000001",
+				agendaId: "A-000001",
+				title: "测试候选",
+				type: "quality_improvement",
+				maturityScore: 0.85,
+				action: "create_proposal",
+				status: "candidate_ready",
+				evidenceCount: 5,
+				observationDays: 10,
+				suggestedMessage: "议题：测试候选",
+			},
+		]);
+	}
+
+	test("writes a proposal to the queue after ui.confirm approval", async () => {
+		const stateDir = await createTempStateDir();
+		try {
+			const { pi, registered } = recordingPi();
+			memoryEvolution(pi as ExtensionAPI, { stateDir, env: {} });
+			await seedCandidate(stateDir);
+			await trigger(registered, "session_compact", [
+				{ type: "session_compact", reason: "threshold", fromExtension: false },
+			]);
+			await trigger(registered, "agent_end", [
+				{ type: "agent_end", messages: agentMessages() },
+				mockCtx("/tmp/project", true),
+			]);
+			const queue = await readFile(
+				join(stateDir, "proposal_queue.yaml"),
+				"utf8",
+			);
+			assert.ok(queue.includes("测试候选"));
+		} finally {
+			await rm(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	test("does not write a proposal when ui.confirm is rejected", async () => {
+		const stateDir = await createTempStateDir();
+		try {
+			const { pi, registered } = recordingPi();
+			memoryEvolution(pi as ExtensionAPI, { stateDir, env: {} });
+			await seedCandidate(stateDir);
+			await trigger(registered, "session_compact", [
+				{ type: "session_compact", reason: "threshold", fromExtension: false },
+			]);
+			await trigger(registered, "agent_end", [
+				{ type: "agent_end", messages: agentMessages() },
+				mockCtx("/tmp/project", false),
+			]);
+			await assert.rejects(
+				readFile(join(stateDir, "proposal_queue.yaml"), "utf8"),
+				{ code: "ENOENT" },
+			);
+		} finally {
+			await rm(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	test("appends a speak decision to the decision log", async () => {
+		const stateDir = await createTempStateDir();
+		try {
+			const { pi, registered } = recordingPi();
+			memoryEvolution(pi as ExtensionAPI, { stateDir, env: {} });
+			await seedCandidate(stateDir);
+			await trigger(registered, "session_compact", [
+				{ type: "session_compact", reason: "threshold", fromExtension: false },
+			]);
+			await trigger(registered, "agent_end", [
+				{ type: "agent_end", messages: agentMessages() },
+				mockCtx("/tmp/project", false),
+			]);
+			const decisions = await readFile(
+				join(stateDir, "speak_decisions.jsonl"),
+				"utf8",
+			);
+			assert.ok(decisions.includes("测试候选"));
+		} finally {
+			await rm(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	test("injects a runtime digest into the system prompt on before_agent_start", async () => {
+		const stateDir = await createTempStateDir();
+		try {
+			const { pi, registered } = recordingPi();
+			memoryEvolution(pi as ExtensionAPI, { stateDir, env: {} });
+			await seedCandidate(stateDir);
+			const result = await trigger(
+				registered,
+				"before_agent_start",
+				[{ type: "before_agent_start" }, mockCtx()],
+			);
+			assert.ok(result !== undefined);
+			const resultObj = result as { systemPrompt?: string };
+			assert.ok(resultObj.systemPrompt !== undefined);
+			assert.ok(resultObj.systemPrompt.includes("测试候选"));
+			assert.ok(resultObj.systemPrompt.includes("advisory"));
+		} finally {
+			await rm(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	test("returns undefined from before_agent_start when there is nothing to report", async () => {
+		const stateDir = await createTempStateDir();
+		try {
+			const { pi, registered } = recordingPi();
+			memoryEvolution(pi as ExtensionAPI, { stateDir, env: {} });
+			const result = await trigger(
+				registered,
+				"before_agent_start",
+				[{ type: "before_agent_start" }, mockCtx()],
+			);
+			assert.equal(result, undefined);
 		} finally {
 			await rm(stateDir, { recursive: true, force: true });
 		}

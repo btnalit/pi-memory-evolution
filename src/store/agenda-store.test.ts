@@ -5,150 +5,171 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	createAgendaStore,
-	type AgendaItem,
+	type AgendaCandidate,
 	type AgendaStore,
+	type ProposalRecord,
+	type SpeakDecision,
+	type SpeakQuota,
 } from "./agenda-store.ts";
 
 /** Creates a store backed by a fresh temporary directory. */
 async function createTempStore(): Promise<{ store: AgendaStore; dir: string }> {
-	const dir = await mkdtemp(join(tmpdir(), "pme-agenda-"));
+	const dir = await mkdtemp(join(tmpdir(), "pme-p34-"));
 	const store = createAgendaStore(dir);
 	return { store, dir };
 }
 
-/** A minimal valid agenda item. */
-function sampleAgendaItem(): AgendaItem {
+/** A minimal candidate. */
+function sampleCandidate(): AgendaCandidate {
 	return {
-		id: "A-000001",
-		title: "检测投影重跑模式",
+		candidateId: "C-000001",
+		agendaId: "A-000001",
+		title: "测试候选",
 		type: "quality_improvement",
-		status: "observing",
-		firstSeenAt: "2026-08-05T00:00:00.000Z",
-		lastEvidenceAt: "2026-08-05T00:00:00.000Z",
-		lastSurfacedAt: null,
-		evidence: [],
-		counters: {
-			evidenceCount: 0,
-			observationDays: 1,
-			recentMentions7d: 0,
-		},
-		scores: {
-			evidenceStrength: 0.0,
-			trendStrength: 0.5,
-			recurrenceDensity: 0.0,
-			unresolvedCost: 0.3,
-			actionability: 0.8,
-			timePressureBonus: 0.0,
-			stalenessPenalty: 0.0,
-			maturityScore: 0.0,
-		},
-		evidenceMatchers: {
-			signalTypes: ["projection"],
-			includeKeywords: ["重跑"],
-			excludeKeywords: [],
-		},
+		maturityScore: 0.78,
+		action: "create_proposal",
+		status: "candidate_ready",
+		evidenceCount: 3,
+		observationDays: 4,
+		suggestedMessage: "议题：测试候选",
 	};
 }
 
-describe("AgendaStore.readSignals", () => {
-	test("returns an empty list when signals.jsonl does not exist", async () => {
+/** A minimal speak decision. */
+function sampleDecision(): SpeakDecision {
+	return {
+		candidateId: "C-000001",
+		title: "测试候选",
+		priorityScore: 0.7,
+		speakScore: 0.65,
+		action: "speak_now",
+		wouldHaveSpokenWithoutQuota: false,
+		decisionReason: ["weighted = 0.7"],
+	};
+}
+
+describe("AgendaStore.readCandidates", () => {
+	test("returns an empty list when agenda_candidates.yaml does not exist", async () => {
 		const { store, dir } = await createTempStore();
 		try {
-			assert.deepEqual(store.readSignals(), []);
+			assert.deepEqual(store.readCandidates(), []);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
 	});
 
-	test("parses existing JSONL signal records", async () => {
+	test("round-trips candidates through agenda_candidates.yaml", async () => {
 		const { store, dir } = await createTempStore();
 		try {
-			store.appendSignal({ ts: "t1", type: "session_stats", source: "agent_end" });
-			store.appendSignal({ ts: "t2", type: "projection", source: "agent_end", count: 2 });
-			const signals = store.readSignals();
-			assert.equal(signals.length, 2);
-			assert.equal(signals[1].type, "projection");
-			assert.equal(signals[1].count, 2);
-		} finally {
-			await rm(dir, { recursive: true, force: true });
-		}
-	});
-});
-
-describe("AgendaStore.readAgenda / writeAgenda", () => {
-	test("returns an empty list when self_agenda.yaml does not exist", async () => {
-		const { store, dir } = await createTempStore();
-		try {
-			assert.deepEqual(store.readAgenda(), []);
-		} finally {
-			await rm(dir, { recursive: true, force: true });
-		}
-	});
-
-	test("round-trips agenda items through self_agenda.yaml", async () => {
-		const { store, dir } = await createTempStore();
-		try {
-			store.writeAgenda([sampleAgendaItem()]);
-			const items = store.readAgenda();
-			assert.equal(items.length, 1);
-			assert.equal(items[0].id, "A-000001");
-			assert.equal(items[0].type, "quality_improvement");
-			assert.equal(items[0].status, "observing");
-			assert.equal(items[0].scores.maturityScore, 0);
-			assert.equal(items[0].counters.evidenceCount, 0);
-		} finally {
-			await rm(dir, { recursive: true, force: true });
-		}
-	});
-
-	test("overwrites the agenda file on write", async () => {
-		const { store, dir } = await createTempStore();
-		try {
-			store.writeAgenda([sampleAgendaItem()]);
-			store.writeAgenda([]);
-			assert.deepEqual(store.readAgenda(), []);
+			store.writeCandidates([sampleCandidate()]);
+			const candidates = store.readCandidates();
+			assert.equal(candidates.length, 1);
+			assert.equal(candidates[0].candidateId, "C-000001");
+			assert.equal(candidates[0].maturityScore, 0.78);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
 	});
 });
 
-describe("AgendaStore.writeCandidates", () => {
-	test("writes agenda_candidates.yaml with version and shadow mode", async () => {
+describe("AgendaStore quota read/write", () => {
+	test("returns a fresh daily quota when speak_quota.json does not exist", async () => {
 		const { store, dir } = await createTempStore();
 		try {
-			store.writeCandidates([
-				{
-					candidateId: "C-000001",
-					agendaId: "A-000001",
-					title: "候选",
-					type: "quality_improvement",
-					maturityScore: 0.78,
-					action: "create_proposal",
-					status: "candidate_ready",
-					evidenceCount: 3,
-					observationDays: 4,
-					suggestedMessage: "测试候选",
-				},
-			]);
-			const content = await readFile(join(dir, "agenda_candidates.yaml"), "utf8");
-			assert.ok(content.includes("version"));
-			assert.ok(content.includes("shadow_mode"));
-			assert.ok(content.includes("C-000001"));
-			assert.ok(content.includes("0.78"));
+			const quota = store.readQuota();
+			assert.equal(typeof quota.suggestions, "number");
+			assert.equal(typeof quota.strategic, "number");
+			assert.ok(quota.date.length > 0);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("round-trips quota through speak_quota.json on the same day", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			const today = new Date().toISOString().slice(0, 10);
+			const quota: SpeakQuota = { date: today, suggestions: 2, strategic: 1 };
+			store.writeQuota(quota);
+			const loaded = store.readQuota();
+			assert.equal(loaded.date, today);
+			assert.equal(loaded.suggestions, 2);
+			assert.equal(loaded.strategic, 1);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("resets quota when the persisted date is stale", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			const stale: SpeakQuota = {
+				date: "2000-01-01",
+				suggestions: 3,
+				strategic: 1,
+			};
+			store.writeQuota(stale);
+			const loaded = store.readQuota();
+			assert.equal(loaded.suggestions, 0);
+			assert.equal(loaded.strategic, 0);
+			assert.notEqual(loaded.date, "2000-01-01");
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
 	});
 });
 
-describe("AgendaStore.appendJournal", () => {
-	test("appends audit lines to evolution_journal.md", async () => {
+describe("AgendaStore speak decisions", () => {
+	test("returns an empty list when no decisions exist", async () => {
 		const { store, dir } = await createTempStore();
 		try {
-			store.appendJournal("- audit line");
-			const content = await readFile(join(dir, "evolution_journal.md"), "utf8");
-			assert.ok(content.includes("audit line"));
+			assert.deepEqual(store.readDecisions(), []);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("appends and reads decisions", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.appendDecision(sampleDecision());
+			store.appendDecision({ ...sampleDecision(), candidateId: "C-000002" });
+			const decisions = store.readDecisions();
+			assert.equal(decisions.length, 2);
+			assert.equal(decisions[1].candidateId, "C-000002");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("AgendaStore proposal queue", () => {
+	test("returns an empty queue when proposal_queue.yaml does not exist", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			assert.deepEqual(store.readProposalQueue(), []);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("round-trips proposals through proposal_queue.yaml", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			const proposal: ProposalRecord = {
+				id: "P-20260805-0001",
+				title: "测试提案",
+				type: "quality_improvement",
+				status: "draft",
+				evidence: [],
+				approval: { required: true, approvedBy: null, approvedAt: null },
+				timestamps: { createdAt: "2026-08-05T00:00:00.000Z", updatedAt: "2026-08-05T00:00:00.000Z" },
+			};
+			store.writeProposalQueue([proposal]);
+			const loaded = store.readProposalQueue();
+			assert.equal(loaded.length, 1);
+			assert.equal(loaded[0].id, "P-20260805-0001");
+			assert.equal(loaded[0].status, "draft");
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}

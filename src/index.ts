@@ -20,6 +20,9 @@ import {
 } from "./store/agenda-store.ts";
 import { getStateDir } from "./store/state-store.ts";
 import { runMaturationPipeline } from "./agenda/pipeline.ts";
+import { evaluateCandidate } from "./governor/speak-gate.ts";
+import { createProposalFromCandidate } from "./governor/proposal-queue.ts";
+import { buildRuntimeDigest } from "./injector/digest.ts";
 
 /** Event hook name that carries the assembled system prompt into every session. */
 const BEFORE_AGENT_START_EVENT = "before_agent_start";
@@ -68,12 +71,13 @@ export default function memoryEvolution(
 			collectionEnabled = true;
 		});
 	});
-	registerHook(pi, AGENT_END_EVENT, (event) => {
+	registerHook(pi, AGENT_END_EVENT, async (event, ctx) => {
 		if (!collectionEnabled) {
 			return;
 		}
 		handleAgentEnd(store, (event as AgentEndEvent).messages);
 		maybeRunEvaluation(store);
+		await runSpeakGate(store, ctx);
 	});
 	registerHook(pi, TURN_END_EVENT, (event) => {
 		if (!collectionEnabled) {
@@ -84,25 +88,29 @@ export default function memoryEvolution(
 	registerHook(pi, SESSION_SHUTDOWN_EVENT, (event) => {
 		handleSessionShutdown(store, (event as SessionShutdownEvent).reason);
 	});
-	registerHook(pi, BEFORE_AGENT_START_EVENT, (_event) => {
-		handleBeforeAgentStart(probe);
+	registerHook(pi, BEFORE_AGENT_START_EVENT, (event) => {
+		return injectRuntimeDigest(store, (event as BeforeAgentStartEventLike).systemPrompt);
 	});
+}
+
+/** Minimal shape of the before_agent_start event needed for digest injection. */
+interface BeforeAgentStartEventLike {
+	readonly systemPrompt?: string;
 }
 
 /** Registers one hook so both registration and handler failures degrade silently. */
 function registerHook(
 	pi: ExtensionAPI,
 	event: string,
-	handler: (event: unknown) => void,
+	handler: (event: unknown, ctx: unknown) => unknown,
 ): void {
 	try {
-		pi.on(event, (eventArg: unknown) => {
+		pi.on(event, (eventArg: unknown, ctx: unknown) => {
 			try {
-				handler(eventArg);
+				return handler(eventArg, ctx);
 			} catch {
-				return;
+				return undefined;
 			}
-			return undefined;
 		});
 	} catch {
 		return;
@@ -180,9 +188,68 @@ function maybeRunEvaluation(store: AgendaStore): void {
 	runMaturationPipeline(store, nowIso());
 }
 
-/** Placeholder for future runtime-digest injection (design phase P3). */
-function handleBeforeAgentStart(_probe: CapabilityProbeResult): void {
-	return;
+/** Evaluates pending candidates through the speak gate and asks the user to approve. */
+async function runSpeakGate(store: AgendaStore, ctx: unknown): Promise<void> {
+	const candidates = store.readCandidates();
+	if (candidates.length === 0) {
+		return;
+	}
+
+	const knownDecisions = new Set(
+		store.readDecisions().map((decision) => decision.candidateId),
+	);
+	let quota = store.readQuota();
+	for (const candidate of candidates) {
+		if (knownDecisions.has(candidate.candidateId)) {
+			continue;
+		}
+		const result = evaluateCandidate({ candidate, quota });
+		store.appendDecision(result.decision);
+		quota = result.quota;
+		if (result.quotaConsumed && result.decision.action !== "risk_alert_only") {
+			const approved = await awaitConfirm(ctx, candidate.suggestedMessage);
+			if (approved) {
+				const proposal = createProposalFromCandidate(candidate, [], nowIso());
+				store.writeProposalQueue([
+					...store.readProposalQueue(),
+					proposal,
+				]);
+			}
+		}
+	}
+	store.writeQuota(quota);
+}
+
+/** Shows the approval dialog and resolves false when no UI is available. */
+async function awaitConfirm(ctx: unknown, message: string): Promise<boolean> {
+	const ui = (ctx as { ui?: { confirm?: (title: string, msg: string) => Promise<boolean> } })
+		?.ui;
+	if (ui?.confirm === undefined) {
+		return false;
+	}
+	try {
+		return await ui.confirm("Memory Evolution", message);
+	} catch {
+		return false;
+	}
+}
+
+/** Appends the runtime digest to the assembled system prompt when available. */
+function injectRuntimeDigest(
+	store: AgendaStore,
+	currentSystemPrompt: string | undefined,
+): { readonly systemPrompt: string } | undefined {
+	const digest = buildRuntimeDigest({
+		now: nowIso(),
+		candidates: store.readCandidates(),
+		decisions: store.readDecisions().slice(-3),
+	});
+	if (digest === undefined) {
+		return undefined;
+	}
+	return {
+		systemPrompt: `${currentSystemPrompt ?? ""}\n\n${digest}`,
+	};
 }
 
 /** Returns the current UTC timestamp in ISO format. */

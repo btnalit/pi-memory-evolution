@@ -13,6 +13,15 @@ const AGENDA_FILE = "self_agenda.yaml";
 /** File that stores matured agenda candidates. */
 const CANDIDATES_FILE = "agenda_candidates.yaml";
 
+/** File that stores daily speak quota usage. */
+const QUOTA_FILE = "speak_quota.json";
+
+/** File that stores append-only speak gate decisions. */
+const DECISIONS_FILE = "speak_decisions.jsonl";
+
+/** File that stores the user-approved proposal queue. */
+const PROPOSAL_FILE = "proposal_queue.yaml";
+
 /** Schema version stamped on every persisted agenda file. */
 export const AGENDA_VERSION = 1;
 
@@ -86,6 +95,42 @@ export interface AgendaCandidate {
 	readonly suggestedMessage: string;
 }
 
+/** Daily speak quota counters reset on date change. */
+export interface SpeakQuota {
+	readonly date: string;
+	readonly suggestions: number;
+	readonly strategic: number;
+}
+
+/** One traceable speak-gate decision. */
+export interface SpeakDecision {
+	readonly candidateId: string;
+	readonly title: string;
+	readonly priorityScore: number;
+	readonly speakScore: number;
+	readonly action: string;
+	readonly wouldHaveSpokenWithoutQuota: boolean;
+	readonly decisionReason: readonly string[];
+}
+
+/** One user-approved proposal waiting for lifecycle handling (P5). */
+export interface ProposalRecord {
+	readonly id: string;
+	readonly title: string;
+	readonly type: string;
+	readonly status: string;
+	readonly evidence: readonly AgendaEvidence[];
+	readonly approval: {
+		readonly required: boolean;
+		readonly approvedBy: string | null;
+		readonly approvedAt: string | null;
+	};
+	readonly timestamps: {
+		readonly createdAt: string;
+		readonly updatedAt: string;
+	};
+}
+
 /** Persistent agenda state surface of this extension. */
 export interface AgendaStore {
 	readonly stateDir: string;
@@ -95,6 +140,13 @@ export interface AgendaStore {
 	readAgenda(): AgendaItem[];
 	writeAgenda(items: readonly AgendaItem[]): void;
 	writeCandidates(candidates: readonly AgendaCandidate[]): void;
+	readCandidates(): AgendaCandidate[];
+	readQuota(): SpeakQuota;
+	writeQuota(quota: SpeakQuota): void;
+	readDecisions(): SpeakDecision[];
+	appendDecision(decision: SpeakDecision): void;
+	readProposalQueue(): ProposalRecord[];
+	writeProposalQueue(proposals: readonly ProposalRecord[]): void;
 }
 
 /** Creates an agenda store writing into the given state directory. */
@@ -109,6 +161,15 @@ export function createAgendaStore(stateDir: string): AgendaStore {
 		writeAgenda: (items) => writeAgenda(stateDir, items),
 		writeCandidates: (candidates) =>
 			writeCandidates(stateDir, candidates),
+		readCandidates: () => readCandidates(stateDir),
+		readQuota: () => readQuota(stateDir),
+		writeQuota: (quota) => writeQuota(stateDir, quota),
+		readDecisions: () => readDecisions(stateDir),
+		appendDecision: (decision) =>
+			appendDecision(stateDir, decision),
+		readProposalQueue: () => readProposalQueue(stateDir),
+		writeProposalQueue: (proposals) =>
+			writeProposalQueue(stateDir, proposals),
 	};
 }
 
@@ -179,6 +240,103 @@ function writeCandidates(
 	);
 }
 
+/** Reads candidates from agenda_candidates.yaml. */
+function readCandidates(stateDir: string): AgendaCandidate[] {
+	const file = join(stateDir, CANDIDATES_FILE);
+	if (!fileExists(file)) {
+		return [];
+	}
+	const content = readFileSync(file, "utf8");
+	if (content.trim().length === 0) {
+		return [];
+	}
+	const parsed = JSON.parse(content);
+	return Array.isArray(parsed.candidates) ? parsed.candidates : [];
+}
+
+/** Reads today's speak quota, resetting when the date changed. */
+function readQuota(stateDir: string): SpeakQuota {
+	const file = join(stateDir, QUOTA_FILE);
+	const today = todayStr();
+	if (!fileExists(file)) {
+		return { date: today, suggestions: 0, strategic: 0 };
+	}
+	try {
+		const parsed = JSON.parse(readFileSync(file, "utf8"));
+		if (parsed.date === today) {
+			return parsed;
+		}
+	} catch {
+		return { date: today, suggestions: 0, strategic: 0 };
+	}
+	return { date: today, suggestions: 0, strategic: 0 };
+}
+
+/** Persists the current daily speak quota. */
+function writeQuota(stateDir: string, quota: SpeakQuota): void {
+	ensureStateDir(stateDir);
+	writeFileSync(
+		join(stateDir, QUOTA_FILE),
+		`${JSON.stringify(quota, null, 2)}\n`,
+	);
+}
+
+/** Reads all speak gate decisions from the append-only log. */
+function readDecisions(stateDir: string): SpeakDecision[] {
+	const file = join(stateDir, DECISIONS_FILE);
+	if (!fileExists(file)) {
+		return [];
+	}
+	const decisions: SpeakDecision[] = [];
+	for (const line of readFileSync(file, "utf8").split("\n")) {
+		if (line.trim().length === 0) {
+			continue;
+		}
+		try {
+			decisions.push(JSON.parse(line));
+		} catch {
+			continue;
+		}
+	}
+	return decisions;
+}
+
+/** Appends one speak decision to the traceable log. */
+function appendDecision(stateDir: string, decision: SpeakDecision): void {
+	ensureStateDir(stateDir);
+	appendFileSync(join(stateDir, DECISIONS_FILE), `${JSON.stringify(decision)}\n`);
+}
+
+/** Reads the user-approved proposal queue. */
+function readProposalQueue(stateDir: string): ProposalRecord[] {
+	const file = join(stateDir, PROPOSAL_FILE);
+	if (!fileExists(file)) {
+		return [];
+	}
+	const content = readFileSync(file, "utf8");
+	if (content.trim().length === 0) {
+		return [];
+	}
+	const parsed = JSON.parse(content);
+	return Array.isArray(parsed.proposals) ? parsed.proposals : [];
+}
+
+/** Writes the user-approved proposal queue. */
+function writeProposalQueue(
+	stateDir: string,
+	proposals: readonly ProposalRecord[],
+): void {
+	ensureStateDir(stateDir);
+	writeFileSync(
+		join(stateDir, PROPOSAL_FILE),
+		`${JSON.stringify(
+			{ version: AGENDA_VERSION, proposals },
+			null,
+			2,
+		)}\n`,
+	);
+}
+
 /** Reads every line of a JSONL file as parsed records. */
 function readJsonl(file: string): Record<string, unknown>[] {
 	const records: Record<string, unknown>[] = [];
@@ -208,4 +366,9 @@ function fileExists(path: string): boolean {
 /** Creates the state directory when it does not yet exist. */
 function ensureStateDir(stateDir: string): void {
 	mkdirSync(stateDir, { recursive: true });
+}
+
+/** Returns today's date as YYYY-MM-DD in UTC. */
+function todayStr(): string {
+	return new Date().toISOString().slice(0, 10);
 }
