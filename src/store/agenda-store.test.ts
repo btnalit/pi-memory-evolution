@@ -249,3 +249,37 @@ describe("AgendaStore execution plan archive", () => {
 		}
 	});
 });
+
+describe("AgendaStore speak thresholds", () => {
+	test("returns Hermes defaults when thresholds.json does not exist", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			const thresholds = store.readThresholds();
+			assert.equal(thresholds.speakThreshold, 0.6);
+			assert.equal(thresholds.priorityQueueThreshold, 0.6);
+			assert.equal(thresholds.dailyDigestThreshold, 0.4);
+			assert.equal(thresholds.suggestionLimit, 3);
+			assert.equal(thresholds.strategicLimit, 1);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("round-trips custom thresholds through thresholds.json", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			const custom = {
+				speakThreshold: 0.5,
+				priorityQueueThreshold: 0.55,
+				dailyDigestThreshold: 0.35,
+				suggestionLimit: 5,
+				strategicLimit: 2,
+			};
+			store.writeThresholds(custom);
+			const loaded = store.readThresholds();
+			assert.deepEqual(loaded, custom);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+});

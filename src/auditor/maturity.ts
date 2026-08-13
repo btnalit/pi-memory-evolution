@@ -110,7 +110,7 @@ export function computeScores(input: MaturityInput): MaturityScores {
 	);
 	const hasActionable = actionableQualified.length > 0;
 	const actionableQualifiedStrength = actionableQualified.reduce(
-		(sum, item) => sum + item.weight * item.relevance,
+		(sum, item) => sum + item.contribution,
 		0,
 	);
 	const actionability = input.actionability ?? actionabilityForType(input.type);

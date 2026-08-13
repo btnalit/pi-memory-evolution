@@ -71,6 +71,20 @@ describe("computeScores", () => {
 		assert.ok(Math.abs(scores.evidenceStrength - 0.4) < 0.001);
 	});
 
+	test("reads evidence strength from the contribution field", () => {
+		const input = baseInput({
+			evidence: [
+				// contribution differs from weight × relevance to prove the field is read.
+				evidence({ weight: 0.3, relevance: 1.0, contribution: 0.2 }),
+				evidence({ weight: 0.3, relevance: 1.0, contribution: 0.2 }),
+			],
+			uniqueCount: 2,
+		});
+		const scores = computeScores(input);
+		// strength from contribution = 0.4 / 1.5 ≈ 0.267 (not 0.6 / 1.5 = 0.4)
+		assert.ok(Math.abs(scores.evidenceStrength - 0.4 / 1.5) < 0.001);
+	});
+
 	test("applies time pressure bonus as log of observation days", () => {
 		const scores1 = computeScores(
 			baseInput({ evidence: [evidence()], observationDays: 1 }),

@@ -90,6 +90,26 @@ describe("matchSignalsToAgenda", () => {
 		assert.equal(evidence[0].actionable, true);
 	});
 
+	test("derives contribution from weight times relevance", () => {
+		const evidence = matchSignalsToAgenda(
+			[signal({ type: "feedback" })],
+			matchers(),
+			"2026-08-05T00:00:00.000Z",
+		);
+		// feedback relevance = 1 → contribution = weight × 1
+		assert.equal(evidence[0].contribution, 0.3);
+	});
+
+	test("scales contribution with relevance for non-feedback signals", () => {
+		const evidence = matchSignalsToAgenda(
+			[signal({ type: "projection" })],
+			matchers(),
+			"2026-08-05T00:00:00.000Z",
+		);
+		// projection weight = 0.15, relevance = 0.7 → contribution = 0.15 × 0.7
+		assert.ok(Math.abs(evidence[0].contribution - 0.15 * 0.7) < 1e-9);
+	});
+
 	test("returns empty when no signals match", () => {
 		const evidence = matchSignalsToAgenda(
 			[signal({ type: "projection" })],

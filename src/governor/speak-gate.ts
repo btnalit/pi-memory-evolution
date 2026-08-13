@@ -28,13 +28,31 @@ const STRATEGIC_BONUS = 0.12;
 const URGENCY_BONUS = 0.15;
 
 /** Thresholds for speak and queue decisions. */
-const SPEAK_THRESHOLD = 0.6;
-const PRIORITY_QUEUE_THRESHOLD = 0.6;
-const DAILY_DIGEST_THRESHOLD = 0.4;
+export const SPEAK_THRESHOLD = 0.6;
+export const PRIORITY_QUEUE_THRESHOLD = 0.6;
+export const DAILY_DIGEST_THRESHOLD = 0.4;
 
 /** Daily quota limits. */
-const DAILY_SUGGESTION_LIMIT = 3;
-const DAILY_STRATEGIC_LIMIT = 1;
+export const DAILY_SUGGESTION_LIMIT = 3;
+export const DAILY_STRATEGIC_LIMIT = 1;
+
+/** Default speak-gate thresholds (Hermes alignment). */
+export const DEFAULT_SPEAK_THRESHOLDS = {
+	speakThreshold: SPEAK_THRESHOLD,
+	priorityQueueThreshold: PRIORITY_QUEUE_THRESHOLD,
+	dailyDigestThreshold: DAILY_DIGEST_THRESHOLD,
+	suggestionLimit: DAILY_SUGGESTION_LIMIT,
+	strategicLimit: DAILY_STRATEGIC_LIMIT,
+} as const;
+
+/** Overridable speak-gate thresholds. */
+export interface SpeakThresholds {
+	readonly speakThreshold: number;
+	readonly priorityQueueThreshold: number;
+	readonly dailyDigestThreshold: number;
+	readonly suggestionLimit: number;
+	readonly strategicLimit: number;
+}
 
 /** Default risk level when the input does not provide one. */
 const DEFAULT_RISK_LEVEL = "none";
@@ -66,7 +84,10 @@ export interface SpeakGateResult {
 }
 
 /** Evaluates one candidate through the speak gate and returns a traceable decision. */
-export function evaluateCandidate(input: SpeakGateInput): SpeakGateResult {
+export function evaluateCandidate(
+	input: SpeakGateInput,
+	thresholds: SpeakThresholds = DEFAULT_SPEAK_THRESHOLDS,
+): SpeakGateResult {
 	const impact = input.candidate.maturityScore;
 	const confidence = input.candidate.maturityScore;
 	const recurrence = Math.min(
@@ -129,25 +150,25 @@ export function evaluateCandidate(input: SpeakGateInput): SpeakGateResult {
 		action = "risk_alert_only";
 		actionReasons.push("risk_level=critical → alert only, do not act");
 	} else {
-		const speakPass = speakScore >= SPEAK_THRESHOLD;
-		const actionabilityPass = actionability >= SPEAK_THRESHOLD;
+		const speakPass = speakScore >= thresholds.speakThreshold;
+		const actionabilityPass = actionability >= thresholds.speakThreshold;
 		if (speakPass && actionabilityPass) {
 			action =
 				riskLevel === "medium" || riskLevel === "high"
 					? "speak_now_with_approval"
 					: "speak_now";
 			actionReasons.push(
-				`speak(${round4(speakScore)}) >= 0.60 and actionability(${actionability}) >= 0.60 → ${action}`,
+				`speak(${round4(speakScore)}) >= ${thresholds.speakThreshold} and actionability(${actionability}) >= ${thresholds.speakThreshold} → ${action}`,
 			);
-		} else if (priorityScore >= PRIORITY_QUEUE_THRESHOLD) {
+		} else if (priorityScore >= thresholds.priorityQueueThreshold) {
 			action = "proposal_queue";
-			actionReasons.push(`priority(${round4(priorityScore)}) >= 0.60 → proposal_queue`);
-		} else if (priorityScore >= DAILY_DIGEST_THRESHOLD) {
+			actionReasons.push(`priority(${round4(priorityScore)}) >= ${thresholds.priorityQueueThreshold} → proposal_queue`);
+		} else if (priorityScore >= thresholds.dailyDigestThreshold) {
 			action = "daily_digest";
-			actionReasons.push(`priority(${round4(priorityScore)}) >= 0.40 → daily_digest`);
+			actionReasons.push(`priority(${round4(priorityScore)}) >= ${thresholds.dailyDigestThreshold} → daily_digest`);
 		} else {
 			action = "silent_log_only";
-			actionReasons.push(`priority(${round4(priorityScore)}) < 0.40 → silent_log_only`);
+			actionReasons.push(`priority(${round4(priorityScore)}) < ${thresholds.dailyDigestThreshold} → silent_log_only`);
 		}
 	}
 
@@ -160,14 +181,14 @@ export function evaluateCandidate(input: SpeakGateInput): SpeakGateResult {
 	);
 	if (needsQuota) {
 		if (isStrategic) {
-			if (quota.strategic >= DAILY_STRATEGIC_LIMIT) {
+			if (quota.strategic >= thresholds.strategicLimit) {
 				finalAction = "proposal_queue";
 				quotaReason = "strategic_quota_exceeded";
 			} else {
 				quota = { ...quota, strategic: quota.strategic + 1 };
 				quotaReason = "speak_approved";
 			}
-		} else if (quota.suggestions >= DAILY_SUGGESTION_LIMIT) {
+		} else if (quota.suggestions >= thresholds.suggestionLimit) {
 			finalAction = "proposal_queue";
 			quotaReason = "suggestion_quota_exceeded";
 		} else {

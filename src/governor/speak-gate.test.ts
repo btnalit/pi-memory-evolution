@@ -152,4 +152,25 @@ describe("evaluateCandidate", () => {
 		const result = evaluateCandidate(baseInput());
 		assert.equal(result.decision.agendaId, "A-000001");
 	});
+
+	test("uses custom thresholds when provided", () => {
+		// With a low speak threshold a weaker candidate now speaks.
+		const weak = baseInput({
+			candidate: { ...strongCandidate(), maturityScore: 0.5, evidenceCount: 1 },
+		});
+		const defaultResult = evaluateCandidate(weak);
+		assert.equal(defaultResult.decision.action, "daily_digest");
+		const customResult = evaluateCandidate(weak, {
+			speakThreshold: 0.3,
+			priorityQueueThreshold: 0.3,
+			dailyDigestThreshold: 0.2,
+		});
+		assert.notEqual(customResult.decision.action, "daily_digest");
+	});
+
+	test("matches default thresholds when none are provided", () => {
+		const result = evaluateCandidate(baseInput());
+		assert.equal(result.decision.action, "speak_now");
+		assert.ok(result.decision.priorityScore >= 0.6);
+	});
 });

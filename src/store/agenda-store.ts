@@ -31,6 +31,9 @@ const DECISIONS_FILE = "speak_decisions.jsonl";
 /** File that stores the user-approved proposal queue. */
 const PROPOSAL_FILE = "proposal_queue.yaml";
 
+/** File that stores configurable speak-gate thresholds. */
+const THRESHOLDS_FILE = "thresholds.json";
+
 /** Schema version stamped on every persisted agenda file. */
 export const AGENDA_VERSION = 1;
 
@@ -155,6 +158,24 @@ export interface ProposalRecord {
 	};
 }
 
+/** Default speak-gate thresholds (Hermes alignment, mirrored from speak-gate.ts). */
+const DEFAULT_THRESHOLDS = {
+	speakThreshold: 0.6,
+	priorityQueueThreshold: 0.6,
+	dailyDigestThreshold: 0.4,
+	suggestionLimit: 3,
+	strategicLimit: 1,
+} as const;
+
+/** Configurable speak-gate thresholds. */
+export interface SpeakThresholds {
+	readonly speakThreshold: number;
+	readonly priorityQueueThreshold: number;
+	readonly dailyDigestThreshold: number;
+	readonly suggestionLimit: number;
+	readonly strategicLimit: number;
+}
+
 /** Persistent agenda state surface of this extension. */
 export interface AgendaStore {
 	readonly stateDir: string;
@@ -176,6 +197,8 @@ export interface AgendaStore {
 	archiveExecutionPlan(planId: string): boolean;
 	readArchivedPlan(planId: string): string | undefined;
 	purgeExpiredArchives(now: string, retentionDays: number): number;
+	readThresholds(): SpeakThresholds;
+	writeThresholds(thresholds: SpeakThresholds): void;
 }
 
 /** Creates an agenda store writing into the given state directory. */
@@ -209,6 +232,9 @@ export function createAgendaStore(stateDir: string): AgendaStore {
 			readArchivedPlan(stateDir, planId),
 		purgeExpiredArchives: (now, retentionDays) =>
 			purgeExpiredArchives(stateDir, now, retentionDays),
+		readThresholds: () => readThresholds(stateDir),
+		writeThresholds: (thresholds) =>
+			writeThresholds(stateDir, thresholds),
 	};
 }
 
@@ -459,6 +485,32 @@ function purgeExpiredArchives(
 		}
 	}
 	return purged;
+}
+
+/** Reads configurable speak-gate thresholds, defaulting to Hermes values. */
+function readThresholds(stateDir: string): SpeakThresholds {
+	const file = join(stateDir, THRESHOLDS_FILE);
+	if (!fileExists(file)) {
+		return { ...DEFAULT_THRESHOLDS };
+	}
+	try {
+		const parsed = JSON.parse(readFileSync(file, "utf8"));
+		return { ...DEFAULT_THRESHOLDS, ...parsed };
+	} catch {
+		return { ...DEFAULT_THRESHOLDS };
+	}
+}
+
+/** Persists custom speak-gate thresholds. */
+function writeThresholds(
+	stateDir: string,
+	thresholds: SpeakThresholds,
+): void {
+	ensureStateDir(stateDir);
+	writeFileSync(
+		join(stateDir, THRESHOLDS_FILE),
+		`${JSON.stringify(thresholds, null, 2)}\n`,
+	);
 }
 
 /** Reads every line of a JSONL file as parsed records. */

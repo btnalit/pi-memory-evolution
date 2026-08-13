@@ -44,6 +44,7 @@ export function matchSignalsToAgenda(
 			),
 		);
 		const classification = classifySignal(signal.type);
+		const relevance = signal.type === "feedback" ? 1 : 0.7;
 		evidence.push({
 			at: signal.ts,
 			source: signal.type,
@@ -51,8 +52,8 @@ export function matchSignalsToAgenda(
 			weight,
 			qualified: classification.qualified,
 			actionable: classification.actionable,
-			relevance: signal.type === "feedback" ? 1 : 0.7,
-			contribution: 0,
+			relevance,
+			contribution: weight * relevance,
 		});
 	}
 	return evidence;
