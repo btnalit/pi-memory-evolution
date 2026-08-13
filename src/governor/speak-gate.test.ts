@@ -147,4 +147,9 @@ describe("evaluateCandidate", () => {
 			),
 		);
 	});
+
+	test("carries the stable agenda id in the decision", () => {
+		const result = evaluateCandidate(baseInput());
+		assert.equal(result.decision.agendaId, "A-000001");
+	});
 });

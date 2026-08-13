@@ -192,6 +192,7 @@ export function evaluateCandidate(input: SpeakGateInput): SpeakGateResult {
 
 	const decision: SpeakDecision = {
 		candidateId: input.candidate.candidateId,
+		agendaId: input.candidate.agendaId,
 		title: input.candidate.title,
 		priorityScore,
 		speakScore,

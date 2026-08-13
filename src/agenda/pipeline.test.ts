@@ -203,6 +203,41 @@ describe("runMaturationPipeline", () => {
 		}
 	});
 
+	test("produces stable candidate ids derived from the agenda id", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeAgenda([
+				agendaItem({
+					status: "accumulating_evidence",
+					firstSeenAt: "2026-07-15T00:00:00.000Z",
+					lastEvidenceAt: "2026-07-15T00:00:00.000Z",
+					evidenceMatchers: {
+						signalTypes: ["feedback"],
+						includeKeywords: [],
+						excludeKeywords: [],
+					},
+				}),
+			]);
+			seedSignals(store, [
+				{ ts: "2026-08-01T00:00:00.000Z", type: "feedback", source: "turn_end", keywords: ["不对"] },
+				{ ts: "2026-08-02T00:00:00.000Z", type: "feedback", source: "turn_end", keywords: ["错误"] },
+				{ ts: "2026-08-03T00:00:00.000Z", type: "feedback", source: "turn_end", keywords: ["错了"] },
+				{ ts: "2026-08-03T00:00:00.000Z", type: "feedback", source: "turn_end", keywords: ["应该改成"] },
+				{ ts: "2026-08-04T00:00:00.000Z", type: "feedback", source: "turn_end", keywords: ["不要"] },
+			]);
+			runMaturationPipeline(store, "2026-08-05T00:00:00.000Z");
+			const first = store.readCandidates();
+			runMaturationPipeline(store, "2026-08-05T00:00:00.000Z");
+			const second = store.readCandidates();
+			assert.equal(first.length, 1);
+			assert.equal(second.length, 1);
+			assert.equal(first[0].candidateId, second[0].candidateId);
+			assert.ok(first[0].candidateId.includes("A-000001"));
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("appends an audit line to the journal", async () => {
 		const { store, dir } = await createTempStore();
 		try {

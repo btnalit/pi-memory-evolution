@@ -178,13 +178,16 @@ function writeCandidates(
 	store.writeCandidates(
 		agenda
 			.filter((item) => item.status === "candidate_ready")
-			.map((item, index) => ({
-				candidateId: `C-${Date.now()}-${index}`,
+			.map((item) => ({
+				candidateId: `C-${item.id}`,
 				agendaId: item.id,
 				title: item.title,
 				type: item.type,
 				maturityScore: item.scores.maturityScore,
-				action: item.type === "strategic_positioning" ? "ask_user_confirmation" : "create_proposal",
+				action:
+					item.type === "strategic_positioning"
+						? "ask_user_confirmation"
+						: "create_proposal",
 				status: "candidate_ready",
 				evidenceCount: item.counters.evidenceCount,
 				observationDays: item.counters.observationDays,

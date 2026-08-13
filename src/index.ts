@@ -7,7 +7,6 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
 	probeCapabilities,
-	type CapabilityProbeResult,
 } from "./adapter/capability-probe.ts";
 import { isMemoryEvolutionHost } from "./adapter/pi-api.ts";
 import { isSubagentProcess } from "./child-process.ts";
@@ -195,14 +194,14 @@ async function runSpeakGate(store: AgendaStore, ctx: unknown): Promise<void> {
 		return;
 	}
 
-	const knownDecisions = new Set(
-		store.readDecisions().map((decision) => decision.candidateId),
+	const knownAgendas = new Set(
+		store.readDecisions().map((decision) => decision.agendaId),
 	);
 	let quota = store.readQuota();
-	for (const candidate of candidates) {
-		if (knownDecisions.has(candidate.candidateId)) {
-			continue;
-		}
+	const pending = candidates.filter(
+		(candidate) => !knownAgendas.has(candidate.agendaId),
+	);
+	for (const candidate of pending) {
 		const result = evaluateCandidate({ candidate, quota });
 		store.appendDecision(result.decision);
 		quota = result.quota;
@@ -216,8 +215,25 @@ async function runSpeakGate(store: AgendaStore, ctx: unknown): Promise<void> {
 				]);
 			}
 		}
+		markSurfaced(store, candidate.agendaId);
 	}
 	store.writeQuota(quota);
+}
+
+/** Advances a decided agenda item from candidate_ready to surfaced. */
+function markSurfaced(store: AgendaStore, agendaId: string): void {
+	const agenda = store.readAgenda();
+	let changed = false;
+	const updated = agenda.map((item) => {
+		if (item.id === agendaId && item.status === "candidate_ready") {
+			changed = true;
+			return { ...item, status: "surfaced" };
+		}
+		return item;
+	});
+	if (changed) {
+		store.writeAgenda(updated);
+	}
 }
 
 /** Shows the approval dialog and resolves false when no UI is available. */
@@ -239,9 +255,15 @@ function injectRuntimeDigest(
 	store: AgendaStore,
 	currentSystemPrompt: string | undefined,
 ): { readonly systemPrompt: string } | undefined {
+	const knownAgendas = new Set(
+		store.readDecisions().map((decision) => decision.agendaId),
+	);
+	const pendingCandidates = store
+		.readCandidates()
+		.filter((candidate) => !knownAgendas.has(candidate.agendaId));
 	const digest = buildRuntimeDigest({
 		now: nowIso(),
-		candidates: store.readCandidates(),
+		candidates: pendingCandidates,
 		decisions: store.readDecisions().slice(-3),
 	});
 	if (digest === undefined) {

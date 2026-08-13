@@ -440,4 +440,48 @@ describe("memoryEvolution extension entry (P3/P4 speak gate + digest)", () => {
 			await rm(stateDir, { recursive: true, force: true });
 		}
 	});
+
+	test("deduplicates by agenda id across runs with regenerated candidate ids", async () => {
+		const stateDir = await createTempStateDir();
+		try {
+			const { pi, registered } = recordingPi();
+			memoryEvolution(pi as ExtensionAPI, { stateDir, env: {} });
+			await seedCandidate(stateDir);
+			await trigger(registered, "session_compact", [
+				{ type: "session_compact", reason: "threshold", fromExtension: false },
+			]);
+			// First agent_end evaluates and logs a decision.
+			await trigger(registered, "agent_end", [
+				{ type: "agent_end", messages: agentMessages() },
+				mockCtx("/tmp/project", false),
+			]);
+			const firstCount = (await readFile(join(stateDir, "speak_decisions.jsonl"), "utf8"))
+				.trim().split("\n").filter(Boolean).length;
+			// A regenerated candidate id for the same agenda must not re-evaluate.
+			const store = createAgendaStore(stateDir);
+			store.writeCandidates([
+				{
+					candidateId: "C-NEW-REGENERATED",
+					agendaId: "A-000001",
+					title: "测试候选",
+					type: "quality_improvement",
+					maturityScore: 0.85,
+					action: "create_proposal",
+					status: "candidate_ready",
+					evidenceCount: 5,
+					observationDays: 10,
+					suggestedMessage: "议题：测试候选",
+				},
+			]);
+			await trigger(registered, "agent_end", [
+				{ type: "agent_end", messages: agentMessages() },
+				mockCtx("/tmp/project", false),
+			]);
+			const secondCount = (await readFile(join(stateDir, "speak_decisions.jsonl"), "utf8"))
+				.trim().split("\n").filter(Boolean).length;
+			assert.equal(secondCount, firstCount);
+		} finally {
+			await rm(stateDir, { recursive: true, force: true });
+		}
+	});
 });

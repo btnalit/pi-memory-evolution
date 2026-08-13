@@ -105,6 +105,7 @@ export interface SpeakQuota {
 /** One traceable speak-gate decision. */
 export interface SpeakDecision {
 	readonly candidateId: string;
+	readonly agendaId: string;
 	readonly title: string;
 	readonly priorityScore: number;
 	readonly speakScore: number;
