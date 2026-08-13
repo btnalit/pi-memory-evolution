@@ -168,14 +168,22 @@ flowchart LR
 - 可追溯：每个决策输出 `decision_reason` 步骤数组 + `would_have_spoken_without_quota`（区分"质量不够"和"容量不够"）
 - 输出动作：`speak_now` / `speak_now_with_approval` / `proposal_queue` / `daily_digest` / `silent_log_only` / `risk_alert_only`
 
-**提案状态机**（精简版）：
+**提案状态机**（P5 已实施，自动审批闭环）：
 
 ```
-draft → pending_user_approval → approved → implemented → verified
-                │                  │
-                ├→ rejected        ├→ failed
-                └→ stale           └→ rollback_required
+pending_user_approval → approved | rejected   (agent 消息引用提案 id + 批准/拒绝关键词)
+pending_user_approval → rejected               (expires_at 到期未决策)
+approved → implemented                          (执行器生成执行计划文件)
+approved → rejected                             (手动/未来)
+implemented → verified | failed | rollback_required
+failed → rollback_required
 ```
+
+- 终态：`verified` / `rejected` / `rollback_required`；`draft` 保留供未来非交互路径
+- 审批窗口：创建时设定 `expires_at = createdAt + 24h`（Hermes 对齐）；无定时器，到期检查在 `agent_end` 事件边界完成
+- 审批通道：digest 的「Proposals Awaiting Approval」section 呈现待审提案（id/标题/expiry）；主 agent（LLM）在会话中引用提案 id 表达批准/拒绝，扩展在 `agent_end` 分析消息捕捉决策
+- 保守匹配：仅“提案 id + 明确关键词”触发决策；无决策不阻塞（到期自动拒绝兑底）
+- 安全论证：执行器是 record-first（只产出执行计划文件），审批误判风险有限（多/少一份计划文件，无行为副作用）
 
 **安全边界**（写死，不靠提示词）：
 
@@ -185,9 +193,14 @@ draft → pending_user_approval → approved → implemented → verified
 
 ### 4.7 进化执行器（executor/）
 
-- 批准的提案 → 生成/更新规则文件到**共享 rules 目录**（利用 project-rules 的 `rulesDir` 注入机制——pi 现成的"自我改写"通道）
-- 或更新本扩展状态文件（digest、agenda、阈值）
-- 每个变更带：`rollback` 方案、`verification` 方法、证据路径（Hermes 模板移植）
+**P5 落地：record-first 执行**（pi 0.84.1 实测无 project-rules `rulesDir` API，原“写回共享 rules 目录”假设修正为以下方案）：
+
+- 批准的提案 → 生成 markdown 执行计划文件到 `executions/P-<id>.md`（本扩展自有目录）
+- 每个执行计划带：变更描述、`rollback` 方案、`verification` 方法、证据路径（Hermes 模板字段移植）、手动执行 checklist
+- 真实行为变更保持手动：用户在扩展外按执行计划操作（不自动写配置/规则，安全边界不破）
+- 单提案写失败 → `failed`（journal 记录原因），其余提案继续执行；无 approved 提案 → 静默
+- 触发时机：`agent_end`（speak gate → 自动审批 → 执行器，同一事件边界）
+- 未来若 pi 暴露 rules 写入能力：可探测后升级为自动写回（探测式能力升级，不破坏现有流程）
 
 ### 4.8 注入器（injector/）— 闭环的"输出"端
 
@@ -360,8 +373,8 @@ pi-memory-evolution/
 | P1 | 信号采集 + journal | 信号按触发策略写入 signals.jsonl（首次 `session_compact` 后启动、每次 `agent_end` 增量），审计完整；子代理进程确认跳过 |
 | P2 | 记忆评估（shadow mode） | 质量/利用度评分产出，不触发任何动作 |
 | P3 | digest 注入 | 每次会话注入 <2KB digest，过期/空值静默跳过，子代理进程不注入 |
-| P4 | 议程 + speak gate | 候选正确分级，决策可追溯，配额生效，批准用 `ui.confirm()` |
-| P5 | 进化执行 + 闭环 | 批准的提案写回规则文件（默认本扩展目录），下个会话生效 |
+| P4 | 议程 + speak gate | 候选正确分级，决策可追溯，配额生效，提案写入 `pending_user_approval`（审批移交 P5 自动通道） |
+| P5 | 进化执行 + 闭环 | ✅ 已实施：自动审批（digest 呈现 + agent 消息决策捕捉 + 24h 到期拒绝）+ record-first 执行器（`executions/` 执行计划文件） |
 
 P0-P1 是骨架，P2-P3 是观察能力，P4-P5 才引入"改变行为"的进化能力。**用户批准边界从 P0 就写死**，不后补。
 

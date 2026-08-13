@@ -8,7 +8,8 @@ Memory self-evolution system for the PI Coding Agent.
 - **P1** (done): signal collection (session stats, projection notices, user feedback) + evolution journal, with compaction-gated trigger and subagent skip
 - **P2** (done): memory evaluation (Hermes maturation formula) + agenda engine (state machine, unmatched-signal clustering), running in shadow mode
 - **P3** (done): runtime digest injection into every session (`before_agent_start`), <2KB, expiry-stamped, advisory-only
-- **P4** (done): speak gate consuming matured candidates — scoring, quotas, traceable decisions, `ui.confirm()` user approval, proposal queue
+- **P4** (done): speak gate consuming matured candidates — scoring, quotas, traceable decisions, proposal queue
+- **P5** (done): proposal lifecycle — auto-approval via agent messages (with 24h expiry), evolution executor writing record-first execution plans
 
 ## Features
 
@@ -19,9 +20,10 @@ Memory self-evolution system for the PI Coding Agent.
 - Tracks long-term agenda items through a state machine (`observing → accumulating_evidence → candidate_ready → surfaced → resolved → archived`)
 - Discovers new agenda items from recurring unmatched signal clusters
 - Runs in shadow mode: evaluation writes candidates and journal only, never triggers user-visible actions
-- Evaluates matured candidates through the speak gate (priority/speak scoring, risk dampeners, daily quotas) and asks the user to approve via `ui.confirm()`
-- Writes approved proposals to `proposal_queue.yaml` (lifecycle handling is a later phase)
-- Injects a runtime digest into every session (`before_agent_start`), carrying pending candidates and recent speak decisions
+- Evaluates matured candidates through the speak gate (priority/speak scoring, risk dampeners, daily quotas)
+- Writes proposals as `pending_user_approval` and surfaces them in the runtime digest; the agent approves or rejects them by referencing the proposal id in a message (24h expiry, then auto-rejected)
+- Executes approved proposals by writing a record-first execution plan (change / rollback / verification / evidence) to `executions/`; real behavior changes stay manual
+- Injects a runtime digest into every session (`before_agent_start`), carrying pending candidates, recent speak decisions and pending proposals
 - Skips collection inside subagent processes (`PI_SUBAGENT_AGENT_ID` env)
 - Zero core patches; everything runs as a pi extension
 
@@ -40,7 +42,8 @@ memory-evolution/
 ├── agenda_candidates.yaml     # matured candidates
 ├── speak_decisions.jsonl      # traceable speak-gate decisions
 ├── speak_quota.json           # daily speak quota usage
-├── proposal_queue.yaml        # user-approved proposals
+├── proposal_queue.yaml        # proposals in lifecycle states
+├── executions/                # record-first execution plans (one md per implemented proposal)
 └── evolution_journal.md       # audit trail
 ```
 
@@ -81,7 +84,27 @@ Decision routing: `speak_now` / `speak_now_with_approval` / `proposal_queue` / `
 
 ## Runtime digest
 
-The session-injected digest (<2KB, advisory-only, `Valid until` 24h) carries pending candidates and recent speak decisions. Sections are omitted when empty; nothing hardcoded.
+The session-injected digest (<2KB, advisory-only, `Valid until` 24h) carries pending candidates, recent speak decisions and proposals awaiting approval. Sections are omitted when empty; nothing hardcoded.
+
+## Proposal lifecycle
+
+Approved candidates become proposals in `proposal_queue.yaml` with the status `pending_user_approval` and a 24h `expiresAt`:
+
+```
+pending_user_approval → approved | rejected   (agent references the proposal id with an approval/rejection keyword)
+pending_user_approval → rejected               (expired without a decision)
+approved → implemented                          (executor writes an execution plan)
+approved → rejected                             (manual)
+implemented → verified | failed | rollback_required
+failed → rollback_required
+```
+
+Approval flow:
+
+1. The digest lists pending proposals as `Proposals Awaiting Approval` with their id and expiry.
+2. The agent approves or rejects one by mentioning its id together with a keyword (e.g. `批准 P-20260805-0001` or `拒绝 P-20260805-0001`) in a session message.
+3. Unexpired proposals without a decision stay pending; expired ones are auto-rejected.
+4. Approved proposals are executed by writing a markdown execution plan to `executions/P-<id>.md` (change, rollback, verification, evidence, manual checklist). Execution is record-first: the plan is the deliverable, and real behavior changes are applied by the user outside the extension.
 
 ## Design
 
