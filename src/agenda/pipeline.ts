@@ -192,6 +192,7 @@ function writeCandidates(
 				evidenceCount: item.counters.evidenceCount,
 				observationDays: item.counters.observationDays,
 				suggestedMessage: `议题：${item.title}`,
+				evidence: item.evidence,
 			})),
 	);
 }

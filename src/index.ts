@@ -22,7 +22,9 @@ import { runMaturationPipeline } from "./agenda/pipeline.ts";
 import { evaluateCandidate } from "./governor/speak-gate.ts";
 import { createProposalFromCandidate } from "./governor/proposal-queue.ts";
 import { runAutoApproval } from "./governor/proposal-approval.ts";
+import { runVerificationSignals } from "./governor/proposal-verification.ts";
 import { executeApprovedProposals } from "./executor/proposal-executor.ts";
+import { archiveTerminalProposals } from "./executor/proposal-archive.ts";
 import { buildRuntimeDigest } from "./injector/digest.ts";
 
 /** Event hook name that carries the assembled system prompt into every session. */
@@ -81,7 +83,9 @@ export default function memoryEvolution(
 		maybeRunEvaluation(store);
 		runSpeakGate(store);
 		runAutoApproval(store, messages, nowIso());
+		runVerificationSignals(store, messages, nowIso());
 		executeApprovedProposals(store, nowIso());
+		archiveTerminalProposals(store, nowIso());
 	});
 	registerHook(pi, TURN_END_EVENT, (event) => {
 		if (!collectionEnabled) {
@@ -212,7 +216,11 @@ function runSpeakGate(store: AgendaStore): void {
 		quota = result.quota;
 		if (result.quotaConsumed && result.decision.action !== "risk_alert_only") {
 			// Q4-1: approval is deferred to the auto-approval channel; no ui.confirm here.
-			const proposal = createProposalFromCandidate(candidate, [], nowIso());
+			const proposal = createProposalFromCandidate(
+				candidate,
+				candidate.evidence ?? [],
+				nowIso(),
+			);
 			store.writeProposalQueue([
 				...store.readProposalQueue(),
 				proposal,

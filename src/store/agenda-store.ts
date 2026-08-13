@@ -1,4 +1,13 @@
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 /** File that stores append-only signal records (JSONL). */
@@ -93,6 +102,8 @@ export interface AgendaCandidate {
 	readonly evidenceCount: number;
 	readonly observationDays: number;
 	readonly suggestedMessage: string;
+	/** Evidence records carried from the agenda item (older files may omit it). */
+	readonly evidence?: readonly AgendaEvidence[];
 }
 
 /** Daily speak quota counters reset on date change. */
@@ -162,6 +173,9 @@ export interface AgendaStore {
 	writeProposalQueue(proposals: readonly ProposalRecord[]): void;
 	writeExecutionPlan(planId: string, content: string): void;
 	readExecutionPlan(planId: string): string | undefined;
+	archiveExecutionPlan(planId: string): boolean;
+	readArchivedPlan(planId: string): string | undefined;
+	purgeExpiredArchives(now: string, retentionDays: number): number;
 }
 
 /** Creates an agenda store writing into the given state directory. */
@@ -189,6 +203,12 @@ export function createAgendaStore(stateDir: string): AgendaStore {
 			writeExecutionPlan(stateDir, planId, content),
 		readExecutionPlan: (planId) =>
 			readExecutionPlan(stateDir, planId),
+		archiveExecutionPlan: (planId) =>
+			archiveExecutionPlan(stateDir, planId),
+		readArchivedPlan: (planId) =>
+			readArchivedPlan(stateDir, planId),
+		purgeExpiredArchives: (now, retentionDays) =>
+			purgeExpiredArchives(stateDir, now, retentionDays),
 	};
 }
 
@@ -359,6 +379,9 @@ function writeProposalQueue(
 /** Subdirectory holding one markdown execution plan per implemented proposal. */
 const EXECUTIONS_DIR = "executions";
 
+/** Subdirectory holding archived execution plans of terminal proposals. */
+const EXECUTIONS_ARCHIVE_DIR = "archive";
+
 /** Writes one execution plan markdown file for a proposal. */
 function writeExecutionPlan(
 	stateDir: string,
@@ -380,6 +403,62 @@ function readExecutionPlan(stateDir: string, planId: string): string | undefined
 		return undefined;
 	}
 	return readFileSync(file, "utf8");
+}
+
+/** Moves an execution plan into executions/archive/, or false when missing. */
+function archiveExecutionPlan(stateDir: string, planId: string): boolean {
+	const source = join(stateDir, EXECUTIONS_DIR, `${planId}.md`);
+	if (!fileExists(source)) {
+		return false;
+	}
+	mkdirSync(join(stateDir, EXECUTIONS_DIR, EXECUTIONS_ARCHIVE_DIR), {
+		recursive: true,
+	});
+	renameSync(source, join(stateDir, EXECUTIONS_DIR, EXECUTIONS_ARCHIVE_DIR, `${planId}.md`));
+	return true;
+}
+
+/** Reads one archived execution plan, or undefined when missing. */
+function readArchivedPlan(stateDir: string, planId: string): string | undefined {
+	const file = join(
+		stateDir,
+		EXECUTIONS_DIR,
+		EXECUTIONS_ARCHIVE_DIR,
+		`${planId}.md`,
+	);
+	if (!fileExists(file)) {
+		return undefined;
+	}
+	return readFileSync(file, "utf8");
+}
+
+/** Deletes archived plans older than the retention window, returning the count. */
+function purgeExpiredArchives(
+	stateDir: string,
+	now: string,
+	retentionDays: number,
+): number {
+	const archiveDir = join(stateDir, EXECUTIONS_DIR, EXECUTIONS_ARCHIVE_DIR);
+	let entries: string[] = [];
+	try {
+		entries = readdirSync(archiveDir);
+	} catch {
+		return 0;
+	}
+	const cutoff = Date.parse(now) - retentionDays * 24 * 3_600_000;
+	let purged = 0;
+	for (const entry of entries) {
+		if (!entry.endsWith(".md")) {
+			continue;
+		}
+		const file = join(archiveDir, entry);
+		const mtime = statSync(file).mtimeMs;
+		if (mtime < cutoff) {
+			unlinkSync(file);
+			purged++;
+		}
+	}
+	return purged;
 }
 
 /** Reads every line of a JSONL file as parsed records. */

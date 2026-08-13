@@ -203,3 +203,49 @@ describe("AgendaStore execution plans", () => {
 		}
 	});
 });
+
+describe("AgendaStore execution plan archive", () => {
+	test("moves an execution plan into executions/archive/", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeExecutionPlan("P-20260805-0001", "# plan");
+			const moved = store.archiveExecutionPlan("P-20260805-0001");
+			assert.equal(moved, true);
+			assert.equal(store.readExecutionPlan("P-20260805-0001"), undefined);
+			assert.ok(store.readArchivedPlan("P-20260805-0001") !== undefined);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("returns false when there is no plan to archive", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			assert.equal(store.archiveExecutionPlan("P-20260805-0001"), false);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("purges only archived plans older than the retention window", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeExecutionPlan("P-20260805-0001", "# old");
+			store.writeExecutionPlan("P-20260805-0002", "# fresh");
+			store.archiveExecutionPlan("P-20260805-0001");
+			store.archiveExecutionPlan("P-20260805-0002");
+			const now = "2026-08-05T00:00:00.000Z";
+			// 1 day ago is within the window; 100 days ago is beyond it.
+			const oldPath = join(dir, "executions", "archive", "P-20260805-0001.md");
+			const oldTime = Date.parse(now) - 100 * 24 * 3_600_000;
+			const { utimes } = await import("node:fs/promises");
+			await utimes(oldPath, new Date(oldTime), new Date(oldTime));
+			const purged = store.purgeExpiredArchives(now, 90);
+			assert.equal(purged, 1);
+			assert.equal(store.readArchivedPlan("P-20260805-0001"), undefined);
+			assert.ok(store.readArchivedPlan("P-20260805-0002") !== undefined);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+});

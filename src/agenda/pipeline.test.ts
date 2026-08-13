@@ -187,6 +187,41 @@ describe("runMaturationPipeline", () => {
 		}
 	});
 
+	test("carries evidence records into matured candidates", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeAgenda([
+				agendaItem({
+					firstSeenAt: "2026-07-15T00:00:00.000Z",
+					lastEvidenceAt: "2026-07-15T00:00:00.000Z",
+					evidenceMatchers: {
+						signalTypes: ["feedback"],
+						includeKeywords: [],
+						excludeKeywords: [],
+					},
+				}),
+			]);
+			seedSignals(store, [
+				{ ts: "2026-08-01T00:00:00.000Z", type: "feedback", source: "turn_end", keywords: ["不对"] },
+				{ ts: "2026-08-02T00:00:00.000Z", type: "feedback", source: "turn_end", keywords: ["错误"] },
+				{ ts: "2026-08-03T00:00:00.000Z", type: "feedback", source: "turn_end", keywords: ["错了"] },
+				{ ts: "2026-08-03T00:00:00.000Z", type: "feedback", source: "turn_end", keywords: ["应该改成"] },
+				{ ts: "2026-08-04T00:00:00.000Z", type: "feedback", source: "turn_end", keywords: ["不要"] },
+			]);
+			runMaturationPipeline(store, "2026-08-05T00:00:00.000Z");
+			const [candidate] = store.readCandidates();
+			assert.ok(candidate !== undefined, "expected a matured candidate");
+			assert.ok(Array.isArray(candidate.evidence));
+			assert.equal(candidate.evidence.length, 5);
+			assert.ok(
+				candidate.evidence.some((record) => record.summary.includes("不对")),
+				"expected evidence summaries carried from real signals",
+			);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("does not duplicate evidence across repeated runs", async () => {
 		const { store, dir } = await createTempStore();
 		try {
