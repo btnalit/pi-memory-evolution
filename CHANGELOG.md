@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), grouped 
 - Configurable speak-gate thresholds (`thresholds.json`): speakThreshold / priorityQueueThreshold / dailyDigestThreshold / suggestionLimit / strategicLimit, defaulting to Hermes values
 - Real-environment drill evidence: current pi session verified to emit agent_end signals and maturation runs in real time
 - Real pi compact fix: rpc sessions now compact successfully via multi-message accumulation (10+ alternating turns), firing a real session_compact event
+- Compact-drill configuration reverted: the temporary `compaction.keepRecentTokens=2000` setting (drill aid) was removed — multi-message accumulation is the actual fix (25K-token sessions compact under the default 20000 budget)
 
 ### Changed
 
