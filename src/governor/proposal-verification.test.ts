@@ -142,4 +142,68 @@ describe("runVerificationSignals", () => {
 			await rm(dir, { recursive: true, force: true });
 		}
 	});
+
+	test("does not verify when the message says unverified", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeProposalQueue([proposal("implemented")]);
+			runVerificationSignals(
+				store,
+				[message("assistant", "unverified P-20260805-0001")],
+				"2026-08-05T12:00:00.000Z",
+			);
+			const [p] = store.readProposalQueue();
+			assert.equal(p.status, "implemented");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("does not verify when the message says 未验证", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeProposalQueue([proposal("implemented")]);
+			runVerificationSignals(
+				store,
+				[message("assistant", "未验证 P-20260805-0001")],
+				"2026-08-05T12:00:00.000Z",
+			);
+			const [p] = store.readProposalQueue();
+			assert.equal(p.status, "implemented");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("does not verify when the message says not verified", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeProposalQueue([proposal("implemented")]);
+			runVerificationSignals(
+				store,
+				[message("assistant", "P-20260805-0001 not verified")],
+				"2026-08-05T12:00:00.000Z",
+			);
+			const [p] = store.readProposalQueue();
+			assert.equal(p.status, "implemented");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("does not verify when the message says 未验证通过", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeProposalQueue([proposal("implemented")]);
+			runVerificationSignals(
+				store,
+				[message("assistant", "未验证通过 P-20260805-0001")],
+				"2026-08-05T12:00:00.000Z",
+			);
+			const [p] = store.readProposalQueue();
+			assert.equal(p.status, "implemented");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
 });

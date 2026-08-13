@@ -88,6 +88,51 @@ describe("transitionProposal", () => {
 		assert.equal(original.status, "pending_user_approval");
 		assert.equal(next.status, "approved");
 	});
+
+	test("records approval identity when approving", () => {
+		const next = transitionProposal(
+			pendingProposal(),
+			"approved",
+			"2026-08-05T01:00:00.000Z",
+			{ approvedBy: "assistant", approvedAt: "2026-08-05T01:00:00.000Z" },
+		);
+		assert.equal(next.status, "approved");
+		assert.equal(next.approval.approvedBy, "assistant");
+		assert.equal(next.approval.approvedAt, "2026-08-05T01:00:00.000Z");
+	});
+
+	test("records rejection identity when rejecting via message", () => {
+		const next = transitionProposal(
+			pendingProposal(),
+			"rejected",
+			"2026-08-05T01:00:00.000Z",
+			{ approvedBy: "user", approvedAt: "2026-08-05T01:00:00.000Z" },
+		);
+		assert.equal(next.status, "rejected");
+		assert.equal(next.approval.approvedBy, "user");
+	});
+
+	test("records expiry as the decision maker for auto-rejection", () => {
+		const next = transitionProposal(
+			pendingProposal(),
+			"rejected",
+			"2026-08-05T01:00:00.000Z",
+			{ approvedBy: "expiry", approvedAt: "2026-08-05T01:00:00.000Z" },
+		);
+		assert.equal(next.status, "rejected");
+		assert.equal(next.approval.approvedBy, "expiry");
+	});
+
+	test("ignores approval identity when the target status is not approved/rejected", () => {
+		const next = transitionProposal(
+			pendingProposal({ status: "approved" }),
+			"implemented",
+			"2026-08-05T01:00:00.000Z",
+			{ approvedBy: "assistant", approvedAt: "2026-08-05T01:00:00.000Z" },
+		);
+		assert.equal(next.status, "implemented");
+		assert.equal(next.approval.approvedBy, null);
+	});
 });
 
 describe("PROPOSAL_TERMINAL_STATUSES", () => {

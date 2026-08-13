@@ -40,6 +40,12 @@ const REJECT_PATTERNS = [/\breject\b/i] as const;
 /** Roles whose messages may carry an approval decision. Tool output is data, not intent. */
 const DECISION_ROLES = new Set(["assistant", "user"]);
 
+/** One message-derived decision with the role that produced it. */
+interface DecidedEntry {
+	readonly decision: ProposalStatus;
+	readonly role: string;
+}
+
 /**
  * Decides pending proposals from agent messages and expiry.
  *
@@ -56,28 +62,34 @@ export function runAutoApproval(
 	now: string,
 ): void {
 	const queue = store.readProposalQueue();
-	const texts = messages
+	const entries = messages
 		.filter((message) => DECISION_ROLES.has(message.role))
-		.map(messageText)
-		.filter((text) => text.length > 0);
+		.map((message) => ({ role: message.role, text: messageText(message) }))
+		.filter((entry) => entry.text.length > 0);
 	let changed = false;
 
 	const updated = queue.map((proposal) => {
 		if (proposal.status !== "pending_user_approval") {
 			return proposal;
 		}
-		const decision = decideFromMessages(proposal, texts);
-		if (decision !== undefined) {
+		const decided = decideFromMessages(proposal, entries);
+		if (decided !== undefined) {
 			changed = true;
-			const next = transitionProposal(proposal, decision, now);
+			const next = transitionProposal(proposal, decided.decision, now, {
+				approvedBy: decided.role,
+				approvedAt: now,
+			});
 			store.appendJournal(
-				`- ${now} proposal ${proposal.id} (${proposal.title}) ${decision} via agent message`,
+				`- ${now} proposal ${proposal.id} (${proposal.title}) ${decided.decision} via agent message (role=${decided.role})`,
 			);
 			return next;
 		}
 		if (isExpired(proposal, now)) {
 			changed = true;
-			const next = transitionProposal(proposal, "rejected", now);
+			const next = transitionProposal(proposal, "rejected", now, {
+				approvedBy: "expiry",
+				approvedAt: now,
+			});
 			store.appendJournal(
 				`- ${now} proposal ${proposal.id} (${proposal.title}) rejected: expired without decision`,
 			);
@@ -91,23 +103,23 @@ export function runAutoApproval(
 	}
 }
 
-/** Returns approved/rejected from message texts, or undefined when undecided. */
+/** Returns a decision and its role, or undefined when undecided. */
 function decideFromMessages(
 	proposal: ProposalRecord,
-	texts: readonly string[],
-): ProposalStatus | undefined {
+	entries: readonly { readonly role: string; readonly text: string }[],
+): DecidedEntry | undefined {
 	const id = proposal.id;
-	const approving = texts.some(
-		(text) => text.includes(id) && hasApprovalIntent(text),
+	const approving = entries.find(
+		(entry) => entry.text.includes(id) && hasApprovalIntent(entry.text),
 	);
-	const rejecting = texts.some(
-		(text) => text.includes(id) && hasRejectionIntent(text),
+	const rejecting = entries.find(
+		(entry) => entry.text.includes(id) && hasRejectionIntent(entry.text),
 	);
-	if (approving && !rejecting) {
-		return "approved";
+	if (approving !== undefined && rejecting === undefined) {
+		return { decision: "approved", role: approving.role };
 	}
-	if (rejecting && !approving) {
-		return "rejected";
+	if (rejecting !== undefined && approving === undefined) {
+		return { decision: "rejected", role: rejecting.role };
 	}
 	return undefined;
 }

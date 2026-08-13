@@ -231,6 +231,54 @@ describe("runAutoApproval decision capture", () => {
 			await rm(dir, { recursive: true, force: true });
 		}
 	});
+
+	test("records the assistant role as the approval identity", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeProposalQueue([pendingProposal()]);
+			await runAutoApproval(
+				store,
+				[message("assistant", "批准 P-20260805-0001")],
+				"2026-08-05T12:00:00.000Z",
+			);
+			const [proposal] = store.readProposalQueue();
+			assert.equal(proposal.status, "approved");
+			assert.equal(proposal.approval.approvedBy, "assistant");
+			assert.equal(proposal.approval.approvedAt, "2026-08-05T12:00:00.000Z");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("records the user role as the rejection identity", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeProposalQueue([pendingProposal()]);
+			await runAutoApproval(
+				store,
+				[message("user", "拒绝 P-20260805-0001")],
+				"2026-08-05T12:00:00.000Z",
+			);
+			const [proposal] = store.readProposalQueue();
+			assert.equal(proposal.status, "rejected");
+			assert.equal(proposal.approval.approvedBy, "user");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("records expiry as the identity for auto-rejected proposals", async () => {
+		const { store, dir } = await createTempStore();
+		try {
+			store.writeProposalQueue([pendingProposal()]);
+			await runAutoApproval(store, [], "2026-08-07T00:00:00.000Z");
+			const [proposal] = store.readProposalQueue();
+			assert.equal(proposal.status, "rejected");
+			assert.equal(proposal.approval.approvedBy, "expiry");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("runAutoApproval expiry policy", () => {

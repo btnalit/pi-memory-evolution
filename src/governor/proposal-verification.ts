@@ -5,14 +5,25 @@ import type {
 } from "../store/agenda-store.ts";
 import { transitionProposal } from "./proposal-state.ts";
 
-/** Keywords that signal a user/agent has verified an implemented proposal. */
+/** Chinese keywords that signal a user/agent has verified an implemented proposal. */
 const VERIFY_KEYWORDS = [
 	"已验证",
 	"验证通过",
 	"验证完成",
 	"通过验证",
-	"verified",
-	"verification passed",
+] as const;
+
+/** English verification phrasings matched on word boundaries. */
+const VERIFY_PATTERNS = [/\bverified\b/i, /\bverification passed\b/i] as const;
+
+/** Negated verification forms that must NOT trigger a verified signal. */
+const NEGATED_VERIFICATIONS = [
+	"未验证通过",
+	"未验证完成",
+	"未通过验证",
+	"not verified",
+	"not verification passed",
+	"never verified",
 ] as const;
 
 /** Roles whose messages may carry a verification signal. */
@@ -59,7 +70,7 @@ export function runVerificationSignals(
 	}
 }
 
-/** Returns true when any message references the proposal id with a verify keyword. */
+/** Returns true when any message references the proposal id with a verify intent. */
 function hasVerificationSignal(
 	proposal: ProposalRecord,
 	texts: readonly string[],
@@ -67,8 +78,19 @@ function hasVerificationSignal(
 	return texts.some(
 		(text) =>
 			text.includes(proposal.id) &&
-			VERIFY_KEYWORDS.some((keyword) => text.includes(keyword)),
+			hasVerificationIntent(text),
 	);
+}
+
+/** Returns true when the text carries a verification intent (negations excluded). */
+function hasVerificationIntent(text: string): boolean {
+	const stripped = NEGATED_VERIFICATIONS.reduce(
+		(acc, negated) => acc.split(negated).join(""),
+		text,
+	);
+	const chineseHit = VERIFY_KEYWORDS.some((kw) => stripped.includes(kw));
+	const englishHit = VERIFY_PATTERNS.some((pattern) => pattern.test(stripped));
+	return chineseHit || englishHit;
 }
 
 /** Extracts plain text from a message of either role and content shape. */
