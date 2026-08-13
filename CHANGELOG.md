@@ -3,6 +3,23 @@
 All notable changes to pi-memory-evolution are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), grouped by phase.
 
+## [P8] - 2026-08-13
+
+### Added
+
+- Evidence contribution derived as `weight × relevance` (replaces hardcoded 0) and read into maturity scoring
+- Configurable speak-gate thresholds (`thresholds.json`): speakThreshold / priorityQueueThreshold / dailyDigestThreshold / suggestionLimit / strategicLimit, defaulting to Hermes values
+- Real-environment drill evidence: current pi session verified to emit agent_end signals and maturation runs in real time
+
+### Changed
+
+- `evaluateCandidate` accepts optional thresholds (defaults unchanged)
+- Evidence strength now sums the contribution field
+
+### Fixed
+
+- Contribution field was a hardcoded 0 in evidence records (P2 gap)
+
 ## [P7] - 2026-08-13
 
 ### Added

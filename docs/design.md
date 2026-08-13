@@ -144,6 +144,7 @@ flowchart LR
 - **质量维度**（Hermes 成熟度公式移植）：
   - `maturity_score = 0.30×evidence_strength + 0.25×trend_strength + 0.20×recurrence_density + 0.15×unresolved_cost + 0.10×actionability + time_pressure_bonus − staleness_penalty`
   - `time_pressure_bonus = min(0.12, log(days+1) × 0.03)`——时间不是证据
+  - **contribution（P8 已填充）**：`contribution = weight × relevance`（信号强度 × 与议程相关度，Hermes signal_weight 语义对齐）；evidence_strength 分子直接读 contribution 求和（不再硬编码 0）
 - **利用度维度**（pi 特有）：
   - 投影后重跑率（高 = 摘要丢了关键信息，投影阈值应调低）
   - 回源重读执行率（压缩后是否真的重读了文件——检测软协议执行情况）
@@ -262,6 +263,12 @@ state/memory-evolution/
 - 主 agent 在 digest 呈现后自然表达批准/拒绝的真实响应模式
 - `ui.confirm`/digest 在 TUI 中的实际渲染
 - 2-3 天校准期的真实会话累积节奏
+
+**P8 真实演练实证（本仓库运行环境 = 当前 pi 交互会话）**：
+
+- ✅ 已验证：当前会话（真实 pi 交互）中 `agent_end` 实时写 `session_stats` 信号（signals.jsonl 随会话持续增长）、`maturation run` 每次 agent_end 触发（journal 实时记录）——事件链真实工作
+- ⚠️ 已验证：rpc 独立进程无法产生 feedback——`collectionEnabled` 是进程内内存标志（每个 pi 进程独立），rpc 会话自动压缩触发不可靠（P6 L3 偶发成功、后续全失败）、手动 `compact` 报 "session too small" → 纠正消息未被采集
+- ⛔ 待真实用户配合：feedback 信号只能来自**当前主会话的真实 user 消息**（`extractCorrectionKeywords` 仅处理 user 角色）——真实用户在当前会话表达纠正（如"这个方案不对"）即产生真实 feedback → 议程项 → 候选 → speak gate 全链
 
 ---
 

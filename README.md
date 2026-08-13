@@ -12,6 +12,7 @@ Memory self-evolution system for the PI Coding Agent.
 - **P5** (done): proposal lifecycle — auto-approval via agent messages (with 24h expiry), evolution executor writing record-first execution plans
 - **P6** (done): hardening — word-boundary approval matching, evidence carried into execution plans, archived terminal plans, verified signal trigger
 - **P7** (done): approval identity recording, verified keyword boundaries, shadow calibration guide, changelog
+- **P8** (done): evidence contribution fill, configurable speak-gate thresholds, real-environment drill evidence
 
 ## Features
 
@@ -44,6 +45,7 @@ memory-evolution/
 ├── agenda_candidates.yaml     # matured candidates (with evidence records)
 ├── speak_decisions.jsonl      # traceable speak-gate decisions
 ├── speak_quota.json           # daily speak quota usage
+├── thresholds.json            # configurable speak-gate thresholds (optional)
 ├── proposal_queue.yaml        # proposals in lifecycle states
 ├── executions/                # record-first execution plans (one md per implemented proposal)
 │   └── archive/               # plans of terminal proposals (auto-purged after 90 days)
