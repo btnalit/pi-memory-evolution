@@ -231,6 +231,40 @@ state/memory-evolution/
 
 ---
 
+### 4.10 Shadow 校准观察指南（P7）
+
+**背景**：扩展按 shadow mode 纪律（见 4.4/4.5）只计算和记录，不触发用户可见动作。接入自动审批前需观察 2-3 天校准期（Hermes V1.4 经验）。本节提供证据导向的观察操作指引。
+
+**观察清单（每会话后检查）**：
+
+| 观察项 | 状态文件 | 预期 | 异常信号 |
+|---|---|---|---|
+| 信号采集启用 | `evolution_journal.md` | 首次 `session_compact` 后出现 `signal collection enabled` | 长期无此记录 → 检查事件注册/能力探测 |
+| 会话统计增长 | `signals.jsonl` | 每次 `agent_end` 新增 1 条 `session_stats`（messageCount>0） | 无增长 → 检查 `collectionEnabled` 门控（需 compaction 先行） |
+| 用户反馈信号 | `signals.jsonl` | 用户纠正后出现 `feedback` 记录（keywords 非空） | 长期无 feedback → 关键词表未命中（见 signals/feedback.ts） |
+| 议程项产生 | `self_agenda.yaml` | 重复 unmatched 信号聚类出 `accumulating_evidence` 项 | 恒空 → 信号不足或 matchers 过窄 |
+| 成熟评估运行 | `evolution_journal.md` | 3 会话后出现 `maturation run` 行 | 无 maturation → 会话数 <3 或评估异常 |
+| 候选产出 | `agenda_candidates.yaml` | 达标议程项变为 `candidate_ready` 候选（shadow_mode: true） | 恒空 → 证据/成熟度未达阈值（0.72/3/3） |
+| 决策日志 | `speak_decisions.jsonl` | 候选经 speak gate 评估后追加决策 | 候选存在但无决策 → speak gate 路径未触发 |
+
+**预期时间线**：
+
+1. 首次 `session_compact` → 信号采集启用
+2. 3 个会话 → 首次 `maturation run`（评估启动）
+3. 持续会话积累证据 → 议程项成熟 → `candidate_ready` 候选
+4. 2-3 天校准期 → 观察无异常 → 判定可接入自动审批（digest 呈现提案）
+
+**可接入判定标准**：候选真实产出 + 决策可追溯 + 无异常信号（上表异常列全为空）→ 从 shadow 转入自动审批。
+
+**环境边界声明**：本仓库开发环境无交互 TUI，以下观察项**只能在真实交互 pi 会话中验证**，此处不伪造观察结果：
+
+- 自动压缩（`session_compact`）在长会话中的真实触发行为（非交互 rpc 中触发不稳定，见 P6 部署验证记录）
+- 主 agent 在 digest 呈现后自然表达批准/拒绝的真实响应模式
+- `ui.confirm`/digest 在 TUI 中的实际渲染
+- 2-3 天校准期的真实会话累积节奏
+
+---
+
 ## 5. 与 pi 的集成机制（插件化）
 
 ### 5.1 扩展声明
@@ -379,6 +413,7 @@ pi-memory-evolution/
 | P4 | 议程 + speak gate | 候选正确分级，决策可追溯，配额生效，提案写入 `pending_user_approval`（审批移交 P5 自动通道） |
 | P5 | 进化执行 + 闭环 | ✅ 已实施：自动审批（digest 呈现 + agent 消息决策捕捉 + 24h 到期拒绝）+ record-first 执行器（`executions/` 执行计划文件） |
 | P6 | 加固 + 部署验证 | ✅ 已实施：词边界匹配 + 否定优先、evidence 携带、终态归档（90 天保留）、verified 信号触发 |
+| P7 | 身份记录 + 加固 + 文档 | ✅ 已实施：审批身份记录（approvedBy/expiry）、verified 词边界 + 否定守卫、shadow 校准观察指南、CHANGELOG |
 
 P0-P1 是骨架，P2-P3 是观察能力，P4-P5 才引入"改变行为"的进化能力。**用户批准边界从 P0 就写死**，不后补。
 

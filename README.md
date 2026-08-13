@@ -11,6 +11,7 @@ Memory self-evolution system for the PI Coding Agent.
 - **P4** (done): speak gate consuming matured candidates — scoring, quotas, traceable decisions, proposal queue
 - **P5** (done): proposal lifecycle — auto-approval via agent messages (with 24h expiry), evolution executor writing record-first execution plans
 - **P6** (done): hardening — word-boundary approval matching, evidence carried into execution plans, archived terminal plans, verified signal trigger
+- **P7** (done): approval identity recording, verified keyword boundaries, shadow calibration guide, changelog
 
 ## Features
 
@@ -112,7 +113,11 @@ Approval flow:
 
 ## Design
 
-See [docs/design.md](docs/design.md).
+See [docs/design.md](docs/design.md), including the [shadow calibration observation guide](docs/design.md) (section 4.10).
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for phase-by-phase change history.
 
 ## Development
 
