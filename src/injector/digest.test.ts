@@ -6,6 +6,7 @@ import type {
 	ProposalRecord,
 	SpeakDecision,
 } from "../store/agenda-store.ts";
+import type { DurableMemory } from "../memory/memory-store.ts";
 
 /** Builds a digest input with no candidates or decisions. */
 function baseInput(overrides: Partial<DigestInput> = {}): DigestInput {
@@ -49,6 +50,17 @@ function approvedDecision(): SpeakDecision {
 }
 
 /** Builds one proposal awaiting user approval. */
+function durableMemory(): DurableMemory {
+	return {
+		version: 1,
+		id: "compaction-a1",
+		kind: "compaction_summary",
+		createdAt: "2026-08-13T03:00:00.000Z",
+		sourceEntryId: "a1",
+		content: "用户偏好本地优先，蓝牙音响配置正在进行。",
+	};
+}
+
 function pendingProposal(): ProposalRecord {
 	return {
 		id: "P-20260805-0001",
@@ -69,6 +81,15 @@ describe("buildRuntimeDigest", () => {
 	test("returns undefined when there is nothing to report", () => {
 		const digest = buildRuntimeDigest(baseInput());
 		assert.equal(digest, undefined);
+	});
+
+	test("includes relevant durable memory", () => {
+		const digest = buildRuntimeDigest(
+			baseInput({ memories: [durableMemory()] }),
+		);
+		assert.ok(digest !== undefined);
+		assert.ok(digest.includes("Relevant Durable Memory"));
+		assert.ok(digest.includes("本地优先"));
 	});
 
 	test("includes a pending candidate section", () => {

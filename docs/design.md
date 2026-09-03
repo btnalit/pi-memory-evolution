@@ -1,6 +1,6 @@
 # Pi Memory Evolution — 记忆自进化系统方案
 
-> 版本：0.2（评审后修订）
+> 版本：0.3（持久记忆实现后）
 > 日期：2026-08-04
 > 状态：已按评审结论修订
 
@@ -8,6 +8,7 @@
 
 - 修正 5.2 事件钩子清单：移除 `session_before_compact`（多扩展冲突，见问题 1），改用 `session_compact`（纯观测）+ 新增 `agent_end`（记忆评估）
 - 4.8 注入器：补充子代理进程（`isChildSubagentProcess`）跳过逻辑
+- 4.9 持久记忆：补充压缩摘要持久化与跨会话相关检索注入
 - 4.3 信号采集：补充触发策略（首次 `session_compact` 后启动、每次 `agent_end` 增量、积累 3 个会话后评估）
 - 4.4 记忆评估：明确触发时机
 - 6.1 依赖面：明确 import 边界（允许公开入口，禁止内部路径与 pi-agent-suite 模块）
@@ -208,7 +209,7 @@ failed → rollback_required
 
 ### 4.8 注入器（injector/）— 闭环的"输出"端
 
-- 用 `before_agent_start` 事件修改 systemPrompt，注入 `runtime_digest`（当前焦点、待决策提案、近期问题）
+- 用 `before_agent_start` 事件修改 systemPrompt，注入 `runtime_digest`（相关持久记忆、当前焦点、待决策提案、近期问题）
 - 硬性要求（Hermes 教训）：
   - 体积 < 2KB，严格控制 token 成本
   - 带 `Valid until` 时间戳，过期内容视为不存在（防止陈旧焦点误导）
@@ -217,11 +218,27 @@ failed → rollback_required
 - 注入失败 → 静默跳过（等价于 digest 不存在），与会话正常继续
 - 子代理进程：`isChildSubagentProcess()` 为真时跳过注入——digest 只注入主会话，不污染子代理上下文
 
-### 4.9 状态与审计（store/）
+### 4.9 持久记忆（memory/）— 跨会话连续性的第一层实现
+
+- `session_compact` 成功后读取 `compactionEntry.summary`，写入扩展自有的 `memories.jsonl`
+- 以压缩条目 id 去重，坏行跳过，写入前对常见 API key/token/password/secret 形式做脱敏
+- `before_agent_start` 使用原始用户 prompt 做轻量相关性检索：英文词和中文双字词，最多选 3 条并受字符预算限制
+- “继续上次/之前工作”等延续性请求在无精确命中时回退到最近记忆
+- 只注入相关摘要，不把所有历史内容塞入上下文；摘要作为 advisory，用户当前请求优先
+- 记忆分为 `recent` / `durable` / `pinned` 三层；状态分为 `provisional` / `confirmed` / `forgotten` / `conflicted`
+- 检索使用本地确定性混合排序：词法/CJK 双字词 lane + 层级权威 lane，使用 Reciprocal Rank Fusion；只有延续性请求才启用最近记录 fallback
+- 生命周期动作写入独立的 `memory-actions.jsonl`，读取时投影，支持 confirm/correct/forget/pin/conflict/resolve，不重写基础摘要
+- `memory/extractor.ts` 只解析压缩摘要中有明确标题的 bullet，将其生成 `provisional` 的 fact/preference/decision/project_state 候选；每节和总量都有上限，敏感 bullet 跳过
+- 启动时会对历史压缩摘要做一次幂等回填，避免功能上线前已有的摘要永远停留在单一 summary 层
+- 当前限制：不做向量检索，也不对无标题自由文本做自动事实推断；候选仍需 owner 通过命令确认
+
+### 4.10 状态与审计（store/）
 
 ```
 state/memory-evolution/
 ├── signals.jsonl          # 信号（append-only）
+├── memories.jsonl         # 压缩摘要持久记忆（append-only）
+├── memory-actions.jsonl   # owner 生命周期动作（append-only）
 ├── self_agenda.yaml       # 议程项 + 成熟度
 ├── proposal_queue.yaml    # 提案状态机
 ├── evolution_journal.md   # 审计轨迹（每次评估/提案/变更必写）
@@ -232,7 +249,7 @@ state/memory-evolution/
 
 ---
 
-### 4.10 Shadow 校准观察指南（P7）
+### 4.11 Shadow 校准观察指南（P7）
 
 **背景**：扩展按 shadow mode 纪律（见 4.4/4.5）只计算和记录，不触发用户可见动作。接入自动审批前需观察 2-3 天校准期（Hermes V1.4 经验）。本节提供证据导向的观察操作指引。
 
@@ -241,6 +258,8 @@ state/memory-evolution/
 | 观察项 | 状态文件 | 预期 | 异常信号 |
 |---|---|---|---|
 | 信号采集启用 | `evolution_journal.md` | 首次 `session_compact` 后出现 `signal collection enabled` | 长期无此记录 → 检查事件注册/能力探测 |
+| 压缩记忆持久化 | `memories.jsonl` | 每次成功压缩后新增一条摘要（按 compaction entry id 去重） | 有启用记录但无增长 → 检查 `compactionEntry.summary` |
+| 相关记忆注入 | `before_agent_start` digest | 新会话相关 prompt 中出现 `Relevant Durable Memory` | 有 memories 但无注入 → 检查 prompt 关键词或延续性表达 |
 | 会话统计增长 | `signals.jsonl` | 每次 `agent_end` 新增 1 条 `session_stats`（messageCount>0） | 无增长 → 检查 `collectionEnabled` 门控（需 compaction 先行） |
 | 用户反馈信号 | `signals.jsonl` | 用户纠正后出现 `feedback` 记录（keywords 非空） | 长期无 feedback → 关键词表未命中（见 signals/feedback.ts） |
 | 议程项产生 | `self_agenda.yaml` | 重复 unmatched 信号聚类出 `accumulating_evidence` 项 | 恒空 → 信号不足或 matchers 过窄 |
@@ -290,7 +309,7 @@ state/memory-evolution/
 }
 ```
 
-安装方式：`pi install <本包>`（与 pi-agent-suite 一致）。
+安装方式：`pi install git:github.com/btnalit/pi-memory-evolution@v0.1.0`；本地开发可使用 `pi install ./pi-memory-evolution`，项目级安装加 `-l`。安装/更新后在活动会话执行 `/reload`。
 
 ### 5.2 事件钩子清单
 
@@ -405,6 +424,7 @@ pi-memory-evolution/
 │   ├── governor/           # speak gate + 提案状态机
 │   ├── executor/           # 进化执行（写回规则/状态）
 │   ├── injector/           # runtime digest 注入
+│   ├── memory/             # 压缩摘要持久化 + 跨会话检索
 │   └── store/              # 状态文件读写 + journal
 └── state/                  # 运行时状态（安装后落在扩展自有目录）
 ```
@@ -423,6 +443,10 @@ pi-memory-evolution/
 | P5 | 进化执行 + 闭环 | ✅ 已实施：自动审批（digest 呈现 + agent 消息决策捕捉 + 24h 到期拒绝）+ record-first 执行器（`executions/` 执行计划文件） |
 | P6 | 加固 + 部署验证 | ✅ 已实施：词边界匹配 + 否定优先、evidence 携带、终态归档（90 天保留）、verified 信号触发 |
 | P7 | 身份记录 + 加固 + 文档 | ✅ 已实施：审批身份记录（approvedBy/expiry）、verified 词边界 + 否定守卫、shadow 校准观察指南、CHANGELOG |
+| P8 | 真实环境演练 + 采集修复 | ✅ 已实施：真实 compact/agent_end 验证、evidence contribution、可配置阈值 |
+| P9 | 第一层跨会话持久记忆 | ✅ 已实施：持久化 compaction summary、相关检索注入、延续请求回退、去重与基础脱敏 |
+| P10 | 本地分层混合检索 + 记忆生命周期 | ✅ 已实施：recent/durable/pinned 分层、词法与层级 lane 的 RRF、owner 操作投影、遗忘与冲突 fail-closed |
+| P11 | 结构化候选提取 | ✅ 已实施：从带标题的 compaction bullet 提取 provisional fact/preference/decision/project_state，并对历史摘要幂等回填 |
 
 P0-P1 是骨架，P2-P3 是观察能力，P4-P5 才引入"改变行为"的进化能力。**用户批准边界从 P0 就写死**，不后补。
 

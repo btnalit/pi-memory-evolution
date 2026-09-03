@@ -13,6 +13,9 @@ Memory self-evolution system for the PI Coding Agent.
 - **P6** (done): hardening — word-boundary approval matching, evidence carried into execution plans, archived terminal plans, verified signal trigger
 - **P7** (done): approval identity recording, verified keyword boundaries, shadow calibration guide, changelog
 - **P8** (done): evidence contribution fill, configurable speak-gate thresholds, real-environment drill evidence
+- **P9** (done): durable compaction-summary memory with prompt-relevant cross-session retrieval and basic credential redaction
+- **P10** (done): local layered hybrid retrieval and explicit memory lifecycle controls
+- **P11** (done): bounded structural extraction of provisional facts, preferences, decisions and project state
 
 ## Features
 
@@ -26,21 +29,40 @@ Memory self-evolution system for the PI Coding Agent.
 - Evaluates matured candidates through the speak gate (priority/speak scoring, risk dampeners, daily quotas)
 - Writes proposals as `pending_user_approval` and surfaces them in the runtime digest; the agent approves or rejects them by referencing the proposal id in a message (24h expiry, then auto-rejected)
 - Executes approved proposals by writing a record-first execution plan (change / rollback / verification / evidence) to `executions/`; real behavior changes stay manual
-- Injects a runtime digest into every session (`before_agent_start`), carrying pending candidates, recent speak decisions and pending proposals
+- Persists successful compaction summaries and bounded structured candidates (facts, preferences, decisions, project state) for later prompts
+- Uses deterministic local hybrid retrieval across lexical, layer-authority and recency lanes; no vector model or external service
+- Injects a runtime digest into every session (`before_agent_start`), carrying relevant durable memories, pending candidates, recent speak decisions and pending proposals
 - Skips collection inside subagent processes (`PI_SUBAGENT_AGENT_ID` env)
 - Zero core patches; everything runs as a pi extension
 
 ## Installation
 
+Install the currently verified Git revision globally:
+
+```bash
+pi install git:github.com/btnalit/pi-memory-evolution@v0.1.0
+```
+
+For a local checkout, use:
+
 ```bash
 pi install ./pi-memory-evolution
 ```
+
+Add `-l` to install into the current project's `.pi/settings.json` instead of
+user settings. After installation or an update, run `/reload` in the active Pi
+session. Verify the extension with `/memory list`.
+
+The package manifest is self-contained: Pi loads `./src/index.ts`, and the
+Pi coding-agent API is declared as a peer dependency rather than bundled.
 
 State files are written to `~/.pi/agent/agent-suite/memory-evolution/`:
 
 ```
 memory-evolution/
 ├── signals.jsonl              # append-only signal records
+├── memories.jsonl             # durable compaction summaries for cross-session continuity
+├── memory-actions.jsonl       # explicit owner lifecycle actions (append-only)
 ├── self_agenda.yaml           # agenda items with maturity scores
 ├── agenda_candidates.yaml     # matured candidates (with evidence records)
 ├── speak_decisions.jsonl      # traceable speak-gate decisions
@@ -87,9 +109,27 @@ speak = priority − 0.20(interruption) − repeat_penalty
 
 Decision routing: `speak_now` / `speak_now_with_approval` / `proposal_queue` / `daily_digest` / `silent_log_only` / `risk_alert_only`. Daily quota: 3 suggestions, 1 strategic. Every decision is logged with a traceable `decision_reason` and `would_have_spoken_without_quota`.
 
+## Cross-session durable memory
+
+After a successful `session_compact`, the extension stores the compaction summary in `memories.jsonl`. On each later prompt, it uses lightweight lexical matching (Latin words and CJK bigrams) to select up to three relevant summaries; continuation prompts such as `继续上次工作` fall back to recent summaries. Selected memory is included in the advisory runtime digest and the digest remains capped at 2KB. Duplicate compaction events are ignored by entry id, malformed records are skipped, and common credential formats are redacted before persistence. Explicit lifecycle actions are kept in `memory-actions.jsonl` and projected at read time, so memories can be confirmed, corrected, forgotten, pinned, or marked as conflicting without rewriting the base ledger or silently choosing between conflicts.
+
+The owner can inspect and manage records with the built-in command:
+
+```text
+/memory list
+/memory confirm <id>
+/memory correct <id> <replacement text>
+/memory forget <id>
+/memory pin <id>
+/memory conflict <id> <other-id>
+/memory resolve <id>
+```
+
+This remains deliberately local and deterministic: it preserves compaction summaries, derives bounded provisional candidates from labeled summary sections, and applies explicit owner edits. It does not use vector models or external retrieval services; free-form prose without recognizable headings is not auto-promoted.
+
 ## Runtime digest
 
-The session-injected digest (<2KB, advisory-only, `Valid until` 24h) carries pending candidates, recent speak decisions and proposals awaiting approval. Sections are omitted when empty; nothing hardcoded.
+The session-injected digest (<2KB, advisory-only, `Valid until` 24h) carries relevant durable memories, pending candidates, recent speak decisions and proposals awaiting approval. Sections are omitted when empty; nothing hardcoded.
 
 ## Proposal lifecycle
 
@@ -129,7 +169,7 @@ Tests use Node's built-in test runner (node:test):
 npm test
 ```
 
-Because the extension imports `getAgentDir` from `@earendil-works/pi-coding-agent` at runtime, the test environment needs that package resolvable. On this machine it is symlinked from the global pi install:
+Because the extension imports `getAgentDir` from `@earendil-works/pi-coding-agent` at runtime, the test environment needs that package resolvable. Pi provides this peer dependency when loading the package; for standalone local tests it is symlinked from the global pi install on this machine:
 
 ```bash
 mkdir -p node_modules/@earendil-works

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import memoryEvolution from "./index.ts";
 import { createAgendaStore } from "./store/agenda-store.ts";
+import { createMemoryStore } from "./memory/memory-store.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 /** Records pi.on registrations for assertion and manual triggering. */
@@ -159,6 +160,66 @@ describe("memoryEvolution extension entry (P1)", () => {
 			const record = JSON.parse(lines[0]);
 			assert.equal(record.type, "session_stats");
 			assert.equal(record.toolCallCount, 1);
+		} finally {
+			await rm(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	test("persists compaction summaries and injects relevant memory", async () => {
+		const stateDir = await createTempStateDir();
+		try {
+			const { pi, registered } = recordingPi();
+			memoryEvolution(pi as ExtensionAPI, { stateDir, env: {} });
+			await trigger(registered, "session_compact", [
+				{
+					type: "session_compact",
+					reason: "manual",
+					fromExtension: false,
+					compactionEntry: {
+						type: "compaction",
+						id: "cmp-001",
+						parentId: "root",
+						timestamp: "2026-08-13T04:00:00.000Z",
+						summary: "## Constraints & Preferences\n- 用户偏好本地优先。\n## Progress\n- [x] 蓝牙音响配置正在进行。",
+						firstKeptEntryId: "kept-001",
+						tokensBefore: 20000,
+					},
+				},
+			]);
+			const memories = await readFile(join(stateDir, "memories.jsonl"), "utf8");
+			assert.equal(memories.trim().split("\n").length, 3);
+			assert.ok(memories.includes("蓝牙音响配置"));
+
+			const result = await trigger(registered, "before_agent_start", [
+				{
+					type: "before_agent_start",
+					prompt: "继续蓝牙音响配置",
+					systemPrompt: "基础提示词",
+				},
+				mockCtx(),
+			]);
+			assert.ok(result !== undefined);
+			assert.ok((result as { systemPrompt: string }).systemPrompt.includes("蓝牙音响配置"));
+		} finally {
+			await rm(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	test("hydrates structured candidates from an existing summary at startup", async () => {
+		const stateDir = await createTempStateDir();
+		try {
+			const memoryStore = createMemoryStore(stateDir);
+			memoryStore.appendMemory({
+				id: "compaction:old-1",
+				kind: "compaction_summary",
+				createdAt: "2026-08-13T04:00:00.000Z",
+				sourceEntryId: "old-1",
+				content: "## 偏好\n- 用户偏好本地优先。",
+			});
+			const { pi } = recordingPi();
+			memoryEvolution(pi as ExtensionAPI, { stateDir, env: {} });
+			const memories = memoryStore.readMemories();
+			assert.ok(memories.some((memory) => memory.kind === "preference"));
 		} finally {
 			await rm(stateDir, { recursive: true, force: true });
 		}

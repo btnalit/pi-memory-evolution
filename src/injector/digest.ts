@@ -3,6 +3,7 @@ import type {
 	ProposalRecord,
 	SpeakDecision,
 } from "../store/agenda-store.ts";
+import type { DurableMemory } from "../memory/memory-store.ts";
 
 /** Inputs required to build the runtime digest. */
 export interface DigestInput {
@@ -10,6 +11,7 @@ export interface DigestInput {
 	readonly candidates: readonly AgendaCandidate[];
 	readonly decisions: readonly SpeakDecision[];
 	readonly proposals: readonly ProposalRecord[];
+	readonly memories?: readonly DurableMemory[];
 }
 
 /** Maximum digest size in characters (~2KB token budget). */
@@ -26,7 +28,8 @@ export function buildRuntimeDigest(input: DigestInput): string | undefined {
 	if (
 		input.candidates.length === 0 &&
 		input.decisions.length === 0 &&
-		pendingProposals.length === 0
+		pendingProposals.length === 0 &&
+		(input.memories?.length ?? 0) === 0
 	) {
 		return undefined;
 	}
@@ -36,6 +39,15 @@ export function buildRuntimeDigest(input: DigestInput): string | undefined {
 	lines.push(`Last updated: ${formatStamp(input.now)}`);
 	lines.push(`Valid until: ${formatValidUntil(input.now)}`);
 	lines.push("");
+
+	if (input.memories !== undefined && input.memories.length > 0) {
+		lines.push("## Relevant Durable Memory");
+		for (const memory of input.memories) {
+			const content = memory.content.replace(/\s+/g, " ").trim();
+			lines.push(`- [${formatStamp(memory.createdAt)}] ${content}`);
+		}
+		lines.push("");
+	}
 
 	if (input.candidates.length > 0) {
 		lines.push("## Proposals Awaiting Your Decision");
