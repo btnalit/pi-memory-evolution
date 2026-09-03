@@ -99,6 +99,25 @@ describe("MemoryStore", () => {
 		}
 	});
 
+	test("cascades summary correction and forgetting to derived siblings", async () => {
+		const dir = await createTempDir();
+		try {
+			const store = createMemoryStore(dir);
+			store.appendMemory(draft("compaction:a1", "原始摘要"));
+			store.appendMemory({
+				...draft("derived:a1:preference:p1", "原始偏好"),
+				kind: "preference",
+				sourceEntryId: "a1",
+			});
+			store.appendAction({ memoryId: "compaction:a1", type: "correct", content: "修正摘要" });
+			assert.equal(store.readMemories().find((memory) => memory.id === "derived:a1:preference:p1")?.status, "forgotten");
+			store.appendAction({ memoryId: "compaction:a1", type: "forget" });
+			assert.ok(store.readMemories().every((memory) => memory.status === "forgotten"));
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("ignores malformed records", async () => {
 		const dir = await createTempDir();
 		try {

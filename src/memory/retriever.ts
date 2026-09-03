@@ -12,6 +12,15 @@ const LAYER_WEIGHT: Record<MemoryLayer, number> = {
 	durable: 2,
 	recent: 1,
 };
+const QUERY_TERM_WEIGHT: ReadonlyMap<string, number> = new Map([
+	["继续", 0],
+	["之前", 0],
+	["上次", 0],
+	["恢复", 0],
+	["延续", 0],
+	["刚才", 0],
+	["配置", 0.5],
+]);
 
 /**
  * Select memories with a small local hybrid ranker.
@@ -42,17 +51,25 @@ export function selectRelevantMemories(
 		.map((memory, index) => ({
 			memory,
 			index,
-			score: overlapScore(memory, queryTerms),
+			score: overlapScore(memory, queryTerms) + kindBonus(memory),
 		}))
-		.filter((item) => item.score > 0)
+		.filter((item) => item.score > kindBonus(item.memory))
 		.sort((left, right) => compareLexical(left, right));
 
-	const candidates = lexical.length > 0
-		? lexical
-		: continuation
-			? active.map((memory, index) => ({ memory, index, score: 0 }))
-				.sort((left, right) => compareRecent(left, right))
-			: [];
+	const structuredMatches = lexical.filter(
+		(item) => item.memory.kind !== "compaction_summary",
+	);
+	// A whole compaction summary is broad context, not a precise claim. Once
+	// a structured claim matches, reserve the bounded context for those claims;
+	// use the summary only when it is the best available lexical evidence.
+	const candidates = structuredMatches.length > 0
+		? structuredMatches
+		: lexical.length > 0
+			? lexical
+			: continuation
+				? active.map((memory, index) => ({ memory, index, score: 0 }))
+					.sort((left, right) => compareRecent(left, right))
+				: [];
 	if (candidates.length === 0) return [];
 
 	const layerLane = [...candidates].sort((left, right) => {
@@ -65,10 +82,12 @@ export function selectRelevantMemories(
 		: [recentLane];
 
 	const fused = new Map<string, { item: (typeof candidates)[number]; score: number }>();
-	for (const lane of lanes) {
+	for (let laneIndex = 0; laneIndex < lanes.length; laneIndex++) {
+		const lane = lanes[laneIndex];
 		lane.forEach((item, rank) => {
 			const existing = fused.get(item.memory.id);
-			const score = 1 / (RRF_K + rank + 1);
+			const score = 1 / (RRF_K + rank + 1) +
+				(laneIndex === 0 ? Math.min(item.score, 10) * 0.01 : 0);
 			fused.set(item.memory.id, {
 				item,
 				score: (existing?.score ?? 0) + score,
@@ -86,10 +105,15 @@ export function selectRelevantMemories(
 
 	const selected: DurableMemory[] = [];
 	let used = 0;
-	for (const entry of ranked) {
+	for (let index = 0; index < ranked.length; index++) {
+		const entry = ranked[index];
 		const remaining = charBudget - used;
 		if (remaining <= 0) break;
-		const content = entry.item.memory.content.slice(0, remaining);
+		// Keep one oversized compaction summary from consuming the entire
+		// budget and starving the structured layers beneath it.
+		const slotsRemaining = ranked.length - index;
+		const fairShare = Math.ceil(remaining / slotsRemaining);
+		const content = entry.item.memory.content.slice(0, fairShare);
 		if (!content.trim()) continue;
 		selected.push(
 			content.length === entry.item.memory.content
@@ -115,9 +139,16 @@ function overlapScore(memory: DurableMemory, queryTerms: ReadonlySet<string>): n
 	);
 	let overlap = 0;
 	for (const term of queryTerms) {
-		if (memoryTerms.has(term)) overlap++;
+		if (memoryTerms.has(term)) overlap += QUERY_TERM_WEIGHT.get(term) ?? 1;
 	}
 	return overlap;
+}
+
+function kindBonus(memory: DurableMemory): number {
+	// Structured records are narrower claims than a whole compaction summary;
+	// prefer them when lexical evidence is otherwise comparable, but do not
+	// let the bonus turn an unrelated record into a lexical match.
+	return memory.kind === "compaction_summary" ? 0 : 2;
 }
 
 function compareLexical(

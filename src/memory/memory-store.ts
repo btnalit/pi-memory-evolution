@@ -191,9 +191,31 @@ function applyAction(
 				layer: "durable",
 				conflictWith: [],
 			}));
+			if (memory.kind === "compaction_summary") {
+				for (const [id, sibling] of projected) {
+					if (sibling.sourceEntryId === memory.sourceEntryId && id !== memory.id) {
+						projected.set(id, {
+							...sibling,
+							status: "forgotten",
+							updatedAt: action.createdAt,
+						});
+					}
+				}
+			}
 			break;
 		case "forget":
 			projected.set(memory.id, updated({ status: "forgotten" }));
+			if (memory.kind === "compaction_summary") {
+				for (const [id, sibling] of projected) {
+					if (sibling.sourceEntryId === memory.sourceEntryId && id !== memory.id) {
+						projected.set(id, {
+							...sibling,
+							status: "forgotten",
+							updatedAt: action.createdAt,
+						});
+					}
+				}
+			}
 			break;
 		case "pin":
 			projected.set(memory.id, updated({ status: "confirmed", layer: "pinned" }));
@@ -250,7 +272,9 @@ function readJsonLines(file: string): unknown[] {
 function normalizeMemory(memory: DurableMemory): DurableMemory {
 	return {
 		...memory,
-		layer: memory.layer ?? "durable",
+		layer: memory.layer ?? (
+			memory.kind === "compaction_summary" ? "recent" : "durable"
+		),
 		status: memory.status ?? "provisional",
 	};
 }

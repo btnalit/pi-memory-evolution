@@ -2,6 +2,20 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
+## [P11] - 2026-09-03
+
+### Added
+
+- Bounded structural extraction from labeled compaction-summary sections
+- Provisional `fact`, `preference`, `decision` and `project_state` records
+- Idempotent startup hydration for summaries created before the extractor
+- Regression coverage for section boundaries, deduplication, limits and sensitive bullets
+
+### Safety
+
+- Extraction is deterministic and offline; it never infers facts from unlabeled prose
+- Extracted records remain provisional until explicitly confirmed by the owner
+
 ## [P10] - 2026-09-03
 
 ### Added

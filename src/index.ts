@@ -31,6 +31,7 @@ import {
 	type MemoryStore,
 } from "./memory/memory-store.ts";
 import { selectRelevantMemories } from "./memory/retriever.ts";
+import { extractStructuredMemories } from "./memory/extractor.ts";
 
 /** Event hook name that carries the assembled system prompt into every session. */
 const BEFORE_AGENT_START_EVENT = "before_agent_start";
@@ -74,6 +75,7 @@ export default function memoryEvolution(
 	const stateDir = dependencies?.stateDir ?? getStateDir();
 	const store = createAgendaStore(stateDir);
 	const memoryStore = createMemoryStore(stateDir);
+	hydrateStructuredMemories(store, memoryStore);
 	registerMemoryCommand(pi, memoryStore);
 	let collectionEnabled = false;
 
@@ -172,8 +174,9 @@ function handleSessionCompact(
 	) {
 		return;
 	}
+	const memoryId = `compaction:${entry.id}`;
 	const saved = memoryStore.appendMemory({
-		id: `compaction:${entry.id}`,
+		id: memoryId,
 		kind: "compaction_summary",
 		createdAt: entry.timestamp,
 		sourceEntryId: entry.id,
@@ -181,9 +184,20 @@ function handleSessionCompact(
 		status: "provisional",
 		content: summary,
 	});
+	const structuredCount = persistStructuredMemories(
+		memoryStore,
+		entry.id,
+		entry.timestamp,
+		summary,
+	);
 	if (saved) {
 		store.appendJournal(
 			`- ${nowIso()} durable memory saved from compaction ${entry.id}`,
+		);
+	}
+	if (structuredCount > 0) {
+		store.appendJournal(
+			`- ${nowIso()} ${structuredCount} structured memory candidates derived from compaction ${entry.id}`,
 		);
 	}
 }
@@ -348,6 +362,44 @@ function injectRuntimeDigest(
 /** Returns the current UTC timestamp in ISO format. */
 function nowIso(): string {
 	return new Date().toISOString();
+}
+
+/** Backfills structured candidates for summaries created before this extractor existed. */
+function hydrateStructuredMemories(store: AgendaStore, memoryStore: MemoryStore): void {
+	try {
+		let count = 0;
+		for (const memory of memoryStore.readMemories()) {
+			if (
+				memory.kind !== "compaction_summary" ||
+				memory.status === "forgotten" ||
+				memory.status === "conflicted"
+			) continue;
+			count += persistStructuredMemories(
+				memoryStore,
+				memory.sourceEntryId,
+				memory.createdAt,
+				memory.content,
+			);
+		}
+		if (count > 0) {
+			store.appendJournal(`- ${nowIso()} hydrated ${count} structured memory candidates`);
+		}
+	} catch {
+		// A derived-memory migration must never block the extension lifecycle.
+	}
+}
+
+function persistStructuredMemories(
+	memoryStore: MemoryStore,
+	sourceEntryId: string,
+	createdAt: string,
+	summary: string,
+): number {
+	let count = 0;
+	for (const candidate of extractStructuredMemories(summary, sourceEntryId, createdAt)) {
+		if (memoryStore.appendMemory(candidate)) count++;
+	}
+	return count;
 }
 
 /** Registers explicit owner controls for the local memory lifecycle. */

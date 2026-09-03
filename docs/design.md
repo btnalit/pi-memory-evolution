@@ -228,7 +228,9 @@ failed → rollback_required
 - 记忆分为 `recent` / `durable` / `pinned` 三层；状态分为 `provisional` / `confirmed` / `forgotten` / `conflicted`
 - 检索使用本地确定性混合排序：词法/CJK 双字词 lane + 层级权威 lane，使用 Reciprocal Rank Fusion；只有延续性请求才启用最近记录 fallback
 - 生命周期动作写入独立的 `memory-actions.jsonl`，读取时投影，支持 confirm/correct/forget/pin/conflict/resolve，不重写基础摘要
-- 当前限制：不做向量检索，也不自动把摘要拆成事实/偏好条目；明确的 owner 命令可手动完成这些生命周期操作
+- `memory/extractor.ts` 只解析压缩摘要中有明确标题的 bullet，将其生成 `provisional` 的 fact/preference/decision/project_state 候选；每节和总量都有上限，敏感 bullet 跳过
+- 启动时会对历史压缩摘要做一次幂等回填，避免功能上线前已有的摘要永远停留在单一 summary 层
+- 当前限制：不做向量检索，也不对无标题自由文本做自动事实推断；候选仍需 owner 通过命令确认
 
 ### 4.10 状态与审计（store/）
 
@@ -444,6 +446,7 @@ pi-memory-evolution/
 | P8 | 真实环境演练 + 采集修复 | ✅ 已实施：真实 compact/agent_end 验证、evidence contribution、可配置阈值 |
 | P9 | 第一层跨会话持久记忆 | ✅ 已实施：持久化 compaction summary、相关检索注入、延续请求回退、去重与基础脱敏 |
 | P10 | 本地分层混合检索 + 记忆生命周期 | ✅ 已实施：recent/durable/pinned 分层、词法与层级 lane 的 RRF、owner 操作投影、遗忘与冲突 fail-closed |
+| P11 | 结构化候选提取 | ✅ 已实施：从带标题的 compaction bullet 提取 provisional fact/preference/decision/project_state，并对历史摘要幂等回填 |
 
 P0-P1 是骨架，P2-P3 是观察能力，P4-P5 才引入"改变行为"的进化能力。**用户批准边界从 P0 就写死**，不后补。
 

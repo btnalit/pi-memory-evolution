@@ -32,6 +32,14 @@ describe("selectRelevantMemories", () => {
 		assert.equal(selected[0].id, "pinned");
 	});
 
+	test("downranks generic configuration overlap behind the requested topic", () => {
+		const selected = selectRelevantMemories([
+			memory("generic", "采用 record-first 执行计划，不直接修改规则或配置。", "2026-08-13T04:00:00.000Z"),
+			memory("topic", "蓝牙优先使用 USB 适配器。", "2026-08-13T04:00:00.000Z"),
+		], "继续配置蓝牙音响");
+		assert.equal(selected[0].id, "topic");
+	});
+
 	test("falls back to recent context for continuation prompts", () => {
 		const selected = selectRelevantMemories([
 			memory("old", "很早以前的记录", "2026-08-10T04:00:00.000Z"),

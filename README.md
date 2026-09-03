@@ -14,6 +14,8 @@ Memory self-evolution system for the PI Coding Agent.
 - **P7** (done): approval identity recording, verified keyword boundaries, shadow calibration guide, changelog
 - **P8** (done): evidence contribution fill, configurable speak-gate thresholds, real-environment drill evidence
 - **P9** (done): durable compaction-summary memory with prompt-relevant cross-session retrieval and basic credential redaction
+- **P10** (done): local layered hybrid retrieval and explicit memory lifecycle controls
+- **P11** (done): bounded structural extraction of provisional facts, preferences, decisions and project state
 
 ## Features
 
@@ -27,7 +29,8 @@ Memory self-evolution system for the PI Coding Agent.
 - Evaluates matured candidates through the speak gate (priority/speak scoring, risk dampeners, daily quotas)
 - Writes proposals as `pending_user_approval` and surfaces them in the runtime digest; the agent approves or rejects them by referencing the proposal id in a message (24h expiry, then auto-rejected)
 - Executes approved proposals by writing a record-first execution plan (change / rollback / verification / evidence) to `executions/`; real behavior changes stay manual
-- Persists successful compaction summaries as durable memories and retrieves relevant memories for later prompts
+- Persists successful compaction summaries and bounded structured candidates (facts, preferences, decisions, project state) for later prompts
+- Uses deterministic local hybrid retrieval across lexical, layer-authority and recency lanes; no vector model or external service
 - Injects a runtime digest into every session (`before_agent_start`), carrying relevant durable memories, pending candidates, recent speak decisions and pending proposals
 - Skips collection inside subagent processes (`PI_SUBAGENT_AGENT_ID` env)
 - Zero core patches; everything runs as a pi extension
@@ -107,7 +110,7 @@ The owner can inspect and manage records with the built-in command:
 /memory resolve <id>
 ```
 
-This remains deliberately local and deterministic: it preserves compaction summaries and explicit owner edits, but does not use vector models or external retrieval services, and does not yet extract facts automatically from prose.
+This remains deliberately local and deterministic: it preserves compaction summaries, derives bounded provisional candidates from labeled summary sections, and applies explicit owner edits. It does not use vector models or external retrieval services; free-form prose without recognizable headings is not auto-promoted.
 
 ## Runtime digest
 
