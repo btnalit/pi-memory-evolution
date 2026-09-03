@@ -164,6 +164,45 @@ describe("memoryEvolution extension entry (P1)", () => {
 		}
 	});
 
+	test("persists compaction summaries and injects relevant memory", async () => {
+		const stateDir = await createTempStateDir();
+		try {
+			const { pi, registered } = recordingPi();
+			memoryEvolution(pi as ExtensionAPI, { stateDir, env: {} });
+			await trigger(registered, "session_compact", [
+				{
+					type: "session_compact",
+					reason: "manual",
+					fromExtension: false,
+					compactionEntry: {
+						type: "compaction",
+						id: "cmp-001",
+						parentId: "root",
+						timestamp: "2026-08-13T04:00:00.000Z",
+						summary: "用户偏好本地优先，蓝牙音响配置正在进行。",
+						firstKeptEntryId: "kept-001",
+						tokensBefore: 20000,
+					},
+				},
+			]);
+			const memories = await readFile(join(stateDir, "memories.jsonl"), "utf8");
+			assert.ok(memories.includes("蓝牙音响配置"));
+
+			const result = await trigger(registered, "before_agent_start", [
+				{
+					type: "before_agent_start",
+					prompt: "继续蓝牙音响配置",
+					systemPrompt: "基础提示词",
+				},
+				mockCtx(),
+			]);
+			assert.ok(result !== undefined);
+			assert.ok((result as { systemPrompt: string }).systemPrompt.includes("蓝牙音响配置"));
+		} finally {
+			await rm(stateDir, { recursive: true, force: true });
+		}
+	});
+
 	test("writes a projection signal when notices are present", async () => {
 		const stateDir = await createTempStateDir();
 		try {

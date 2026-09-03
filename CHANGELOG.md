@@ -1,6 +1,22 @@
 # Changelog
 
 All notable changes to pi-memory-evolution are documented here.
+
+## [P9] - 2026-09-03
+
+### Added
+
+- Durable `memories.jsonl` storage for successful Pi compaction summaries
+- Prompt-relevant cross-session retrieval using Latin-word and CJK-bigram matching
+- Continuation-prompt fallback to the most recent durable context
+- Runtime digest injection of selected durable memories
+- Basic redaction of common API keys, tokens, passwords and secrets before persistence
+- Deduplication by source compaction entry id and malformed-record tolerance
+
+### Changed
+
+- `session_compact` now persists the actual `compactionEntry.summary` while continuing to enable signal collection
+- `before_agent_start` now uses the raw user prompt to select relevant durable memories
 The format is based on [Keep a Changelog](https://keepachangelog.com/), grouped by phase.
 
 ## [P8] - 2026-08-13

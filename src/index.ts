@@ -26,6 +26,11 @@ import { runVerificationSignals } from "./governor/proposal-verification.ts";
 import { executeApprovedProposals } from "./executor/proposal-executor.ts";
 import { archiveTerminalProposals } from "./executor/proposal-archive.ts";
 import { buildRuntimeDigest } from "./injector/digest.ts";
+import {
+	createMemoryStore,
+	type MemoryStore,
+} from "./memory/memory-store.ts";
+import { selectRelevantMemories } from "./memory/retriever.ts";
 
 /** Event hook name that carries the assembled system prompt into every session. */
 const BEFORE_AGENT_START_EVENT = "before_agent_start";
@@ -66,13 +71,20 @@ export default function memoryEvolution(
 		return;
 	}
 
-	const store = createAgendaStore(dependencies?.stateDir ?? getStateDir());
+	const stateDir = dependencies?.stateDir ?? getStateDir();
+	const store = createAgendaStore(stateDir);
+	const memoryStore = createMemoryStore(stateDir);
 	let collectionEnabled = false;
 
-	registerHook(pi, SESSION_COMPACT_EVENT, (_event) => {
-		handleSessionCompact(store, () => {
-			collectionEnabled = true;
-		});
+	registerHook(pi, SESSION_COMPACT_EVENT, (event) => {
+		handleSessionCompact(
+			store,
+			memoryStore,
+			event as SessionCompactEvent,
+			() => {
+				collectionEnabled = true;
+			},
+		);
 	});
 	registerHook(pi, AGENT_END_EVENT, async (event, _ctx) => {
 		if (!collectionEnabled) {
@@ -97,12 +109,22 @@ export default function memoryEvolution(
 		handleSessionShutdown(store, (event as SessionShutdownEvent).reason);
 	});
 	registerHook(pi, BEFORE_AGENT_START_EVENT, (event) => {
-		return injectRuntimeDigest(store, (event as BeforeAgentStartEventLike).systemPrompt);
+		const beforeStart = event as BeforeAgentStartEventLike;
+		const memories = selectRelevantMemories(
+			memoryStore.readMemories(),
+			beforeStart.prompt ?? "",
+		);
+		return injectRuntimeDigest(
+			store,
+			memories,
+			beforeStart.systemPrompt,
+		);
 	});
 }
 
 /** Minimal shape of the before_agent_start event needed for digest injection. */
 interface BeforeAgentStartEventLike {
+	readonly prompt?: string;
 	readonly systemPrompt?: string;
 }
 
@@ -128,11 +150,31 @@ function registerHook(
 /** Enables collection after the first compaction and records the audit trail. */
 function handleSessionCompact(
 	store: AgendaStore,
+	memoryStore: MemoryStore,
+	event: SessionCompactEvent,
 	enable: () => void,
 ): void {
 	enable();
 	store.appendJournal(
 		`- ${nowIso()} signal collection enabled after session compaction`,
+	);
+	const entry = event.compactionEntry;
+	if (entry === undefined || typeof entry.summary !== "string") {
+		return;
+	}
+	const summary = entry.summary.trim();
+	if (summary.length === 0) {
+		return;
+	}
+	memoryStore.appendMemory({
+		id: `compaction:${entry.id}`,
+		kind: "compaction_summary",
+		createdAt: entry.timestamp,
+		sourceEntryId: entry.id,
+		content: summary,
+	});
+	store.appendJournal(
+		`- ${nowIso()} durable memory saved from compaction ${entry.id}`,
 	);
 }
 
@@ -269,6 +311,7 @@ function markSurfaced(store: AgendaStore, agendaId: string): void {
 /** Appends the runtime digest to the assembled system prompt when available. */
 function injectRuntimeDigest(
 	store: AgendaStore,
+	memories: ReturnType<typeof selectRelevantMemories>,
 	currentSystemPrompt: string | undefined,
 ): { readonly systemPrompt: string } | undefined {
 	const knownAgendas = new Set(
@@ -282,6 +325,7 @@ function injectRuntimeDigest(
 		candidates: pendingCandidates,
 		decisions: store.readDecisions().slice(-3),
 		proposals: store.readProposalQueue(),
+		memories,
 	});
 	if (digest === undefined) {
 		return undefined;

@@ -13,6 +13,7 @@ Memory self-evolution system for the PI Coding Agent.
 - **P6** (done): hardening — word-boundary approval matching, evidence carried into execution plans, archived terminal plans, verified signal trigger
 - **P7** (done): approval identity recording, verified keyword boundaries, shadow calibration guide, changelog
 - **P8** (done): evidence contribution fill, configurable speak-gate thresholds, real-environment drill evidence
+- **P9** (done): durable compaction-summary memory with prompt-relevant cross-session retrieval and basic credential redaction
 
 ## Features
 
@@ -26,7 +27,8 @@ Memory self-evolution system for the PI Coding Agent.
 - Evaluates matured candidates through the speak gate (priority/speak scoring, risk dampeners, daily quotas)
 - Writes proposals as `pending_user_approval` and surfaces them in the runtime digest; the agent approves or rejects them by referencing the proposal id in a message (24h expiry, then auto-rejected)
 - Executes approved proposals by writing a record-first execution plan (change / rollback / verification / evidence) to `executions/`; real behavior changes stay manual
-- Injects a runtime digest into every session (`before_agent_start`), carrying pending candidates, recent speak decisions and pending proposals
+- Persists successful compaction summaries as durable memories and retrieves relevant memories for later prompts
+- Injects a runtime digest into every session (`before_agent_start`), carrying relevant durable memories, pending candidates, recent speak decisions and pending proposals
 - Skips collection inside subagent processes (`PI_SUBAGENT_AGENT_ID` env)
 - Zero core patches; everything runs as a pi extension
 
@@ -41,6 +43,7 @@ State files are written to `~/.pi/agent/agent-suite/memory-evolution/`:
 ```
 memory-evolution/
 ├── signals.jsonl              # append-only signal records
+├── memories.jsonl             # durable compaction summaries for cross-session continuity
 ├── self_agenda.yaml           # agenda items with maturity scores
 ├── agenda_candidates.yaml     # matured candidates (with evidence records)
 ├── speak_decisions.jsonl      # traceable speak-gate decisions
@@ -87,9 +90,15 @@ speak = priority − 0.20(interruption) − repeat_penalty
 
 Decision routing: `speak_now` / `speak_now_with_approval` / `proposal_queue` / `daily_digest` / `silent_log_only` / `risk_alert_only`. Daily quota: 3 suggestions, 1 strategic. Every decision is logged with a traceable `decision_reason` and `would_have_spoken_without_quota`.
 
+## Cross-session durable memory
+
+After a successful `session_compact`, the extension stores the compaction summary in `memories.jsonl`. On each later prompt, it uses lightweight lexical matching (Latin words and CJK bigrams) to select up to three relevant summaries; continuation prompts such as `继续上次工作` fall back to recent summaries. Selected memory is included in the advisory runtime digest and the digest remains capped at 2KB. Duplicate compaction events are ignored by entry id, malformed records are skipped, and common credential formats are redacted before persistence.
+
+This is deliberately a first durable-memory layer: it preserves compaction summaries, but does not yet extract independently editable facts/preferences or provide semantic-vector retrieval.
+
 ## Runtime digest
 
-The session-injected digest (<2KB, advisory-only, `Valid until` 24h) carries pending candidates, recent speak decisions and proposals awaiting approval. Sections are omitted when empty; nothing hardcoded.
+The session-injected digest (<2KB, advisory-only, `Valid until` 24h) carries relevant durable memories, pending candidates, recent speak decisions and proposals awaiting approval. Sections are omitted when empty; nothing hardcoded.
 
 ## Proposal lifecycle
 
