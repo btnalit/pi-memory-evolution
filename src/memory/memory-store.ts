@@ -108,10 +108,8 @@ function readMemories(stateDir: string): DurableMemory[] {
 /** Appends one memory unless its stable id was already persisted. */
 function appendMemory(stateDir: string, memory: DurableMemoryDraft): boolean {
 	ensureStateDir(stateDir);
-	if (readJsonLines(join(stateDir, MEMORIES_FILE)).some(
-		(value) => isDurableMemory(value) && value.id === memory.id,
-	)) {
-		return false;
+	if (typeof memory.content !== "string") {
+		throw new TypeError("Memory content must be a string");
 	}
 	const record: DurableMemory = {
 		version: MEMORY_VERSION,
@@ -124,6 +122,11 @@ function appendMemory(stateDir: string, memory: DurableMemoryDraft): boolean {
 	if (!isDurableMemory(record)) {
 		throw new TypeError("Invalid durable memory record");
 	}
+	if (readJsonLines(join(stateDir, MEMORIES_FILE)).some(
+		(value) => isDurableMemory(value) && value.id === record.id,
+	)) {
+		return false;
+	}
 	appendFileSync(join(stateDir, MEMORIES_FILE), `${JSON.stringify(record)}\n`);
 	return true;
 }
@@ -131,12 +134,15 @@ function appendMemory(stateDir: string, memory: DurableMemoryDraft): boolean {
 /** Appends an explicit owner lifecycle action after validating its target. */
 function appendAction(stateDir: string, action: MemoryActionDraft): void {
 	ensureStateDir(stateDir);
-	const target = readMemories(stateDir).find((memory) => memory.id === action.memoryId);
-	if (!target) {
-		throw new Error(`Unknown memory id: ${action.memoryId}`);
+	if (typeof action.memoryId !== "string" || !action.memoryId.trim()) {
+		throw new TypeError("A memory action requires a memory id");
 	}
 	if (!ACTION_TYPES.has(action.type)) {
 		throw new TypeError(`Unsupported memory action: ${action.type}`);
+	}
+	const target = readMemories(stateDir).find((memory) => memory.id === action.memoryId);
+	if (!target) {
+		throw new Error(`Unknown memory id: ${action.memoryId}`);
 	}
 	if (action.type === "correct" && !String(action.content ?? "").trim()) {
 		throw new TypeError("A correction requires replacement content");
@@ -252,17 +258,28 @@ function normalizeMemory(memory: DurableMemory): DurableMemory {
 function isDurableMemory(value: unknown): value is DurableMemory {
 	if (typeof value !== "object" || value === null) return false;
 	const record = value as Record<string, unknown>;
+	const validTags = record.tags === undefined || (
+		Array.isArray(record.tags) && record.tags.every((tag) => typeof tag === "string")
+	);
+	const validConflicts = record.conflictWith === undefined || (
+		Array.isArray(record.conflictWith) && record.conflictWith.every((id) => typeof id === "string")
+	);
+	const validOptionalDates = [record.updatedAt, record.expiresAt].every(
+		(date) => date === undefined || (typeof date === "string" && !Number.isNaN(Date.parse(date))),
+	);
 	return (
 		record.version === MEMORY_VERSION &&
-		typeof record.id === "string" &&
+		typeof record.id === "string" && record.id.trim().length > 0 &&
 		MEMORY_KINDS.has(record.kind as MemoryKind) &&
 		typeof record.createdAt === "string" &&
 		!Number.isNaN(Date.parse(record.createdAt)) &&
-		typeof record.sourceEntryId === "string" &&
+		typeof record.sourceEntryId === "string" && record.sourceEntryId.trim().length > 0 &&
 		typeof record.content === "string" &&
 		record.content.trim().length > 0 &&
 		(record.layer === undefined || MEMORY_LAYERS.has(record.layer as MemoryLayer)) &&
-		(record.status === undefined || MEMORY_STATUSES.has(record.status as MemoryStatus))
+		(record.status === undefined || MEMORY_STATUSES.has(record.status as MemoryStatus)) &&
+		(record.claimKey === undefined || typeof record.claimKey === "string") &&
+		validTags && validConflicts && validOptionalDates
 	);
 }
 
@@ -271,11 +288,13 @@ function isMemoryAction(value: unknown): value is MemoryAction {
 	const record = value as Record<string, unknown>;
 	return (
 		record.version === MEMORY_VERSION &&
-		typeof record.id === "string" &&
+		typeof record.id === "string" && record.id.trim().length > 0 &&
 		typeof record.createdAt === "string" &&
 		!Number.isNaN(Date.parse(record.createdAt)) &&
-		typeof record.memoryId === "string" &&
-		ACTION_TYPES.has(record.type as MemoryActionType)
+		typeof record.memoryId === "string" && record.memoryId.trim().length > 0 &&
+		ACTION_TYPES.has(record.type as MemoryActionType) &&
+		(record.content === undefined || typeof record.content === "string") &&
+		(record.conflictWith === undefined || typeof record.conflictWith === "string")
 	);
 }
 

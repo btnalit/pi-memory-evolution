@@ -352,14 +352,15 @@ function nowIso(): string {
 
 /** Registers explicit owner controls for the local memory lifecycle. */
 function registerMemoryCommand(pi: ExtensionAPI, memoryStore: MemoryStore): void {
-	const candidate = pi as unknown as { registerCommand?: unknown };
-	if (typeof candidate.registerCommand !== "function") return;
 	try {
+		const candidate = pi as unknown as { registerCommand?: unknown };
+		if (typeof candidate.registerCommand !== "function") return;
 		pi.registerCommand("memory", {
 			description: "List or manage local durable memories",
 			handler: async (args, ctx) => {
 				try {
-					const [operation = "list", memoryId, ...rest] = args.trim().split(/\s+/u);
+					const parts = args.trim() ? args.trim().split(/\s+/u) : [];
+					const [operation = "list", memoryId, ...rest] = parts;
 					if (operation === "list") {
 						const memories = memoryStore.readMemories().filter(
 							(memory) => memory.status !== "forgotten",

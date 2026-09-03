@@ -104,9 +104,18 @@ describe("MemoryStore", () => {
 		try {
 			await writeFile(
 				join(dir, "memories.jsonl"),
-				"not-json\n{\"version\":99}\n",
+				[
+					"not-json",
+					JSON.stringify({ version: 1, id: "bad-tags", kind: "compaction_summary", createdAt: "2026-08-13T04:00:00.000Z", sourceEntryId: "a1", content: "x", tags: "not-an-array" }),
+					JSON.stringify({ version: 1, id: "good", kind: "compaction_summary", createdAt: "2026-08-13T04:00:00.000Z", sourceEntryId: "a2", content: "保留" }),
+				].join("\n") + "\n",
 			);
-			assert.deepEqual(createMemoryStore(dir).readMemories(), []);
+			await writeFile(
+				join(dir, "memory-actions.jsonl"),
+				JSON.stringify({ version: 1, id: "bad-action", createdAt: "2026-08-13T04:00:00.000Z", memoryId: "good", type: "correct", content: 123 }) + "\n",
+			);
+			const memories = createMemoryStore(dir).readMemories();
+			assert.deepEqual(memories.map((memory) => memory.id), ["good"]);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
