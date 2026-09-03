@@ -149,11 +149,16 @@ function layerWeight(memory: DurableMemory): number {
 function terms(text: string): Set<string> {
 	const normalized = text.toLocaleLowerCase();
 	const result = new Set(normalized.match(/[a-z0-9][a-z0-9_-]{1,}/g) ?? []);
-	const cjk = Array.from(normalized).filter((char) =>
-		/[\u3400-\u9fff\uf900-\ufaff]/u.test(char),
-	);
-	for (let index = 0; index + 1 < cjk.length; index++) {
-		result.add(`${cjk[index]}${cjk[index + 1]}`);
+	let previousCjk = "";
+	for (const char of Array.from(normalized)) {
+		if (/[\u3400-\u9fff\uf900-\ufaff]/u.test(char)) {
+			if (previousCjk) result.add(`${previousCjk}${char}`);
+			previousCjk = char;
+		} else {
+			// Do not create a false bigram across punctuation, whitespace, or
+			// a Latin token boundary (for example "蓝牙。音响" ≠ "牙音").
+			previousCjk = "";
+		}
 	}
 	return result;
 }

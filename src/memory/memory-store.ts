@@ -66,7 +66,7 @@ export type MemoryActionDraft = Omit<MemoryAction, "version" | "id" | "createdAt
 export interface MemoryStore {
 	readonly stateDir: string;
 	readMemories(): DurableMemory[];
-	appendMemory(memory: DurableMemoryDraft): void;
+	appendMemory(memory: DurableMemoryDraft): boolean;
 	appendAction(action: MemoryActionDraft): void;
 }
 
@@ -106,12 +106,12 @@ function readMemories(stateDir: string): DurableMemory[] {
 }
 
 /** Appends one memory unless its stable id was already persisted. */
-function appendMemory(stateDir: string, memory: DurableMemoryDraft): void {
+function appendMemory(stateDir: string, memory: DurableMemoryDraft): boolean {
 	ensureStateDir(stateDir);
 	if (readJsonLines(join(stateDir, MEMORIES_FILE)).some(
 		(value) => isDurableMemory(value) && value.id === memory.id,
 	)) {
-		return;
+		return false;
 	}
 	const record: DurableMemory = {
 		version: MEMORY_VERSION,
@@ -125,6 +125,7 @@ function appendMemory(stateDir: string, memory: DurableMemoryDraft): void {
 		throw new TypeError("Invalid durable memory record");
 	}
 	appendFileSync(join(stateDir, MEMORIES_FILE), `${JSON.stringify(record)}\n`);
+	return true;
 }
 
 /** Appends an explicit owner lifecycle action after validating its target. */
@@ -134,11 +135,6 @@ function appendAction(stateDir: string, action: MemoryActionDraft): void {
 	if (!target) {
 		throw new Error(`Unknown memory id: ${action.memoryId}`);
 	}
-	if (action.type === "conflict" && !readMemories(stateDir).some(
-		(memory) => memory.id === action.conflictWith,
-	)) {
-		throw new Error(`Unknown conflicting memory id: ${action.conflictWith}`);
-	}
 	if (!ACTION_TYPES.has(action.type)) {
 		throw new TypeError(`Unsupported memory action: ${action.type}`);
 	}
@@ -147,6 +143,11 @@ function appendAction(stateDir: string, action: MemoryActionDraft): void {
 	}
 	if (action.type === "conflict" && !String(action.conflictWith ?? "").trim()) {
 		throw new TypeError("A conflict action requires another memory id");
+	}
+	if (action.type === "conflict" && !readMemories(stateDir).some(
+		(memory) => memory.id === action.conflictWith,
+	)) {
+		throw new Error(`Unknown conflicting memory id: ${action.conflictWith}`);
 	}
 	const record: MemoryAction = {
 		version: MEMORY_VERSION,

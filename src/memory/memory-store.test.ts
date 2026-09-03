@@ -38,8 +38,8 @@ describe("MemoryStore", () => {
 		const dir = await createTempDir();
 		try {
 			const store = createMemoryStore(dir);
-			store.appendMemory(draft("compaction:a1", "第一次摘要"));
-			store.appendMemory(draft("compaction:a1", "重复摘要"));
+			assert.equal(store.appendMemory(draft("compaction:a1", "第一次摘要")), true);
+			assert.equal(store.appendMemory(draft("compaction:a1", "重复摘要")), false);
 			assert.equal(store.readMemories().length, 1);
 			assert.equal(store.readMemories()[0].content, "第一次摘要");
 		} finally {

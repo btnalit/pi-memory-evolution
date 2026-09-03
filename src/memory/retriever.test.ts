@@ -40,6 +40,13 @@ describe("selectRelevantMemories", () => {
 		assert.equal(selected[0].id, "recent");
 	});
 
+	test("does not join CJK terms across punctuation", () => {
+		const selected = selectRelevantMemories([
+			memory("separated", "蓝牙。音响配置完成。", "2026-08-13T04:00:00.000Z"),
+		], "牙音");
+		assert.deepEqual(selected, []);
+	});
+
 	test("does not inject unrelated context", () => {
 		const selected = selectRelevantMemories([
 			memory("audio", "蓝牙音响已配对。", "2026-08-13T04:00:00.000Z"),

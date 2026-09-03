@@ -164,10 +164,15 @@ function handleSessionCompact(
 		return;
 	}
 	const summary = entry.summary.trim();
-	if (summary.length === 0) {
+	if (
+		summary.length === 0 ||
+		typeof entry.id !== "string" ||
+		typeof entry.timestamp !== "string" ||
+		Number.isNaN(Date.parse(entry.timestamp))
+	) {
 		return;
 	}
-	memoryStore.appendMemory({
+	const saved = memoryStore.appendMemory({
 		id: `compaction:${entry.id}`,
 		kind: "compaction_summary",
 		createdAt: entry.timestamp,
@@ -176,9 +181,11 @@ function handleSessionCompact(
 		status: "provisional",
 		content: summary,
 	});
-	store.appendJournal(
-		`- ${nowIso()} durable memory saved from compaction ${entry.id}`,
-	);
+	if (saved) {
+		store.appendJournal(
+			`- ${nowIso()} durable memory saved from compaction ${entry.id}`,
+		);
+	}
 }
 
 /** Records session statistics and projection notices from one agent batch. */
