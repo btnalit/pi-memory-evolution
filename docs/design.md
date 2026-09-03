@@ -309,7 +309,7 @@ state/memory-evolution/
 }
 ```
 
-安装方式：`pi install <本包>`（与 pi-agent-suite 一致）。
+安装方式：`pi install git:github.com/btnalit/pi-memory-evolution@v0.1.0`；本地开发可使用 `pi install ./pi-memory-evolution`，项目级安装加 `-l`。安装/更新后在活动会话执行 `/reload`。
 
 ### 5.2 事件钩子清单
 

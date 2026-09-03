@@ -2,6 +2,18 @@
 	"name": "pi-memory-evolution",
 	"version": "0.1.0",
 	"description": "Memory self-evolution system for the PI Coding Agent: signal collection, memory evaluation, agenda maturation, and runtime digest injection.",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/btnalit/pi-memory-evolution.git"
+	},
+	"homepage": "https://github.com/btnalit/pi-memory-evolution",
+	"bugs": {
+		"url": "https://github.com/btnalit/pi-memory-evolution/issues"
+	},
+	"engines": {
+		"node": ">=20"
+	},
 	"type": "module",
 	"keywords": [
 		"pi-package",
@@ -11,9 +23,12 @@
 		"self-evolution"
 	],
 	"files": [
-		"src",
+		"src/**/*.ts",
+		"!src/**/*.test.ts",
 		"docs",
 		"README.md",
+		"CHANGELOG.md",
+		"LICENSE",
 		"package.json"
 	],
 	"pi": {
@@ -25,6 +40,7 @@
 		"@earendil-works/pi-coding-agent": "*"
 	},
 	"scripts": {
-		"test": "node --test \"src/**/*.test.ts\""
+		"test": "node --test \"src/**/*.test.ts\"",
+		"check:package": "npm pack --dry-run --json"
 	}
 }

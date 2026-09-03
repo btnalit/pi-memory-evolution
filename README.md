@@ -37,9 +37,24 @@ Memory self-evolution system for the PI Coding Agent.
 
 ## Installation
 
+Install the currently verified Git revision globally:
+
+```bash
+pi install git:github.com/btnalit/pi-memory-evolution@v0.1.0
+```
+
+For a local checkout, use:
+
 ```bash
 pi install ./pi-memory-evolution
 ```
+
+Add `-l` to install into the current project's `.pi/settings.json` instead of
+user settings. After installation or an update, run `/reload` in the active Pi
+session. Verify the extension with `/memory list`.
+
+The package manifest is self-contained: Pi loads `./src/index.ts`, and the
+Pi coding-agent API is declared as a peer dependency rather than bundled.
 
 State files are written to `~/.pi/agent/agent-suite/memory-evolution/`:
 
@@ -154,7 +169,7 @@ Tests use Node's built-in test runner (node:test):
 npm test
 ```
 
-Because the extension imports `getAgentDir` from `@earendil-works/pi-coding-agent` at runtime, the test environment needs that package resolvable. On this machine it is symlinked from the global pi install:
+Because the extension imports `getAgentDir` from `@earendil-works/pi-coding-agent` at runtime, the test environment needs that package resolvable. Pi provides this peer dependency when loading the package; for standalone local tests it is symlinked from the global pi install on this machine:
 
 ```bash
 mkdir -p node_modules/@earendil-works
