@@ -67,6 +67,38 @@ describe("MemoryStore", () => {
 		}
 	});
 
+	test("projects explicit lifecycle actions without rewriting the base record", async () => {
+		const dir = await createTempDir();
+		try {
+			const store = createMemoryStore(dir);
+			store.appendMemory(draft("compaction:a1", "旧的项目状态"));
+			store.appendAction({ memoryId: "compaction:a1", type: "correct", content: "修正后的项目状态" });
+			store.appendAction({ memoryId: "compaction:a1", type: "pin" });
+			const memories = store.readMemories();
+			assert.equal(memories[0].content, "修正后的项目状态");
+			assert.equal(memories[0].status, "confirmed");
+			assert.equal(memories[0].layer, "pinned");
+			assert.ok((await readFile(join(dir, "memory-actions.jsonl"), "utf8")).split("\n").length >= 3);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("marks both sides of an explicit conflict and supports forgetting", async () => {
+		const dir = await createTempDir();
+		try {
+			const store = createMemoryStore(dir);
+			store.appendMemory(draft("compaction:a1", "使用 DP-1"));
+			store.appendMemory(draft("compaction:a2", "使用 HDMI-1"));
+			store.appendAction({ memoryId: "compaction:a1", type: "conflict", conflictWith: "compaction:a2" });
+			assert.equal(store.readMemories().every((memory) => memory.status === "conflicted"), true);
+			store.appendAction({ memoryId: "compaction:a1", type: "forget" });
+			assert.equal(store.readMemories().find((memory) => memory.id === "compaction:a1")?.status, "forgotten");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("ignores malformed records", async () => {
 		const dir = await createTempDir();
 		try {

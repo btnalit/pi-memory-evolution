@@ -2,6 +2,20 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
+## [P10] - 2026-09-03
+
+### Added
+
+- Local `recent` / `durable` / `pinned` memory layers
+- Deterministic lexical + layer-authority retrieval fused with Reciprocal Rank Fusion
+- Append-only `memory-actions.jsonl` lifecycle projection
+- Explicit `/memory` commands for list, confirm, correct, forget, pin, conflict and resolve
+- Fail-closed exclusion of forgotten, conflicted and expired memories
+
+### Changed
+
+- Compaction summaries enter the recent/provisional layer by default
+
 ## [P9] - 2026-09-03
 
 ### Added

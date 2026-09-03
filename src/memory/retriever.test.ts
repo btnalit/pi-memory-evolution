@@ -24,6 +24,14 @@ describe("selectRelevantMemories", () => {
 		assert.ok(selected[0].content.includes("蓝牙音响"));
 	});
 
+	test("fuses lexical and layer lanes, preferring pinned context on ties", () => {
+		const selected = selectRelevantMemories([
+			{ ...memory("durable", "蓝牙音响配置", "2026-08-13T05:00:00.000Z"), layer: "durable" },
+			{ ...memory("pinned", "蓝牙音响配置", "2026-08-13T04:00:00.000Z"), layer: "pinned" },
+		], "蓝牙音响", 1);
+		assert.equal(selected[0].id, "pinned");
+	});
+
 	test("falls back to recent context for continuation prompts", () => {
 		const selected = selectRelevantMemories([
 			memory("old", "很早以前的记录", "2026-08-10T04:00:00.000Z"),
@@ -36,6 +44,15 @@ describe("selectRelevantMemories", () => {
 		const selected = selectRelevantMemories([
 			memory("audio", "蓝牙音响已配对。", "2026-08-13T04:00:00.000Z"),
 		], "帮我写一个排序算法");
+		assert.deepEqual(selected, []);
+	});
+
+	test("excludes forgotten, conflicted, and expired memories", () => {
+		const selected = selectRelevantMemories([
+			{ ...memory("forgotten", "蓝牙音响", "2026-08-13T04:00:00.000Z"), status: "forgotten" },
+			{ ...memory("conflicted", "蓝牙音响", "2026-08-13T05:00:00.000Z"), status: "conflicted" },
+			{ ...memory("expired", "蓝牙音响", "2026-08-13T06:00:00.000Z"), expiresAt: "2020-01-01T00:00:00.000Z" },
+		], "继续蓝牙音响");
 		assert.deepEqual(selected, []);
 	});
 

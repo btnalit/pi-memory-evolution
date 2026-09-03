@@ -74,6 +74,7 @@ export default function memoryEvolution(
 	const stateDir = dependencies?.stateDir ?? getStateDir();
 	const store = createAgendaStore(stateDir);
 	const memoryStore = createMemoryStore(stateDir);
+	registerMemoryCommand(pi, memoryStore);
 	let collectionEnabled = false;
 
 	registerHook(pi, SESSION_COMPACT_EVENT, (event) => {
@@ -171,6 +172,8 @@ function handleSessionCompact(
 		kind: "compaction_summary",
 		createdAt: entry.timestamp,
 		sourceEntryId: entry.id,
+		layer: "recent",
+		status: "provisional",
 		content: summary,
 	});
 	store.appendJournal(
@@ -338,4 +341,51 @@ function injectRuntimeDigest(
 /** Returns the current UTC timestamp in ISO format. */
 function nowIso(): string {
 	return new Date().toISOString();
+}
+
+/** Registers explicit owner controls for the local memory lifecycle. */
+function registerMemoryCommand(pi: ExtensionAPI, memoryStore: MemoryStore): void {
+	const candidate = pi as unknown as { registerCommand?: unknown };
+	if (typeof candidate.registerCommand !== "function") return;
+	try {
+		pi.registerCommand("memory", {
+			description: "List or manage local durable memories",
+			handler: async (args, ctx) => {
+				try {
+					const [operation = "list", memoryId, ...rest] = args.trim().split(/\s+/u);
+					if (operation === "list") {
+						const memories = memoryStore.readMemories().filter(
+							(memory) => memory.status !== "forgotten",
+						);
+						const message = memories.length === 0
+							? "No local durable memories."
+							: memories.map((memory) =>
+								`- ${memory.id} [${memory.layer ?? "durable"}/${memory.status ?? "provisional"}] ${memory.content.slice(0, 160)}`,
+							).join("\n");
+						ctx.ui.notify(message, "info");
+						return;
+					}
+					if (!memoryId) throw new Error("Usage: /memory <confirm|correct|forget|pin|unpin|conflict|resolve> <id> [value]");
+					if (operation === "correct") {
+						const content = rest.join(" ").trim();
+						if (!content) throw new Error("Usage: /memory correct <id> <replacement text>");
+						memoryStore.appendAction({ memoryId, type: "correct", content });
+					} else if (operation === "conflict") {
+						const otherId = rest[0];
+						if (!otherId) throw new Error("Usage: /memory conflict <id> <other-id>");
+						memoryStore.appendAction({ memoryId, type: "conflict", conflictWith: otherId });
+					} else if (["confirm", "forget", "pin", "unpin", "resolve"].includes(operation)) {
+						memoryStore.appendAction({ memoryId, type: operation as "confirm" | "forget" | "pin" | "unpin" | "resolve" });
+					} else {
+						throw new Error("Usage: /memory list | confirm <id> | correct <id> <text> | forget <id> | pin <id> | unpin <id> | conflict <id> <other-id> | resolve <id>");
+					}
+					ctx.ui.notify(`Memory ${memoryId}: ${operation} recorded.`, "info");
+				} catch (error) {
+					ctx.ui.notify(error instanceof Error ? error.message : "Memory operation failed.", "warning");
+				}
+			},
+		});
+	} catch {
+		// Command registration is optional; lifecycle hooks must remain available.
+	}
 }

@@ -225,7 +225,10 @@ failed → rollback_required
 - `before_agent_start` 使用原始用户 prompt 做轻量相关性检索：英文词和中文双字词，最多选 3 条并受字符预算限制
 - “继续上次/之前工作”等延续性请求在无精确命中时回退到最近记忆
 - 只注入相关摘要，不把所有历史内容塞入上下文；摘要作为 advisory，用户当前请求优先
-- 当前限制：不做向量检索，也不把摘要拆成可独立编辑的事实/偏好条目；这是后续阶段
+- 记忆分为 `recent` / `durable` / `pinned` 三层；状态分为 `provisional` / `confirmed` / `forgotten` / `conflicted`
+- 检索使用本地确定性混合排序：词法/CJK 双字词 lane + 层级权威 lane，使用 Reciprocal Rank Fusion；只有延续性请求才启用最近记录 fallback
+- 生命周期动作写入独立的 `memory-actions.jsonl`，读取时投影，支持 confirm/correct/forget/pin/conflict/resolve，不重写基础摘要
+- 当前限制：不做向量检索，也不自动把摘要拆成事实/偏好条目；明确的 owner 命令可手动完成这些生命周期操作
 
 ### 4.10 状态与审计（store/）
 
@@ -233,6 +236,7 @@ failed → rollback_required
 state/memory-evolution/
 ├── signals.jsonl          # 信号（append-only）
 ├── memories.jsonl         # 压缩摘要持久记忆（append-only）
+├── memory-actions.jsonl   # owner 生命周期动作（append-only）
 ├── self_agenda.yaml       # 议程项 + 成熟度
 ├── proposal_queue.yaml    # 提案状态机
 ├── evolution_journal.md   # 审计轨迹（每次评估/提案/变更必写）
@@ -439,6 +443,7 @@ pi-memory-evolution/
 | P7 | 身份记录 + 加固 + 文档 | ✅ 已实施：审批身份记录（approvedBy/expiry）、verified 词边界 + 否定守卫、shadow 校准观察指南、CHANGELOG |
 | P8 | 真实环境演练 + 采集修复 | ✅ 已实施：真实 compact/agent_end 验证、evidence contribution、可配置阈值 |
 | P9 | 第一层跨会话持久记忆 | ✅ 已实施：持久化 compaction summary、相关检索注入、延续请求回退、去重与基础脱敏 |
+| P10 | 本地分层混合检索 + 记忆生命周期 | ✅ 已实施：recent/durable/pinned 分层、词法与层级 lane 的 RRF、owner 操作投影、遗忘与冲突 fail-closed |
 
 P0-P1 是骨架，P2-P3 是观察能力，P4-P5 才引入"改变行为"的进化能力。**用户批准边界从 P0 就写死**，不后补。
 

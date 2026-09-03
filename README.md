@@ -44,6 +44,7 @@ State files are written to `~/.pi/agent/agent-suite/memory-evolution/`:
 memory-evolution/
 ├── signals.jsonl              # append-only signal records
 ├── memories.jsonl             # durable compaction summaries for cross-session continuity
+├── memory-actions.jsonl       # explicit owner lifecycle actions (append-only)
 ├── self_agenda.yaml           # agenda items with maturity scores
 ├── agenda_candidates.yaml     # matured candidates (with evidence records)
 ├── speak_decisions.jsonl      # traceable speak-gate decisions
@@ -92,9 +93,21 @@ Decision routing: `speak_now` / `speak_now_with_approval` / `proposal_queue` / `
 
 ## Cross-session durable memory
 
-After a successful `session_compact`, the extension stores the compaction summary in `memories.jsonl`. On each later prompt, it uses lightweight lexical matching (Latin words and CJK bigrams) to select up to three relevant summaries; continuation prompts such as `继续上次工作` fall back to recent summaries. Selected memory is included in the advisory runtime digest and the digest remains capped at 2KB. Duplicate compaction events are ignored by entry id, malformed records are skipped, and common credential formats are redacted before persistence.
+After a successful `session_compact`, the extension stores the compaction summary in `memories.jsonl`. On each later prompt, it uses lightweight lexical matching (Latin words and CJK bigrams) to select up to three relevant summaries; continuation prompts such as `继续上次工作` fall back to recent summaries. Selected memory is included in the advisory runtime digest and the digest remains capped at 2KB. Duplicate compaction events are ignored by entry id, malformed records are skipped, and common credential formats are redacted before persistence. Explicit lifecycle actions are kept in `memory-actions.jsonl` and projected at read time, so memories can be confirmed, corrected, forgotten, pinned, or marked as conflicting without rewriting the base ledger or silently choosing between conflicts.
 
-This is deliberately a first durable-memory layer: it preserves compaction summaries, but does not yet extract independently editable facts/preferences or provide semantic-vector retrieval.
+The owner can inspect and manage records with the built-in command:
+
+```text
+/memory list
+/memory confirm <id>
+/memory correct <id> <replacement text>
+/memory forget <id>
+/memory pin <id>
+/memory conflict <id> <other-id>
+/memory resolve <id>
+```
+
+This remains deliberately local and deterministic: it preserves compaction summaries and explicit owner edits, but does not use vector models or external retrieval services, and does not yet extract facts automatically from prose.
 
 ## Runtime digest
 
