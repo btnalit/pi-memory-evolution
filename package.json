@@ -1,7 +1,7 @@
 {
 	"name": "pi-memory-evolution",
-	"version": "0.1.0",
-	"description": "Memory self-evolution system for the PI Coding Agent: signal collection, memory evaluation, agenda maturation, and runtime digest injection.",
+	"version": "0.2.0",
+	"description": "Automatic, scoped memory evolution using Pi's active model, transactional local storage, and bounded recall.",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
@@ -12,7 +12,7 @@
 		"url": "https://github.com/btnalit/pi-memory-evolution/issues"
 	},
 	"engines": {
-		"node": ">=20"
+		"node": ">=22.18"
 	},
 	"type": "module",
 	"keywords": [
@@ -41,6 +41,14 @@
 	},
 	"scripts": {
 		"test": "node --test \"src/**/*.test.ts\"",
+		"typecheck": "tsc --noEmit",
+		"test:pi": "node scripts/test-pi.mjs",
+		"check": "npm run typecheck && npm test && npm run check:package",
 		"check:package": "npm pack --dry-run --json"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "0.85.0",
+		"@types/node": "22.18.0",
+		"typescript": "5.9.3"
 	}
 }

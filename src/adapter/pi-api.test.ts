@@ -1,25 +1,15 @@
-import { describe, test } from "node:test";
-import { strict as assert } from "node:assert";
-import { isMemoryEvolutionHost } from "./pi-api.ts";
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { completeMemory } from './pi-api.ts';
 
-describe("isMemoryEvolutionHost", () => {
-	test("accepts an object with an on function", () => {
-		assert.equal(isMemoryEvolutionHost({ on: () => undefined }), true);
-	});
-
-	test("rejects null", () => {
-		assert.equal(isMemoryEvolutionHost(null), false);
-	});
-
-	test("rejects undefined", () => {
-		assert.equal(isMemoryEvolutionHost(undefined), false);
-	});
-
-	test("rejects an object without on", () => {
-		assert.equal(isMemoryEvolutionHost({}), false);
-	});
-
-	test("rejects an object with a non-function on", () => {
-		assert.equal(isMemoryEvolutionHost({ on: "not a function" }), false);
-	});
+test('uses exact active model and Pi registry completion/auth, no secondary model config',async()=>{
+	const model={id:'active-model',provider:'active-provider'};
+	const signal=AbortSignal.timeout(1000);let calls=0;
+	const registry={async complete(actual:unknown,context:any,options:any){assert.equal(this,registry);assert.equal(actual,model);assert.equal(options.signal,signal);assert.equal(options.apiKey,undefined);assert.equal(context.tools,undefined);assert.equal(options.maxTokens,2048);calls++;return {stopReason:'stop',content:[{type:'text',text:'{"memories":[]}'}]};}};
+	const result=await completeMemory({model,modelRegistry:registry} as unknown as ExtensionContext,'system','input',signal);
+	assert.equal(result.model,'active-provider/active-model');assert.equal(calls,1);
+});
+test('missing model/old registry and truncated output fail instead of selecting an arbitrary provider',async()=>{
+	for(const ctx of [{model:undefined},{model:{},modelRegistry:{}},{model:{},modelRegistry:{complete:async()=>({stopReason:'length',content:[]})}}])await assert.rejects(completeMemory(ctx as unknown as ExtensionContext,'system','input',AbortSignal.timeout(1000)));
 });

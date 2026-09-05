@@ -1,142 +1,178 @@
-import { describe, test } from "node:test";
-import { strict as assert } from "node:assert";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { createMemoryStore } from "./memory-store.ts";
+import { tmpdir } from "node:os";
+import { spawn } from "node:child_process";
+import { MemoryStore, type Source } from "./memory-store.ts";
+import { Database } from "./sqlite.ts";
+import { selectRelevantMemories } from "./retriever.ts";
 
-async function createTempDir(): Promise<string> {
-	return mkdtemp(join(tmpdir(), "pme-memory-"));
+function temp() { return mkdtempSync(join(tmpdir(), "pme-v2-")); }
+const source = (id = "s1", content = "## Critical Context\n- Database port is 5432.", scope = "/project"): Source => ({ id, scope, kind: "summary", content, createdAt: new Date().toISOString() });
+function using(fn: (s: MemoryStore, dir: string) => void) {
+	const dir = temp(); const s = new MemoryStore(dir);
+	try { fn(s,dir); } finally { s.close(); rmSync(dir,{recursive:true,force:true}); }
 }
 
-function draft(id: string, content: string) {
-	return {
-		id,
-		kind: "compaction_summary" as const,
-		createdAt: "2026-08-13T04:00:00.000Z",
-		sourceEntryId: id.replace("compaction:", ""),
-		content,
-	};
-}
+test("capture commits evidence and claims once; no raw summary in recall", () => using((s) => {
+	assert.equal(s.capture(source()), true); assert.equal(s.capture(source()), false);
+	assert.equal(s.readMemories().length, 1); assert.equal(s.history().length, 1);
+	assert.equal(s.readMemories()[0].kind, "fact");
+}));
+test("same claim from multiple compactions deduplicates", () => using((s) => {
+	s.capture(source()); s.capture(source("s2")); assert.equal(s.readMemories().length, 1);
+}));
+test("forget cannot return through parent or later extraction", () => using((s) => {
+	s.capture(source()); s.act(s.readMemories()[0].id, "forget"); s.capture(source("s2"));
+	assert.deepEqual(selectRelevantMemories(s.readMemories(), "Database port"), []);
+}));
+test("correction does not reappear from summary, even across reload", () => {
+	const dir = temp(); let s = new MemoryStore(dir);
+	try {
+		s.capture(source()); const id = s.readMemories()[0].id;
+		s.act(id, "correct", "Database port is 9999."); s.close(); s = new MemoryStore(dir);
+		s.capture(source("s2")); assert.deepEqual(s.readMemories().map((m) => m.content), ["Database port is 9999."]);
+	} finally { s.close(); rmSync(dir,{recursive:true,force:true}); }
+});
+test("conflict suppresses both sides; pin cannot revive conflict", () => using((s) => {
+	s.capture(source()); s.capture(source("s2", "## Critical Context\n- Database port is 9999."));
+	const [a,b] = s.readMemories(); s.act(a.id,"conflict",b.id);
+	assert.deepEqual(selectRelevantMemories(s.readMemories(),"Database port"),[]);
+	assert.throws(() => s.act(a.id,"pin")); s.act(a.id,"resolve");
+	assert.equal(selectRelevantMemories(s.readMemories(),"Database port").length,1);
+}));
+test("automatic replacement retires old claim and records reversible actual changes", () => using((s) => {
+	s.capture(source()); const old = s.readMemories()[0];
+	s.capture({ ...source("s2"), kind:"user", content:"Remember, database port changed to 9999." });
+	const run = s.beginEvolution("s2")!;
+	const event = s.finishEvolution(run,[{ kind:"fact",content:"Database port is 9999.",replaces:old.id }],"test/model");
+	assert.equal(s.readMemories().find((m) => m.id===old.id)?.status,"forgotten");
+	assert.ok(s.readMemories().some((m) => m.content.includes("9999") && m.status === "provisional"));
+	s.undo(event);
+	assert.equal(selectRelevantMemories(s.readMemories(),"Database port")[0].content,"Database port is 5432.");
+	assert.throws(() => s.undo(event));
+}));
+test("replacement works when local extractor already captured the new claim", () => using((s) => {
+	s.capture(source()); const old = s.readMemories()[0];
+	s.capture(source("s2", "## Critical Context\n- Database port is 9999."));
+	s.finishEvolution(s.beginEvolution("s2")!, [{kind:"fact",content:"Database port is 9999.",replaces:old.id}],"model");
+	const selected=selectRelevantMemories(s.readMemories(),"Database port");
+	assert.equal(selected.length,1); assert.match(selected[0].content,/9999/);
+}));
+test("unknown replacement rolls back entire batch, including earlier additions", () => using((s) => {
+	s.capture(source()); const before=s.readMemories(); const run=s.beginEvolution("s1")!;
+	assert.throws(() => s.finishEvolution(run,[{kind:"fact",content:"A valid new fact."},{kind:"fact",content:"Another fact.",replaces:"../../outside"}],"model"));
+	assert.deepEqual(s.readMemories(),before);
+}));
+test("LLM cannot overwrite pinned memories or another scope", () => using((s) => {
+	s.capture(source()); const old=s.readMemories()[0]; s.act(old.id,"pin");
+	const run=s.beginEvolution("s1")!;
+	assert.throws(() => s.finishEvolution(run,[{kind:"fact",content:"Database port is 1111.",replaces:old.id}],"model"));
+}));
+test("in-flight model output loses authority after manual edit", () => using((s) => {
+	s.capture(source()); const run=s.beginEvolution("s1")!;
+	s.act(s.readMemories()[0].id,"forget");
+	assert.throws(() => s.finishEvolution(run,[{kind:"fact",content:"Database is on port 5432."}],"model"),/stale/);
+	assert.deepEqual(selectRelevantMemories(s.readMemories(),"Database port"),[]);
+}));
+test("stale model result from an older source cannot replace newer facts", () => using((s) => {
+	s.capture(source()); s.capture({...source("old"),createdAt:"2000-01-01T00:00:00.000Z"});
+	const run=s.beginEvolution("old")!;
+	assert.throws(() => s.finishEvolution(run,[{kind:"fact",content:"Database port is 1111.",replaces:s.readMemories()[0].id}],"model"));
+}));
+test("manual suppression retires pending raw source, so reload cannot relearn it", () => using((s) => {
+	s.capture(source()); s.act(s.readMemories()[0].id, "forget");
+	assert.equal(s.pending("/project", true), undefined);
+	assert.equal(s.beginEvolution("s1", true), undefined);
+}));
+test("cyclic model replacements cannot retire both facts", () => using((s) => {
+	s.capture(source()); s.capture(source("s2", "## Critical Context\n- Database port is 9999."));
+	const [a,b] = s.readMemories(); const before = s.readMemories();
+	assert.throws(() => s.finishEvolution(s.beginEvolution("s2")!, [
+		{kind: "fact", content: b.content, replaces: a.id},
+		{kind: "fact", content: a.content, replaces: b.id},
+	], "model"), /Cyclic/);
+	assert.deepEqual(s.readMemories(), before);
+}));
+test("job lease prevents duplicate model execution; failed job can retry explicitly", () => using((s) => {
+	s.capture(source()); const run=s.beginEvolution("s1")!; assert.equal(s.beginEvolution("s1"),undefined);
+	s.failEvolution(run); assert.equal(s.pending("/project"),undefined);
+	assert.equal(s.pending("/project",true),"s1"); assert.ok(s.beginEvolution("s1",true));
+}));
+test("resume finds persisted pending jobs without another compaction", () => {
+	const dir=temp(); let s=new MemoryStore(dir);
+	try { s.capture(source());s.close();s=new MemoryStore(dir);assert.equal(s.pending("/project"),"s1"); }
+	finally {s.close();rmSync(dir,{recursive:true,force:true});}
+});
+test("cross-process cache invalidation and independent scopes", () => using((s,dir) => {
+	s.capture(source());assert.equal(s.readMemories().length,1);
+	const second=new MemoryStore(dir);
+	try {second.capture(source("s2","## Critical Context\n- Other project uses SQLite.","/other"));assert.equal(s.readMemories().length,2);assert.equal(s.readMemories("/project").length,1);}
+	finally {second.close();}
+}));
+test("sensitive captures and edits never leak synthetic credentials", () => using((s,dir) => {
+	const examples=['token=demo_plain','密码：demo_chinese','{"password":"demo_json"}','Authorization: Bearer demo_bearer','github_pat_demo123','password="hello demo_tail"'];
+	for(let i=0;i<examples.length;i++)s.capture(source(`secret${i}`,examples[i]));
+	s.capture(source()); assert.throws(()=>s.act(s.readMemories()[0].id,"correct","password=demo_edit"));
+	for(const file of ["memory.sqlite","memory.sqlite-wal"]) {
+		const data=readFileSync(join(dir,file)); for(const secret of ["demo_plain","demo_chinese","demo_json","demo_bearer","demo123","demo_tail","demo_edit"])assert.equal(data.includes(Buffer.from(secret)),false);
+	}
+	assert.equal(statSync(join(dir,"memory.sqlite")).mode & 0o777,0o600);
+}));
 
-describe("MemoryStore", () => {
-	test("round-trips durable memories", async () => {
-		const dir = await createTempDir();
-		try {
-			const store = createMemoryStore(dir);
-			store.appendMemory(draft("compaction:a1", "用户偏好本地优先。"));
-			const memories = store.readMemories();
-			assert.equal(memories.length, 1);
-			assert.equal(memories[0].sourceEntryId, "a1");
-			assert.equal(memories[0].content, "用户偏好本地优先。");
-		} finally {
-			await rm(dir, { recursive: true, force: true });
-		}
-	});
-
-	test("deduplicates the same compaction entry", async () => {
-		const dir = await createTempDir();
-		try {
-			const store = createMemoryStore(dir);
-			assert.equal(store.appendMemory(draft("compaction:a1", "第一次摘要")), true);
-			assert.equal(store.appendMemory(draft("compaction:a1", "重复摘要")), false);
-			assert.equal(store.readMemories().length, 1);
-			assert.equal(store.readMemories()[0].content, "第一次摘要");
-		} finally {
-			await rm(dir, { recursive: true, force: true });
-		}
-	});
-
-	test("redacts common credentials before persistence", async () => {
-		const dir = await createTempDir();
-		try {
-			const store = createMemoryStore(dir);
-			store.appendMemory(
-				draft(
-					"compaction:a1",
-					"api_key=secret123 token=gho_abc123 sk-test_value",
-				),
-			);
-			const content = await readFile(join(dir, "memories.jsonl"), "utf8");
-			assert.ok(!content.includes("secret123"));
-			assert.ok(!content.includes("gho_abc123"));
-			assert.ok(!content.includes("sk-test_value"));
-			assert.ok(content.includes("[REDACTED]"));
-		} finally {
-			await rm(dir, { recursive: true, force: true });
-		}
-	});
-
-	test("projects explicit lifecycle actions without rewriting the base record", async () => {
-		const dir = await createTempDir();
-		try {
-			const store = createMemoryStore(dir);
-			store.appendMemory(draft("compaction:a1", "旧的项目状态"));
-			store.appendAction({ memoryId: "compaction:a1", type: "correct", content: "修正后的项目状态" });
-			store.appendAction({ memoryId: "compaction:a1", type: "pin" });
-			const memories = store.readMemories();
-			assert.equal(memories[0].content, "修正后的项目状态");
-			assert.equal(memories[0].status, "confirmed");
-			assert.equal(memories[0].layer, "pinned");
-			assert.ok((await readFile(join(dir, "memory-actions.jsonl"), "utf8")).split("\n").length >= 3);
-		} finally {
-			await rm(dir, { recursive: true, force: true });
-		}
-	});
-
-	test("marks both sides of an explicit conflict and supports forgetting", async () => {
-		const dir = await createTempDir();
-		try {
-			const store = createMemoryStore(dir);
-			store.appendMemory(draft("compaction:a1", "使用 DP-1"));
-			store.appendMemory(draft("compaction:a2", "使用 HDMI-1"));
-			store.appendAction({ memoryId: "compaction:a1", type: "conflict", conflictWith: "compaction:a2" });
-			assert.equal(store.readMemories().every((memory) => memory.status === "conflicted"), true);
-			store.appendAction({ memoryId: "compaction:a1", type: "forget" });
-			assert.equal(store.readMemories().find((memory) => memory.id === "compaction:a1")?.status, "forgotten");
-		} finally {
-			await rm(dir, { recursive: true, force: true });
-		}
-	});
-
-	test("cascades summary correction and forgetting to derived siblings", async () => {
-		const dir = await createTempDir();
-		try {
-			const store = createMemoryStore(dir);
-			store.appendMemory(draft("compaction:a1", "原始摘要"));
-			store.appendMemory({
-				...draft("derived:a1:preference:p1", "原始偏好"),
-				kind: "preference",
-				sourceEntryId: "a1",
-			});
-			store.appendAction({ memoryId: "compaction:a1", type: "correct", content: "修正摘要" });
-			assert.equal(store.readMemories().find((memory) => memory.id === "derived:a1:preference:p1")?.status, "forgotten");
-			store.appendAction({ memoryId: "compaction:a1", type: "forget" });
-			assert.ok(store.readMemories().every((memory) => memory.status === "forgotten"));
-		} finally {
-			await rm(dir, { recursive: true, force: true });
-		}
-	});
-
-	test("ignores malformed records", async () => {
-		const dir = await createTempDir();
-		try {
-			await writeFile(
-				join(dir, "memories.jsonl"),
-				[
-					"not-json",
-					JSON.stringify({ version: 1, id: "bad-tags", kind: "compaction_summary", createdAt: "2026-08-13T04:00:00.000Z", sourceEntryId: "a1", content: "x", tags: "not-an-array" }),
-					JSON.stringify({ version: 1, id: "good", kind: "compaction_summary", createdAt: "2026-08-13T04:00:00.000Z", sourceEntryId: "a2", content: "保留" }),
-				].join("\n") + "\n",
-			);
-			await writeFile(
-				join(dir, "memory-actions.jsonl"),
-				JSON.stringify({ version: 1, id: "bad-action", createdAt: "2026-08-13T04:00:00.000Z", memoryId: "good", type: "correct", content: 123 }) + "\n",
-			);
-			const memories = createMemoryStore(dir).readMemories();
-			assert.deepEqual(memories.map((memory) => memory.id), ["good"]);
-		} finally {
-			await rm(dir, { recursive: true, force: true });
-		}
-	});
+const legacy = (id:string,content:string,kind="compaction_summary") => ({version:1,id,kind,sourceEntryId:"entry1",createdAt:"2026-09-01T00:00:00.000Z",content});
+test("legacy import is once-only, preserves files, quarantines unknown scope", () => {
+	const dir=temp();const data=JSON.stringify(legacy("parent","## Critical Context\n- Database port is 5432."))+"\n";
+	writeFileSync(join(dir,"memories.jsonl"),data);
+	let s=new MemoryStore(dir);
+	try {
+		assert.equal(s.readMemories().length,1);assert.equal(s.readMemories("/project").length,0);
+		const id=s.readMemories()[0].id;s.act(id,"adopt","/project");assert.equal(s.readMemories("/project").length,1);
+		s.close();s=new MemoryStore(dir);assert.equal(s.readMemories().length,1);assert.equal(readFileSync(join(dir,"memories.jsonl"),"utf8"),data);
+	}finally{s.close();rmSync(dir,{recursive:true,force:true});}
+});
+test("damaged or unreadable legacy action ledger stops import, never fails open", () => {
+	for(const broken of ["{broken",JSON.stringify({version:1,type:"correct",memoryId:"parent",createdAt:"2026-09-01",content:123})]) {
+		const dir=temp();try{writeFileSync(join(dir,"memories.jsonl"),JSON.stringify(legacy("parent","old content"))+"\n");writeFileSync(join(dir,"memory-actions.jsonl"),broken);assert.throws(()=>new MemoryStore(dir));}finally{rmSync(dir,{recursive:true,force:true});}
+	}
+	const dir=temp();try{mkdirSync(join(dir,"memory-actions.jsonl"));assert.throws(()=>new MemoryStore(dir));}finally{rmSync(dir,{recursive:true,force:true});}
+});
+test("legacy summary correction extracts correct revision, not forgotten new children",()=>{
+	const dir=temp();
+	try{
+		writeFileSync(join(dir,"memories.jsonl"),[legacy("parent","## Critical Context\n- Database port is 5432."),legacy("child","Database port is 5432.","fact")].map((m)=>JSON.stringify(m)).join("\n")+"\n");
+		writeFileSync(join(dir,"memory-actions.jsonl"),JSON.stringify({version:1,memoryId:"parent",type:"correct",createdAt:"2026-09-02T00:00:00.000Z",content:"## Critical Context\n- Database port is 9999."})+"\n");
+		const s=new MemoryStore(dir);try{assert.equal(s.readMemories().find((m)=>m.content.includes("9999"))?.status,"confirmed");assert.equal(s.readMemories().find((m)=>m.content.includes("5432"))?.status,"forgotten");}finally{s.close();}
+	}finally{rmSync(dir,{recursive:true,force:true});}
+});
+test("incompatible schema and corrupted records fail closed", () => {
+	const dir=temp(); let s=new MemoryStore(dir);
+	try {
+		s.capture(source()); s.close();
+		const db=new Database(join(dir,"memory.sqlite"));
+		db.exec("UPDATE metadata SET value='999' WHERE key='schema'");
+		assert.throws(()=>new MemoryStore(dir), /version/);
+		db.exec("UPDATE metadata SET value='2' WHERE key='schema'; UPDATE memories SET data='null'"); db.close();
+		s=new MemoryStore(dir); assert.throws(()=>s.readMemories(), /Invalid memory/);
+	} finally { s.close(); rmSync(dir,{recursive:true,force:true}); }
+});
+test("process exit during an uncommitted transaction preserves the last committed state", async () => {
+	const dir=temp(); const s=new MemoryStore(dir);s.capture(source());s.close();
+	try {
+		const code=`import {DatabaseSync} from 'node:sqlite';const d=new DatabaseSync(${JSON.stringify(join(dir,'memory.sqlite'))});d.exec(\"BEGIN IMMEDIATE; DELETE FROM memories;\");process.exit(0);`;
+		await new Promise<void>((resolve,reject)=>{const child=spawn(process.execPath,['--input-type=module','-e',code],{stdio:'ignore'});child.on('error',reject);child.on('exit',(c)=>c===0?resolve():reject(new Error('child failed')));});
+		const reopened=new MemoryStore(dir);try{assert.equal(reopened.readMemories().length,1);assert.match(reopened.status(),/SQLite ok/);}finally{reopened.close();}
+	} finally { rmSync(dir,{recursive:true,force:true}); }
+});
+test("multiple processes capture concurrently without lost records",async()=>{
+	const dir=temp();const s=new MemoryStore(dir);s.close();
+	const url=new URL("./memory-store.ts",import.meta.url).href;
+	try {
+		await Promise.all(Array.from({length:4},(_,i)=>new Promise<void>((resolve,reject)=>{
+			const code=`import {MemoryStore} from ${JSON.stringify(url)};const s=new MemoryStore(${JSON.stringify(dir)});for(let j=0;j<15;j++)s.capture({id:'${i}-'+j,scope:'/project',kind:'summary',createdAt:new Date().toISOString(),content:'## Critical Context\\n- Worker ${i} observation number '+j+'.'});s.close();`;
+			const child=spawn(process.execPath,["--input-type=module","-e",code],{stdio:["ignore","ignore","pipe"]});let error="";child.stderr.on("data",(d)=>error+=d);child.on("error",reject);child.on("exit",(code)=>code===0?resolve():reject(new Error(error)));
+		})));
+		const final=new MemoryStore(dir);try{assert.equal(final.readMemories().length,60);}finally{final.close();}
+	}finally{rmSync(dir,{recursive:true,force:true});}
 });

@@ -2,6 +2,34 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
+## [0.2.0] - Unreleased
+
+### Changed
+
+- Replaced signal/maturity/speak/proposal/approval/plan machinery with direct automatic memory evolution
+- Reuse Pi 0.85's active model and public `modelRegistry.complete`, including provider authentication
+- Store claims, sources, jobs and actual before/after history in transactional SQLite (built-in Bun/Node APIs)
+- One-time, read-only JSONL migration; unscoped legacy memories are quarantined, originals preserved
+- Scoped, deduplicated claim recall; raw summaries no longer provide a lifecycle-bypassing fallback
+- Require Node 22.18+ for Node development/runtime; support the standalone Pi Bun binary
+
+### Added
+
+- Background consolidation after compaction or explicit user corrections, with bounded output/deadline and shutdown cancellation
+- Source idempotency, job leases, stale-result guards, exact-content suppression, and indexed/cached reads
+- Direct history/undo/search/status/evolve/adopt commands; no owner approval required
+- Strict typechecking, reproducible development dependencies, real multi-process tests and an optional real-Pi loopback-model test
+
+### Fixed
+
+- False approval/verification, ineffective thresholds and dropped deferred proposals: obsolete workflow removed
+- Cross-process lost updates and partial JSONL writes: transactional database replaces multi-file mutation
+- Parent-summary recall bypass, correction/backfill invalidation and repeated startup scans
+- CJK byte-budget overflow, truncated trust guidance, literal identifier corruption and timestamp string ordering
+- Common credential leaks, pending-source replay after suppression, async error handling and provider timeout handling
+
+Previous phase entries below describe the **0.1 architecture**, not current behavior.
+
 ## [P11] - 2026-09-03
 
 ### Added

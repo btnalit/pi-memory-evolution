@@ -1,183 +1,137 @@
 # pi-memory-evolution
 
-Memory self-evolution system for the PI Coding Agent.
-
-## Status
-
-- **P0** (done): extension manifest, capability-aware adapter layer, `before_agent_start` lifecycle hook
-- **P1** (done): signal collection (session stats, projection notices, user feedback) + evolution journal, with compaction-gated trigger and subagent skip
-- **P2** (done): memory evaluation (Hermes maturation formula) + agenda engine (state machine, unmatched-signal clustering), running in shadow mode
-- **P3** (done): runtime digest injection into every session (`before_agent_start`), <2KB, expiry-stamped, advisory-only
-- **P4** (done): speak gate consuming matured candidates — scoring, quotas, traceable decisions, proposal queue
-- **P5** (done): proposal lifecycle — auto-approval via agent messages (with 24h expiry), evolution executor writing record-first execution plans
-- **P6** (done): hardening — word-boundary approval matching, evidence carried into execution plans, archived terminal plans, verified signal trigger
-- **P7** (done): approval identity recording, verified keyword boundaries, shadow calibration guide, changelog
-- **P8** (done): evidence contribution fill, configurable speak-gate thresholds, real-environment drill evidence
-- **P9** (done): durable compaction-summary memory with prompt-relevant cross-session retrieval and basic credential redaction
-- **P10** (done): local layered hybrid retrieval and explicit memory lifecycle controls
-- **P11** (done): bounded structural extraction of provisional facts, preferences, decisions and project state
-
-## Features
-
-- Collects signals from pi session events (agent-end statistics, projection notices, user corrections) into an append-only `signals.jsonl`
-- Writes an audit trail to `evolution_journal.md`
-- Signal collection starts after the first `session_compact` and runs on each `agent_end` / `turn_end`
-- Evaluates memory maturity after 3 collected sessions using the Hermes maturation formula (evidence-driven, "time is not evidence")
-- Tracks long-term agenda items through a state machine (`observing → accumulating_evidence → candidate_ready → surfaced → resolved → archived`)
-- Discovers new agenda items from recurring unmatched signal clusters
-- Runs in shadow mode: evaluation writes candidates and journal only, never triggers user-visible actions
-- Evaluates matured candidates through the speak gate (priority/speak scoring, risk dampeners, daily quotas)
-- Writes proposals as `pending_user_approval` and surfaces them in the runtime digest; the agent approves or rejects them by referencing the proposal id in a message (24h expiry, then auto-rejected)
-- Executes approved proposals by writing a record-first execution plan (change / rollback / verification / evidence) to `executions/`; real behavior changes stay manual
-- Persists successful compaction summaries and bounded structured candidates (facts, preferences, decisions, project state) for later prompts
-- Uses deterministic local hybrid retrieval across lexical, layer-authority and recency lanes; no vector model or external service
-- Injects a runtime digest into every session (`before_agent_start`), carrying relevant durable memories, pending candidates, recent speak decisions and pending proposals
-- Skips collection inside subagent processes (`PI_SUBAGENT_AGENT_ID` env)
-- Zero core patches; everything runs as a pi extension
-
-## Installation
-
-Install the currently verified Git revision globally:
-
-```bash
-pi install git:github.com/btnalit/pi-memory-evolution@v0.1.0
-```
-
-For a local checkout, use:
-
-```bash
-pi install ./pi-memory-evolution
-```
-
-Add `-l` to install into the current project's `.pi/settings.json` instead of
-user settings. After installation or an update, run `/reload` in the active Pi
-session. Verify the extension with `/memory list`.
-
-The package manifest is self-contained: Pi loads `./src/index.ts`, and the
-Pi coding-agent API is declared as a peer dependency rather than bundled.
-
-State files are written to `~/.pi/agent/agent-suite/memory-evolution/`:
-
-```
-memory-evolution/
-├── signals.jsonl              # append-only signal records
-├── memories.jsonl             # durable compaction summaries for cross-session continuity
-├── memory-actions.jsonl       # explicit owner lifecycle actions (append-only)
-├── self_agenda.yaml           # agenda items with maturity scores
-├── agenda_candidates.yaml     # matured candidates (with evidence records)
-├── speak_decisions.jsonl      # traceable speak-gate decisions
-├── speak_quota.json           # daily speak quota usage
-├── thresholds.json            # configurable speak-gate thresholds (optional)
-├── proposal_queue.yaml        # proposals in lifecycle states
-├── executions/                # record-first execution plans (one md per implemented proposal)
-│   └── archive/               # plans of terminal proposals (auto-purged after 90 days)
-└── evolution_journal.md       # audit trail
-```
-
-## Signal format
-
-`signals.jsonl` is JSONL; each line is one record:
-
-```json
-{"version":1,"ts":"2026-08-04T00:00:00.000Z","type":"session_stats","source":"agent_end","messageCount":3,"userCount":1,"assistantCount":1,"toolResultCount":1,"toolCallCount":1}
-{"version":1,"ts":"2026-08-04T00:00:00.000Z","type":"projection","source":"agent_end","count":2}
-{"version":1,"ts":"2026-08-04T00:00:00.000Z","type":"feedback","source":"agent_end","keywords":["不对"]}
-```
-
-Record types: `session_stats` (message/role/tool-call counts), `projection` (omitted or summarized tool results), `feedback` (user correction keywords). Feedback keywords are extracted from user-role messages in the `agent_end` batch — pi's `turn_end` message is the assistant reply, so collection happens at agent end (P8 fix).
-
-## Maturity scoring
-
-Agenda items are scored with the Hermes maturation formula:
-
-```
-maturity_score = 0.30×evidence_strength + 0.25×trend_strength + 0.20×recurrence_density
-              + 0.15×unresolved_cost + 0.10×actionability
-              + min(0.12, log(days+1)×0.03) − staleness_penalty
-```
-
-Signal-to-evidence mapping (fixed weights): `feedback` 0.30, `projection` 0.15, `session_stats` 0.05.
-
-## Speak gate
-
-Matured candidates are scored before user interruption:
-
-```
-priority = (impact×0.40 + recurrence×0.25 + confidence×0.35) × risk_dampener + bonuses
-speak = priority − 0.20(interruption) − repeat_penalty
-```
-
-Decision routing: `speak_now` / `speak_now_with_approval` / `proposal_queue` / `daily_digest` / `silent_log_only` / `risk_alert_only`. Daily quota: 3 suggestions, 1 strategic. Every decision is logged with a traceable `decision_reason` and `would_have_spoken_without_quota`.
-
-## Cross-session durable memory
-
-After a successful `session_compact`, the extension stores the compaction summary in `memories.jsonl`. On each later prompt, it uses lightweight lexical matching (Latin words and CJK bigrams) to select up to three relevant summaries; continuation prompts such as `继续上次工作` fall back to recent summaries. Selected memory is included in the advisory runtime digest and the digest remains capped at 2KB. Duplicate compaction events are ignored by entry id, malformed records are skipped, and common credential formats are redacted before persistence. Explicit lifecycle actions are kept in `memory-actions.jsonl` and projected at read time, so memories can be confirmed, corrected, forgotten, pinned, or marked as conflicting without rewriting the base ledger or silently choosing between conflicts.
-
-The owner can inspect and manage records with the built-in command:
+Automatic project memory for Pi. **No owner approval, proposal queue, or manual execution plans.**
 
 ```text
-/memory list
-/memory confirm <id>
-/memory correct <id> <replacement text>
+compaction / explicit user correction
+    → local extraction
+    → automatic consolidation with Pi's active model
+    → transactional memory update
+    → scoped recall on the next prompt
+```
+
+Automatic changes are limited to this extension's memory database. The model gets
+no tools and cannot edit project files, system configuration, skills or its own code.
+
+## Requirements and installation
+
+- Pi **0.85+** for semantic evolution via `ctx.modelRegistry.complete(ctx.model, ...)`.
+- Pi's standalone Bun binary, or Node **22.18+** for npm Pi/development.
+- No third-party runtime dependencies: SQLite is built into both runtimes.
+
+Install this checkout (0.2.0 has not been published/tagged by this change):
+
+```bash
+pi install /absolute/path/to/pi-memory-evolution
+```
+
+Then `/reload` and `/memory status`. Updating a checkout does not update an existing
+Git installation pinned to `v0.1.0`; switch the installed source to use this code.
+
+## What happens automatically
+
+- A successful `session_compact` saves a sanitized source and extracts up to 16
+  facts, preferences, decisions or project-state claims using recognizable headings.
+- Explicit user statements containing cues such as `remember`, `prefer`, `记住`,
+  `偏好`, `纠正`, `不对`, `以后`, or `不要` also trigger learning, without waiting for
+  another compaction. Ordinary messages, assistant replies and tool results do not.
+- One background model call per source consolidates up to 32 existing memories.
+  It uses **the current Pi session model and Pi's own provider/auth resolution**.
+  With no model override in the session, this is Pi's configured default model.
+  There is no extra API key, provider setting, subagent, or alternate-model fallback.
+- Valid additions/replacements commit immediately, with provenance and before/after
+  history. Inferred memories remain labeled `provisional`, but are recallable without
+  approval. Pinned memories cannot be automatically replaced.
+- Replayed source events are idempotent. Calls have a 30-second deadline and abort on
+  session shutdown/reload. Failed calls retain the local extraction; `/memory evolve`
+  retries a failed/pending source. Pending work can resume on session start.
+- Recall is local: literal/identifier tokens, CJK bigrams, recency and pinned tie-breaks.
+  It injects at most three deduplicated claims within **2048 UTF-8 bytes**. Trust guidance
+  cannot be truncated. Ordinary project-state claims age out of recall after seven
+  days; pinned claims do not. A continuation prompt may fall back to recent claims.
+
+A model call may incur the usual charges of your active provider. These background
+calls are not assistant turns and their usage is not added to Pi's session token totals.
+There is no additional call on ordinary recall. Model mistakes remain possible; use
+history, correction, pinning and undo rather than treating generated claims as verified facts.
+
+## Local storage and isolation
+
+State lives under Pi's public agent directory:
+
+```text
+~/.pi/agent/agent-suite/memory-evolution/
+├── memory.sqlite       # memories, sources, suppression hashes, jobs and history
+├── memory.sqlite-wal   # SQLite-managed when open
+└── memory.sqlite-shm
+```
+
+SQLite transactions/WAL protect concurrent processes and interrupted commits.
+Model calls run outside transactions; stale responses cannot overwrite intervening
+changes. Raw summaries are evidence only, **never a separate recall fallback**, so
+forgetting a derived claim cannot expose it again through its parent summary.
+
+Scope is the canonical current working directory, not an inferred repository root.
+Different directories have separate memories. Exact forgotten/superseded content is
+suppressed across later extraction in the same scope. Forget is logical suppression,
+not secure erasure of history or Pi's original session transcript. Arbitrarily
+paraphrased facts cannot be perfectly identified as equivalent by a local hash.
+
+Sensitive lines/blocks are suppressed before capture, edits, model submission and
+recall. This covers common token/password/JSON/Chinese/Bearer/private-key formats,
+not every possible secret. Do not rely on a regex as a complete DLP system. Sanitized
+sources and selected existing memories go to the already-configured Pi model provider.
+
+## Commands
+
+These are optional direct controls, **not approval gates**:
+
+```text
+/memory list                         # current directory, last 20 non-forgotten records
+/memory list all                     # include other scopes and legacy imports
+/memory show <id>
+/memory search <query>
+/memory status                       # SQLite integrity and pending/failed jobs
+/memory history                      # last 10 events in this scope
+/memory evolve                       # retry one pending/failed source
+/memory undo <event-id>               # reverse actual changes, if not modified since
+/memory correct <id> <replacement>    # literal replacement, 4–480 characters
 /memory forget <id>
 /memory pin <id>
-/memory conflict <id> <other-id>
-/memory resolve <id>
+/memory unpin <id>
+/memory conflict <id> <other-id>       # suppress both
+/memory resolve <id>                  # restore this conflicted side; other stays suppressed
+/memory adopt <id>                    # assign an unscoped legacy claim to this directory
 ```
 
-This remains deliberately local and deterministic: it preserves compaction summaries, derives bounded provisional candidates from labeled summary sections, and applies explicit owner edits. It does not use vector models or external retrieval services; free-form prose without recognizable headings is not auto-promoted.
+## Migration from 0.1
 
-## Runtime digest
+On first database use, valid `memories.jsonl` and `memory-actions.jsonl` are imported
+once in a transaction. **Original files are not modified or deleted.** Corrupt or
+unreadable ledgers stop migration rather than silently ignoring forget/correct actions.
 
-The session-injected digest (<2KB, advisory-only, `Valid until` 24h) carries relevant durable memories, pending candidates, recent speak decisions and proposals awaiting approval. Sections are omitted when empty; nothing hardcoded.
+Old records have no project identity, so imports are quarantined under `legacy`.
+Use `/memory list all` and `/memory adopt <id>` to assign needed records; they are
+not silently exposed to every project. Structured claims are extracted from eligible
+legacy summaries, respecting existing lifecycle actions. Free-form raw summaries
+remain available in the original JSONL but are not injected as claims.
 
-## Proposal lifecycle
-
-Approved candidates become proposals in `proposal_queue.yaml` with the status `pending_user_approval` and a 24h `expiresAt`:
-
-```
-pending_user_approval → approved | rejected   (agent references the proposal id with an approval/rejection keyword)
-pending_user_approval → rejected               (expired without a decision)
-approved → implemented                          (executor writes an execution plan)
-approved → rejected                             (manual)
-implemented → verified | failed | rollback_required   (verified via agent message with a verification keyword)
-failed → rollback_required
-```
-
-Approval flow:
-
-1. The digest lists pending proposals as `Proposals Awaiting Approval` with their id and expiry.
-2. The agent approves or rejects one by mentioning its id together with a keyword (e.g. `批准 P-20260805-0001` or `拒绝 P-20260805-0001`) in a session message. English keywords are word-boundary matched (`approved`/`token`/`okay` do not trigger); negated forms (`不执行`/`不批准`) reject instead of approve.
-3. Unexpired proposals without a decision stay pending; expired ones are auto-rejected.
-4. Approved proposals are executed by writing a markdown execution plan to `executions/P-<id>.md` (change, rollback, verification, evidence, manual checklist). The plan's evidence section cites the real collected evidence records. Execution is record-first: the plan is the deliverable, and real behavior changes are applied by the user outside the extension.
-5. Once the user has executed the plan, the agent verifies the proposal by mentioning its id with a verification keyword (e.g. `已验证 P-20260805-0001`) — it advances to `verified`.
-6. Plans of terminal proposals (verified/rejected/rollback_required) are moved to `executions/archive/` and auto-purged after 90 days. Implemented plans stay active for manual execution.
-
-## Design
-
-See [docs/design.md](docs/design.md), including the [shadow calibration observation guide](docs/design.md) (section 4.10).
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for phase-by-phase change history.
+Old signals, agenda, thresholds, proposals, journals and execution plans are historical
+files only. This version neither processes nor deletes them. Back up the entire state
+directory with Pi stopped before changing versions. Returning to 0.1 reads the old
+JSONL, not changes made in the new database.
 
 ## Development
 
-Tests use Node's built-in test runner (node:test):
-
 ```bash
-npm test
+npm ci --ignore-scripts
+npm run check             # strict typecheck + regression tests + package inspection
+npm run test:pi           # optional: real installed Pi, loopback fake model, no paid calls
 ```
 
-Because the extension imports `getAgentDir` from `@earendil-works/pi-coding-agent` at runtime, the test environment needs that package resolvable. Pi provides this peer dependency when loading the package; for standalone local tests it is symlinked from the global pi install on this machine:
+Tests use temporary directories and synthetic data. `test:pi` accepts
+`PI_TEST_BINARY=/path/to/pi`; it verifies real host loading, reuse of the active model
+and authentication, automatic replacement and absence of approval dialogs.
 
-```bash
-mkdir -p node_modules/@earendil-works
-ln -s /usr/lib/node_modules/@earendil-works/pi-coding-agent node_modules/@earendil-works/pi-coding-agent
-```
-
-`node_modules/` is git-ignored; the symlink is a local development setup only.
-
-## License
-
-MIT
+See [docs/design.md](docs/design.md) for invariants and [CHANGELOG.md](CHANGELOG.md)
+for the previous architecture and the 0.2 simplification.

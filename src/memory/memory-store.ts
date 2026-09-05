@@ -1,349 +1,282 @@
-import {
-	appendFileSync,
-	mkdirSync,
-	readFileSync,
-} from "node:fs";
+import { Database } from "./sqlite.ts";
+import { chmodSync, closeSync, lstatSync, mkdirSync, openSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { extractStructuredMemories, type Claim } from "./extractor.ts";
+import { loadLegacyMemories } from "./legacy.ts";
+import { clipBytes, fingerprint, redact } from "./privacy.ts";
 
-/** Schema version for durable memory records. */
-export const MEMORY_VERSION = 1;
-
-export type MemoryKind =
-	| "compaction_summary"
-	| "fact"
-	| "preference"
-	| "decision"
-	| "project_state";
-export type MemoryLayer = "recent" | "durable" | "pinned";
-export type MemoryStatus = "provisional" | "confirmed" | "forgotten" | "conflicted";
-export type MemoryActionType =
-	| "confirm"
-	| "correct"
-	| "forget"
-	| "pin"
-	| "unpin"
-	| "conflict"
-	| "resolve";
-
-/** A local, layered memory record. Optional fields preserve v1 compatibility. */
+export type MemoryKind = "fact" | "preference" | "decision" | "project_state";
 export interface DurableMemory {
-	readonly version: typeof MEMORY_VERSION;
-	readonly id: string;
-	readonly kind: MemoryKind;
-	readonly createdAt: string;
-	readonly updatedAt?: string;
-	readonly sourceEntryId: string;
-	readonly content: string;
-	readonly layer?: MemoryLayer;
-	readonly status?: MemoryStatus;
-	readonly tags?: readonly string[];
-	readonly claimKey?: string;
-	readonly expiresAt?: string;
-	readonly conflictWith?: readonly string[];
+	id: string;
+	kind: MemoryKind;
+	content: string;
+	scope: string;
+	sourceEntryId: string;
+	createdAt: string;
+	updatedAt: string;
+	revision: number;
+	layer: "durable" | "pinned";
+	status: "provisional" | "confirmed" | "forgotten" | "conflicted";
 }
-
-/** Input used when appending a durable memory. */
-export type DurableMemoryDraft = Omit<DurableMemory, "version">;
-
-/** Append-only lifecycle operation applied as a read-time projection. */
-export interface MemoryAction {
-	readonly version: typeof MEMORY_VERSION;
-	readonly id: string;
-	readonly createdAt: string;
-	readonly memoryId: string;
-	readonly type: MemoryActionType;
-	readonly content?: string;
-	readonly conflictWith?: string;
+export interface Source {
+	id: string;
+	scope: string;
+	kind: "summary" | "user";
+	content: string;
+	createdAt: string;
 }
+export interface EvolutionRun {
+	source: Source;
+	attempt: number;
+	generation: number;
+	memories: DurableMemory[];
+}
+interface Event {
+	id: string;
+	at: string;
+	scope: string;
+	actor: string;
+	reason: string;
+	before: (DurableMemory | null)[];
+	after: DurableMemory[];
+}
+export type MemoryAction = "correct" | "forget" | "pin" | "unpin" | "conflict" | "resolve" | "adopt";
+export const MEMORY_KINDS = new Set<MemoryKind>(["fact", "preference", "decision", "project_state"]);
+const active = (m: DurableMemory) => m.status !== "forgotten" && m.status !== "conflicted";
 
-export type MemoryActionDraft = Omit<MemoryAction, "version" | "id" | "createdAt"> & {
-	readonly id?: string;
-	readonly createdAt?: string;
-};
-
-/** Persistent store for cross-session memories and lifecycle actions. */
-export interface MemoryStore {
+/** One transactional database: no cross-file commits, process locks or replay scans. */
+export class MemoryStore {
+	private db: Database;
+	private cache = new Map<string, { version: number; memories: DurableMemory[] }>();
 	readonly stateDir: string;
-	readMemories(): DurableMemory[];
-	appendMemory(memory: DurableMemoryDraft): boolean;
-	appendAction(action: MemoryActionDraft): void;
-}
-
-const MEMORIES_FILE = "memories.jsonl";
-const ACTIONS_FILE = "memory-actions.jsonl";
-
-/** Creates a local store backed by append-only JSONL files. */
-export function createMemoryStore(stateDir: string): MemoryStore {
-	ensureStateDir(stateDir);
-	return {
-		stateDir,
-		readMemories: () => readMemories(stateDir),
-		appendMemory: (memory) => appendMemory(stateDir, memory),
-		appendAction: (action) => appendAction(stateDir, action),
-	};
-}
-
-/** Reads valid memories and applies lifecycle actions without rewriting history. */
-function readMemories(stateDir: string): DurableMemory[] {
-	const file = join(stateDir, MEMORIES_FILE);
-	const memories = readJsonLines(file).filter(isDurableMemory);
-	const projected = new Map<string, DurableMemory>();
-	for (const memory of memories) {
-		if (!projected.has(memory.id)) {
-			projected.set(memory.id, normalizeMemory(memory));
-		}
-	}
-
-	for (const action of readJsonLines(join(stateDir, ACTIONS_FILE)).filter(isMemoryAction)) {
-		const current = projected.get(action.memoryId);
-		if (!current) {
-			continue;
-		}
-		applyAction(projected, current, action);
-	}
-	return [...projected.values()];
-}
-
-/** Appends one memory unless its stable id was already persisted. */
-function appendMemory(stateDir: string, memory: DurableMemoryDraft): boolean {
-	ensureStateDir(stateDir);
-	if (typeof memory.content !== "string") {
-		throw new TypeError("Memory content must be a string");
-	}
-	const record: DurableMemory = {
-		version: MEMORY_VERSION,
-		...memory,
-		kind: memory.kind ?? "compaction_summary",
-		layer: memory.layer ?? "durable",
-		status: memory.status ?? "provisional",
-		content: redactSensitiveContent(memory.content),
-	};
-	if (!isDurableMemory(record)) {
-		throw new TypeError("Invalid durable memory record");
-	}
-	if (readJsonLines(join(stateDir, MEMORIES_FILE)).some(
-		(value) => isDurableMemory(value) && value.id === record.id,
-	)) {
-		return false;
-	}
-	appendFileSync(join(stateDir, MEMORIES_FILE), `${JSON.stringify(record)}\n`);
-	return true;
-}
-
-/** Appends an explicit owner lifecycle action after validating its target. */
-function appendAction(stateDir: string, action: MemoryActionDraft): void {
-	ensureStateDir(stateDir);
-	if (typeof action.memoryId !== "string" || !action.memoryId.trim()) {
-		throw new TypeError("A memory action requires a memory id");
-	}
-	if (!ACTION_TYPES.has(action.type)) {
-		throw new TypeError(`Unsupported memory action: ${action.type}`);
-	}
-	const target = readMemories(stateDir).find((memory) => memory.id === action.memoryId);
-	if (!target) {
-		throw new Error(`Unknown memory id: ${action.memoryId}`);
-	}
-	if (action.type === "correct" && !String(action.content ?? "").trim()) {
-		throw new TypeError("A correction requires replacement content");
-	}
-	if (action.type === "conflict" && !String(action.conflictWith ?? "").trim()) {
-		throw new TypeError("A conflict action requires another memory id");
-	}
-	if (action.type === "conflict" && !readMemories(stateDir).some(
-		(memory) => memory.id === action.conflictWith,
-	)) {
-		throw new Error(`Unknown conflicting memory id: ${action.conflictWith}`);
-	}
-	const record: MemoryAction = {
-		version: MEMORY_VERSION,
-		id: action.id ?? `action:${randomUUID()}`,
-		createdAt: action.createdAt ?? new Date().toISOString(),
-		memoryId: action.memoryId,
-		type: action.type,
-		...(action.content === undefined ? {} : { content: redactSensitiveContent(action.content) }),
-		...(action.conflictWith === undefined ? {} : { conflictWith: action.conflictWith }),
-	};
-	if (!isMemoryAction(record)) {
-		throw new TypeError("Invalid memory action record");
-	}
-	appendFileSync(join(stateDir, ACTIONS_FILE), `${JSON.stringify(record)}\n`);
-}
-
-function applyAction(
-	projected: Map<string, DurableMemory>,
-	memory: DurableMemory,
-	action: MemoryAction,
-): void {
-	const updated = (patch: Partial<DurableMemory>): DurableMemory => ({
-		...memory,
-		...patch,
-		updatedAt: action.createdAt,
-	});
-	switch (action.type) {
-		case "confirm":
-			projected.set(memory.id, updated({ status: "confirmed", layer: "durable" }));
-			break;
-		case "correct":
-			projected.set(memory.id, updated({
-				content: redactSensitiveContent(action.content ?? memory.content),
-				status: "confirmed",
-				layer: "durable",
-				conflictWith: [],
-			}));
-			if (memory.kind === "compaction_summary") {
-				for (const [id, sibling] of projected) {
-					if (sibling.sourceEntryId === memory.sourceEntryId && id !== memory.id) {
-						projected.set(id, {
-							...sibling,
-							status: "forgotten",
-							updatedAt: action.createdAt,
-						});
-					}
-				}
-			}
-			break;
-		case "forget":
-			projected.set(memory.id, updated({ status: "forgotten" }));
-			if (memory.kind === "compaction_summary") {
-				for (const [id, sibling] of projected) {
-					if (sibling.sourceEntryId === memory.sourceEntryId && id !== memory.id) {
-						projected.set(id, {
-							...sibling,
-							status: "forgotten",
-							updatedAt: action.createdAt,
-						});
-					}
-				}
-			}
-			break;
-		case "pin":
-			projected.set(memory.id, updated({ status: "confirmed", layer: "pinned" }));
-			break;
-		case "unpin":
-			projected.set(memory.id, updated({ layer: "durable" }));
-			break;
-		case "resolve":
-			projected.set(memory.id, updated({
-				status: "confirmed",
-				layer: "durable",
-				conflictWith: [],
-			}));
-			break;
-		case "conflict": {
-			const otherId = action.conflictWith ?? "";
-			projected.set(memory.id, updated({
-				status: "conflicted",
-				conflictWith: [...new Set([...(memory.conflictWith ?? []), otherId])],
-			}));
-			const other = projected.get(otherId);
-			if (other) {
-				projected.set(otherId, {
-					...other,
-					status: "conflicted",
-					updatedAt: action.createdAt,
-					conflictWith: [...new Set([...(other.conflictWith ?? []), memory.id])],
-				});
-			}
-			break;
-		}
-	}
-}
-
-function readJsonLines(file: string): unknown[] {
-	let content: string;
-	try {
-		content = readFileSync(file, "utf8");
-	} catch {
-		return [];
-	}
-	const records: unknown[] = [];
-	for (const line of content.split("\n")) {
-		if (!line.trim()) continue;
+	constructor(stateDir: string) {
+		this.stateDir = stateDir;
+		mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+		const file = join(stateDir, "memory.sqlite");
+		try { const fd = openSync(file, "wx", 0o600); closeSync(fd); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+		if (!lstatSync(file).isFile() || lstatSync(file).isSymbolicLink()) throw new Error("Memory database must be a regular file");
+		chmodSync(file, 0o600);
+		this.db = new Database(file);
 		try {
-			records.push(JSON.parse(line));
-		} catch {
-			// A damaged line must not make all local memory unavailable.
-		}
+			this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+				CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+				CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY, scope TEXT NOT NULL, hash TEXT NOT NULL, data TEXT NOT NULL);
+				CREATE INDEX IF NOT EXISTS memories_scope_hash ON memories(scope,hash);
+				CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, data TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', attempt INTEGER NOT NULL DEFAULT 0, lease INTEGER NOT NULL DEFAULT 0);
+				CREATE INDEX IF NOT EXISTS sources_scope_state ON sources(json_extract(data,'$.scope'),state);
+				CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, scope TEXT NOT NULL, data TEXT NOT NULL);
+				CREATE INDEX IF NOT EXISTS events_scope ON events(scope);
+				CREATE TABLE IF NOT EXISTS blocked (scope TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(scope,hash));`);
+			this.transaction(() => {
+				const schema = this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get();
+				if (schema && schema.value !== "2") throw new Error("Unsupported memory database version");
+				if (!schema) {
+					const legacy = loadLegacyMemories(stateDir);
+					if (legacy.length) this.record("migration", "Import legacy JSONL; originals unchanged", legacy, "legacy");
+					this.db.prepare("INSERT INTO metadata VALUES ('schema','2')").run();
+				}
+			});
+		} catch (error) { this.db.close(); throw error; }
 	}
-	return records;
+	close(): void { this.db.close(); }
+	private transaction<T>(fn: () => T): T {
+		this.db.exec("BEGIN IMMEDIATE");
+		try { const value = fn(); this.db.exec("COMMIT"); this.cache.clear(); return value; }
+		catch (error) { this.db.exec("ROLLBACK"); this.cache.clear(); throw error; }
+	}
+	readMemories(scope?: string): DurableMemory[] {
+		const version = Number(this.db.prepare("PRAGMA data_version").get()!.data_version);
+		const key = scope ?? "";
+		let cached = this.cache.get(key);
+		if (!cached || cached.version !== version) {
+			const rows = scope === undefined ? this.db.prepare("SELECT id,scope,data FROM memories").all()
+				: this.db.prepare("SELECT id,scope,data FROM memories WHERE scope=? OR scope='*'").all(scope);
+			const memories = rows.map((row) => {
+				const memory: unknown = JSON.parse(String(row.data));
+				if (!isMemory(memory) || memory.id !== row.id || memory.scope !== row.scope) throw new Error("Invalid memory record; recall stopped");
+				return memory;
+			});
+			cached = { version, memories };
+			this.cache.set(key, cached);
+		}
+		return cached.memories.map((m) => ({ ...m }));
+	}
+	private get(id: string): DurableMemory | undefined {
+		const row = this.db.prepare("SELECT data FROM memories WHERE id=?").get(id);
+		if (!row) return undefined;
+		const data: unknown = JSON.parse(String(row.data));
+		if (!isMemory(data) || data.id !== id) throw new Error("Invalid memory record");
+		return data;
+	}
+	private generation(scope: string): number {
+		return Number(this.db.prepare("SELECT COALESCE(MAX(rowid),0) AS n FROM events WHERE scope=?").get(scope)!.n);
+	}
+	private record(actor: string, reason: string, after: DurableMemory[], scope: string): string {
+		const before = after.map((m) => this.get(m.id) ?? null);
+		const at = new Date().toISOString();
+		const event: Event = { id: randomUUID(), at, actor, reason, scope, before, after };
+		for (const memory of after) {
+			if (!isMemory(memory)) throw new Error("Invalid memory update");
+			this.db.prepare("INSERT INTO memories VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET scope=excluded.scope,hash=excluded.hash,data=excluded.data")
+				.run(memory.id, memory.scope, fingerprint(memory.content), JSON.stringify(memory));
+		}
+		this.db.prepare("INSERT INTO events VALUES (?,?,?)").run(event.id, scope, JSON.stringify(event));
+		this.cache.clear();
+		return event.id;
+	}
+	private block(memory: DurableMemory): void {
+		this.db.prepare("INSERT OR IGNORE INTO blocked VALUES (?,?)").run(memory.scope, fingerprint(memory.content));
+		// Do not later re-learn a manually suppressed fact from its pending raw source.
+		this.db.prepare("UPDATE sources SET state='done',lease=0 WHERE id=?").run(memory.sourceEntryId);
+	}
+	private claim(source: Source, item: Claim): DurableMemory | undefined {
+		const content = redact(item.content).trim();
+		if (!MEMORY_KINDS.has(item.kind) || content.length < 4 || content.length > 480 || content.includes("[REDACTED")) throw new Error("Invalid or sensitive claim");
+		const id = fingerprint(`${source.scope}:${item.kind}:${content}`);
+		if (this.get(id) || this.db.prepare("SELECT 1 FROM blocked WHERE scope=? AND hash=?").get(source.scope, fingerprint(content))) return undefined;
+		// Also respect forgotten legacy records whose ids predate content-addressing.
+		if (this.db.prepare("SELECT 1 FROM memories WHERE scope=? AND hash=?").get(source.scope, fingerprint(content))) return undefined;
+		return { id, kind: item.kind, content, scope: source.scope, sourceEntryId: source.id,
+			createdAt: source.createdAt, updatedAt: source.createdAt, revision: 1, layer: "durable", status: "provisional" };
+	}
+	/** Persist raw evidence + bounded local claims once, atomically. Raw sources are never recalled. */
+	capture(input: Source): boolean {
+		if (!input.id || !input.scope || !["summary", "user"].includes(input.kind) || !Number.isFinite(Date.parse(input.createdAt))) throw new Error("Invalid memory source");
+		const source = { ...input, createdAt: new Date(input.createdAt).toISOString(), content: clipBytes(redact(input.content), 32_000) };
+		return this.transaction(() => {
+			if (this.db.prepare("SELECT 1 FROM sources WHERE id=?").get(source.id)) return false;
+			this.db.prepare("INSERT INTO sources(id,data) VALUES (?,?)").run(source.id, JSON.stringify(source));
+			const claims = source.kind === "summary" ? extractStructuredMemories(source.content) : [];
+			const memories = claims.map((c) => this.claim(source, c)).filter((m): m is DurableMemory => !!m);
+			this.record("local", `Capture ${source.id}`, memories, source.scope);
+			return true;
+		});
+	}
+	pending(scope: string, retry = false): string | undefined {
+		const row = this.db.prepare(`SELECT id FROM sources WHERE json_extract(data,'$.scope')=? AND
+			(state='pending' OR (state='running' AND lease<?) ${retry ? "OR state='failed'" : ""}) ORDER BY rowid DESC LIMIT 1`).get(scope, Date.now());
+		return row ? String(row.id) : undefined;
+	}
+	beginEvolution(id: string, retry = false): EvolutionRun | undefined {
+		return this.transaction(() => {
+			const changed = this.db.prepare(`UPDATE sources SET state='running', attempt=attempt+1, lease=? WHERE id=? AND
+				(state='pending' OR (state='running' AND lease<?) ${retry ? "OR state='failed'" : ""})`).run(Date.now() + 60_000, id, Date.now());
+			if (!changed.changes) return undefined;
+			const row = this.db.prepare("SELECT data,attempt FROM sources WHERE id=?").get(id)!;
+			const source: Source = JSON.parse(String(row.data));
+			const memories = this.readMemories(source.scope).filter((m) => m.scope === source.scope && active(m))
+				.sort((a,b) => Date.parse(b.updatedAt)-Date.parse(a.updatedAt)).slice(0, 32);
+			return { source, attempt: Number(row.attempt), generation: this.generation(source.scope), memories };
+		});
+	}
+	finishEvolution(run: EvolutionRun, claims: Claim[], model: string): string {
+		return this.transaction(() => {
+			const job = this.db.prepare("SELECT state,attempt FROM sources WHERE id=?").get(run.source.id);
+			if (job?.state !== "running" || job.attempt !== run.attempt || this.generation(run.source.scope) !== run.generation) throw new Error("Memory changed during evolution; stale result discarded");
+			const after = new Map<string, DurableMemory>();
+			const targets = new Set<string>();
+			for (const claim of claims) {
+				if (claim.replaces) {
+					const old = run.memories.find((m) => m.id === claim.replaces);
+					if (!old || targets.has(old.id) || old.layer === "pinned" || Date.parse(old.updatedAt) > Date.parse(run.source.createdAt)) throw new Error("Invalid replacement target");
+					targets.add(old.id);
+					if (fingerprint(old.content) === fingerprint(claim.content)) continue;
+					const next = this.claim(run.source, claim);
+					// Local extraction may already have added the replacement from this source.
+					const existing = run.memories.find((m) => m.id !== old.id && m.kind === claim.kind && fingerprint(m.content) === fingerprint(claim.content));
+					if (!next && !existing) continue;
+					if (existing && claims.some((c) => c.replaces === existing.id)) throw new Error("Cyclic memory replacement");
+					this.block(old);
+					after.set(old.id, { ...old, status: "forgotten", updatedAt: run.source.createdAt, revision: old.revision + 1 });
+					if (next) after.set(next.id, next);
+				} else {
+					const next = this.claim(run.source, claim);
+					if (next) after.set(next.id, next);
+				}
+			}
+			const event = this.record("model", `${model}: ${run.source.id}`, [...after.values()], run.source.scope);
+			this.db.prepare("UPDATE sources SET state='done',lease=0 WHERE id=?").run(run.source.id);
+			return event;
+		});
+	}
+	failEvolution(run: EvolutionRun): void {
+		this.db.prepare("UPDATE sources SET state='failed',lease=0 WHERE id=? AND attempt=? AND state='running'").run(run.source.id, run.attempt);
+	}
+	act(id: string, type: MemoryAction, value?: string): string {
+		return this.transaction(() => {
+			const old = this.get(id);
+			if (!old) throw new Error("Unknown memory id");
+			const at = new Date().toISOString();
+			let next = { ...old, updatedAt: at, revision: old.revision + 1 };
+			const changes: DurableMemory[] = [];
+			if (type === "forget" || type === "correct") {
+				this.block(old);
+				for (const duplicate of this.readMemories(old.scope)) {
+					if (duplicate.id !== id && duplicate.scope === old.scope && fingerprint(duplicate.content) === fingerprint(old.content))
+						changes.push({ ...duplicate, status: "forgotten", updatedAt: at, revision: duplicate.revision + 1 });
+				}
+			}
+			switch (type) {
+				case "correct": {
+					const content = redact(value ?? "").trim();
+					if (content.length < 4 || content.length > 480 || content.includes("[REDACTED")) throw new Error("Correction must be 4–480 characters without credentials");
+					next = { ...next, content, status: "confirmed" }; break;
+				}
+				case "forget": next.status = "forgotten"; break;
+				case "pin": if (!active(old)) throw new Error("Resolve/correct the memory first"); next.layer = "pinned"; break;
+				case "unpin": next.layer = "durable"; break;
+				case "resolve": if (old.status !== "conflicted") throw new Error("Memory is not conflicted"); next.status = "confirmed"; break;
+				case "conflict": {
+					const other = this.get(value ?? "");
+					if (!other || other.id === id || other.scope !== old.scope || !active(other) || !active(old)) throw new Error("Conflict needs two active memories in the same scope");
+					this.block(old); this.block(other);
+					next.status = "conflicted";
+					changes.push({ ...other, status: "conflicted", updatedAt: at, revision: other.revision + 1 }); break;
+				}
+				case "adopt":
+					if (old.scope !== "legacy" || !value) throw new Error("Only unscoped legacy memories can be adopted");
+					next.scope = resolve(value); break;
+				default: throw new Error("Unknown memory action");
+			}
+			return this.record("manual", type, [...changes, next], next.scope);
+		});
+	}
+	history(scope?: string): Event[] {
+		return this.db.prepare(scope ? "SELECT data FROM events WHERE scope=? ORDER BY rowid DESC LIMIT 10" : "SELECT data FROM events ORDER BY rowid DESC LIMIT 10")
+			.all(...(scope ? [scope] : [])).map((row) => JSON.parse(String(row.data)) as Event);
+	}
+	undo(id: string): string {
+		return this.transaction(() => {
+			const row = this.db.prepare("SELECT data FROM events WHERE id=?").get(id);
+			if (!row) throw new Error("Unknown event id");
+			const event: Event = JSON.parse(String(row.data));
+			if (!event.after.length) throw new Error("Event has no memory changes");
+			const at = new Date().toISOString();
+			const restored = event.after.map((after, i) => {
+				if (JSON.stringify(this.get(after.id)) !== JSON.stringify(after)) throw new Error("Memory changed since this event; undo refused");
+				this.block(after);
+				return { ...(event.before[i] ?? { ...after, status: "forgotten" as const }), revision: after.revision + 1, updatedAt: at };
+			});
+			return this.record("manual", `Undo ${id}`, restored, event.scope);
+		});
+	}
+	status(): string {
+		const health = this.db.prepare("PRAGMA quick_check").get();
+		if (health?.quick_check !== "ok") throw new Error("Memory database integrity check failed");
+		const jobs = this.db.prepare("SELECT state,COUNT(*) AS n FROM sources GROUP BY state").all();
+		return `${this.readMemories().length} memories; ${jobs.map((j) => `${j.state}=${j.n}`).join(", ") || "no sources"}; SQLite ok`;
+	}
 }
 
-function normalizeMemory(memory: DurableMemory): DurableMemory {
-	return {
-		...memory,
-		layer: memory.layer ?? (
-			memory.kind === "compaction_summary" ? "recent" : "durable"
-		),
-		status: memory.status ?? "provisional",
-	};
-}
-
-function isDurableMemory(value: unknown): value is DurableMemory {
-	if (typeof value !== "object" || value === null) return false;
-	const record = value as Record<string, unknown>;
-	const validTags = record.tags === undefined || (
-		Array.isArray(record.tags) && record.tags.every((tag) => typeof tag === "string")
-	);
-	const validConflicts = record.conflictWith === undefined || (
-		Array.isArray(record.conflictWith) && record.conflictWith.every((id) => typeof id === "string")
-	);
-	const validOptionalDates = [record.updatedAt, record.expiresAt].every(
-		(date) => date === undefined || (typeof date === "string" && !Number.isNaN(Date.parse(date))),
-	);
-	return (
-		record.version === MEMORY_VERSION &&
-		typeof record.id === "string" && record.id.trim().length > 0 &&
-		MEMORY_KINDS.has(record.kind as MemoryKind) &&
-		typeof record.createdAt === "string" &&
-		!Number.isNaN(Date.parse(record.createdAt)) &&
-		typeof record.sourceEntryId === "string" && record.sourceEntryId.trim().length > 0 &&
-		typeof record.content === "string" &&
-		record.content.trim().length > 0 &&
-		(record.layer === undefined || MEMORY_LAYERS.has(record.layer as MemoryLayer)) &&
-		(record.status === undefined || MEMORY_STATUSES.has(record.status as MemoryStatus)) &&
-		(record.claimKey === undefined || typeof record.claimKey === "string") &&
-		validTags && validConflicts && validOptionalDates
-	);
-}
-
-function isMemoryAction(value: unknown): value is MemoryAction {
-	if (typeof value !== "object" || value === null) return false;
-	const record = value as Record<string, unknown>;
-	return (
-		record.version === MEMORY_VERSION &&
-		typeof record.id === "string" && record.id.trim().length > 0 &&
-		typeof record.createdAt === "string" &&
-		!Number.isNaN(Date.parse(record.createdAt)) &&
-		typeof record.memoryId === "string" && record.memoryId.trim().length > 0 &&
-		ACTION_TYPES.has(record.type as MemoryActionType) &&
-		(record.content === undefined || typeof record.content === "string") &&
-		(record.conflictWith === undefined || typeof record.conflictWith === "string")
-	);
-}
-
-const MEMORY_KINDS: ReadonlySet<MemoryKind> = new Set([
-	"compaction_summary", "fact", "preference", "decision", "project_state",
-]);
-const MEMORY_LAYERS: ReadonlySet<MemoryLayer> = new Set(["recent", "durable", "pinned"]);
-const MEMORY_STATUSES: ReadonlySet<MemoryStatus> = new Set([
-	"provisional", "confirmed", "forgotten", "conflicted",
-]);
-const ACTION_TYPES: ReadonlySet<MemoryActionType> = new Set([
-	"confirm", "correct", "forget", "pin", "unpin", "conflict", "resolve",
-]);
-
-/** Redacts common credential formats before a summary leaves the session store. */
-function redactSensitiveContent(content: string): string {
-	return content
-		.replace(
-			/(\b(?:api[_ -]?key|access[_ -]?token|password|passwd|secret)\s*[:=]\s*)[^\s,;]+/gi,
-			"$1[REDACTED]",
-		)
-		.replace(/\bgh[opsu]_[A-Za-z0-9_]+\b/g, "[REDACTED_GITHUB_TOKEN]")
-		.replace(/\bsk-[A-Za-z0-9_-]+\b/g, "[REDACTED_API_KEY]");
-}
-
-function ensureStateDir(stateDir: string): void {
-	mkdirSync(stateDir, { recursive: true });
+function isMemory(value: unknown): value is DurableMemory {
+	if (!value || typeof value !== "object") return false;
+	const m = value as DurableMemory;
+	return typeof m.id === "string" && !!m.id && MEMORY_KINDS.has(m.kind) && typeof m.content === "string" && !!m.content.trim()
+		&& typeof m.scope === "string" && !!m.scope && typeof m.sourceEntryId === "string"
+		&& typeof m.createdAt === "string" && typeof m.updatedAt === "string"
+		&& Number.isFinite(Date.parse(m.createdAt)) && Number.isFinite(Date.parse(m.updatedAt))
+		&& Number.isInteger(m.revision) && m.revision > 0 && ["durable", "pinned"].includes(m.layer)
+		&& ["provisional", "confirmed", "forgotten", "conflicted"].includes(m.status);
 }
