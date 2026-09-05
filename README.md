@@ -16,17 +16,40 @@ no tools and cannot edit project files, system configuration, skills or its own 
 ## Requirements and installation
 
 - Pi **0.85+** for semantic evolution via `ctx.modelRegistry.complete(ctx.model, ...)`.
-- Pi's standalone Bun binary, or Node **22.18+** for npm Pi/development.
+- Pi's standalone Bun binary, or Node **22.19+** for npm Pi/development (Pi 0.85's minimum).
 - No third-party runtime dependencies: SQLite is built into both runtimes.
 
-Install this checkout (0.2.0 has not been published/tagged by this change):
+`main` is the default development branch. Package version **0.2.0 is unreleased**:
+there is no 0.2.0 release tag or npm publication yet. The old `v0.1.0` tag is historical.
+
+Choose **one** installation source:
 
 ```bash
+# Git installation: use the current default branch, without an old tag pin
+pi install https://github.com/btnalit/pi-memory-evolution
+
+# Or install a local checkout directly (no copy is made)
 pi install /absolute/path/to/pi-memory-evolution
 ```
 
-Then `/reload` and `/memory status`. Updating a checkout does not update an existing
-Git installation pinned to `v0.1.0`; switch the installed source to use this code.
+Then run `/reload` and `/memory status` in Pi. To update:
+
+```bash
+# For the Git installation above
+pi update https://github.com/btnalit/pi-memory-evolution
+
+# For a local checkout instead
+cd /absolute/path/to/pi-memory-evolution
+git switch main
+git pull --ff-only origin main
+```
+
+Run `/reload` again after updating. A Git installation pinned to `v0.1.0` does not
+follow `main`; install the unpinned Git source above to switch away from that pin.
+When switching between Git and local sources, check `pi list` and use
+`pi remove <old-source>` first: different source forms can otherwise load the extension
+twice. Installation/removal does not erase memory state. Back up state before upgrading
+from 0.1; see [Migration](#migration-from-01) and [Recovery](#recovery-and-troubleshooting).
 
 ## What happens automatically
 
@@ -35,16 +58,22 @@ Git installation pinned to `v0.1.0`; switch the installed source to use this cod
 - Explicit user statements containing cues such as `remember`, `prefer`, `记住`,
   `偏好`, `纠正`, `不对`, `以后`, or `不要` also trigger learning, without waiting for
   another compaction. Ordinary messages, assistant replies and tool results do not.
-- One background model call per source consolidates up to 32 existing memories.
+- Each processing attempt makes at most one background model call, using up to 32
+  recently updated active memories in the current scope.
   It uses **the current Pi session model and Pi's own provider/auth resolution**.
   With no model override in the session, this is Pi's configured default model.
   There is no extra API key, provider setting, subagent, or alternate-model fallback.
 - Valid additions/replacements commit immediately, with provenance and before/after
   history. Inferred memories remain labeled `provisional`, but are recallable without
   approval. Pinned memories cannot be automatically replaced.
-- Replayed source events are idempotent. Calls have a 30-second deadline and abort on
-  session shutdown/reload. Failed calls retain the local extraction; `/memory evolve`
-  retries a failed/pending source. Pending work can resume on session start.
+- Replayed source events are idempotent. Calls have a 30-second deadline and are
+  cancelled on session shutdown/reload. Structured summary claims survive model failure.
+  User-cue prose has no local-extraction fallback: its sanitized source is saved, but
+  learning its claims requires a successful model attempt.
+- Session start resumes at most **one**, most recently captured eligible pending source.
+  `/memory evolve` similarly selects one source, also allowing failed attempts. Neither
+  action drains the whole backlog. Jobs left running by a crash become eligible after
+  their 60-second lease expires; there is no timer that automatically polls/retries them.
 - Recall is local: literal/identifier tokens, CJK bigrams, recency and pinned tie-breaks.
   It injects at most three deduplicated claims within **2048 UTF-8 bytes**. Trust guidance
   cannot be truncated. Ordinary project-state claims age out of recall after seven
@@ -57,7 +86,7 @@ history, correction, pinning and undo rather than treating generated claims as v
 
 ## Local storage and isolation
 
-State lives under Pi's public agent directory:
+State lives under Pi's public agent directory (`getAgentDir()`). By default:
 
 ```text
 ~/.pi/agent/agent-suite/memory-evolution/
@@ -65,6 +94,10 @@ State lives under Pi's public agent directory:
 ├── memory.sqlite-wal   # SQLite-managed when open
 └── memory.sqlite-shm
 ```
+
+If `PI_CODING_AGENT_DIR` is set, replace `~/.pi/agent` with that directory. Using a
+different agent directory means a different database; changing cwd selects a different
+scope within the same database.
 
 SQLite transactions/WAL protect concurrent processes and interrupted commits.
 Model calls run outside transactions; stale responses cannot overwrite intervening
@@ -87,11 +120,11 @@ sources and selected existing memories go to the already-configured Pi model pro
 These are optional direct controls, **not approval gates**:
 
 ```text
-/memory list                         # current directory, last 20 non-forgotten records
-/memory list all                     # include other scopes and legacy imports
-/memory show <id>
-/memory search <query>
-/memory status                       # SQLite integrity and pending/failed jobs
+/memory list                         # up to 20 non-forgotten records in this scope
+/memory list all                     # up to 20 across scopes, including legacy imports
+/memory show <id>                     # exact ID, any scope/status (including forgotten)
+/memory search <query>                # up to 10 recallable matches in the current scope
+/memory status                       # database-wide counts/integrity + current scope
 /memory history                      # last 10 events in this scope
 /memory evolve                       # retry one pending/failed source
 /memory undo <event-id>               # reverse actual changes, if not modified since
@@ -103,6 +136,17 @@ These are optional direct controls, **not approval gates**:
 /memory resolve <id>                  # restore this conflicted side; other stays suppressed
 /memory adopt <id>                    # assign an unscoped legacy claim to this directory
 ```
+
+`list all` expands the scope, not the limit; it is not a full export. Lists can show
+conflicted or stale project-state records that search/recall excludes, and their order
+is not guaranteed to be chronological. Status counts include all scopes and tombstones.
+Commands that take exact IDs can address records outside the current cwd; automatic
+learning/recall remains scoped. Pin protects against automatic replacement/age expiry,
+not manual edits, and does not force an unrelated record into every prompt.
+
+Undo reverses claim changes only when the affected records have not changed since;
+it is not a database rollback. Suppression hashes remain, and jobs are not reopened.
+There is no `/memory confirm`, `/evolution approve`, or owner-approval step in 0.2.
 
 ## Migration from 0.1
 
@@ -121,6 +165,31 @@ files only. This version neither processes nor deletes them. Back up the entire 
 directory with Pi stopped before changing versions. Returning to 0.1 reads the old
 JSONL, not changes made in the new database.
 
+## Recovery and troubleshooting
+
+- **No `/memory` command:** check `pi list`, then `/reload` (or restart Pi). Only one
+  source of this extension should be installed. Processes marked by a nonempty
+  `PI_SUBAGENT_AGENT_ID` deliberately do not load it.
+- **No recalled memories:** check the cwd shown by `/memory status`, the active agent
+  directory, legacy quarantine, and query relevance. Forgotten/conflicted records and
+  unpinned project state older than seven days are not recalled.
+- **Pending/failed jobs:** ensure Pi 0.85+ has a working current model/authentication,
+  then `/memory evolve`. After a crash, wait for the 60-second lease to expire. Repeat
+  the command to process more eligible sources; successful jobs cannot be forced to
+  run again with this command.
+- **Persistent storage/import errors:** stop all Pi processes using that agent directory
+  and back up the **entire** state directory, including any SQLite sidecars and legacy
+  ledgers. Check file permissions and restore a known-good matching backup if needed.
+  Do not delete `memory-actions.jsonl` to bypass an import failure: that can discard
+  forget/correct history. Failed imports can retry after repairing the original ledgers;
+  successful imports are never replayed merely because the old JSONL changes.
+- **Disable the extension:** `pi remove <installed-source>`, then `/reload`. Its local
+  database remains on disk. Restore/replace state only with all processes using it
+  stopped; do not mix one backup's database with another's WAL/SHM files.
+
+Diagnostics intentionally do not echo provider error bodies, which may contain secrets.
+`SQLite ok` checks database structure/record validity, not the truth of model claims.
+
 ## Development
 
 ```bash
@@ -131,7 +200,9 @@ npm run test:pi           # optional: real installed Pi, loopback fake model, no
 
 Tests use temporary directories and synthetic data. `test:pi` accepts
 `PI_TEST_BINARY=/path/to/pi`; it verifies real host loading, reuse of the active model
-and authentication, automatic replacement and absence of approval dialogs.
+and authentication, automatic replacement and absence of approval dialogs. No GitHub
+Actions workflow is currently configured; run these checks locally before pushing.
+The real-Pi test uses a fake model, not a live-provider accuracy or multi-day TUI test.
 
 See [docs/design.md](docs/design.md) for invariants and [CHANGELOG.md](CHANGELOG.md)
 for the previous architecture and the 0.2 simplification.

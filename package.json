@@ -12,7 +12,7 @@
 		"url": "https://github.com/btnalit/pi-memory-evolution/issues"
 	},
 	"engines": {
-		"node": ">=22.18"
+		"node": ">=22.19"
 	},
 	"type": "module",
 	"keywords": [
