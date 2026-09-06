@@ -112,7 +112,8 @@ paraphrased facts cannot be perfectly identified as equivalent by a local hash.
 
 Sensitive lines/blocks are suppressed before capture, edits, model submission and
 recall. This covers common token/password/JSON/Chinese/Bearer/private-key formats,
-not every possible secret. Do not rely on a regex as a complete DLP system. Sanitized
+including quoted multiline values, indented YAML blocks and control-character cleanup,
+but not every possible secret. Do not rely on a regex as a complete DLP system. Sanitized
 sources and selected existing memories go to the already-configured Pi model provider.
 
 ## Commands
@@ -120,9 +121,10 @@ sources and selected existing memories go to the already-configured Pi model pro
 These are optional direct controls, **not approval gates**:
 
 ```text
-/memory list                         # up to 20 non-forgotten records in this scope
-/memory list all                     # up to 20 across scopes, including legacy imports
-/memory show <id>                     # exact ID, any scope/status (including forgotten)
+/memory list [page]                  # current scope, 20 non-forgotten records per page
+/memory list all [page]              # all scopes, paginated
+/memory list legacy [page]           # browse unscoped imports for adoption
+/memory show <id>                     # exact ID, any scope/status; includes provenance
 /memory search <query>                # up to 10 recallable matches in the current scope
 /memory status                       # database-wide counts/integrity + current scope
 /memory history                      # last 10 events in this scope
@@ -137,15 +139,25 @@ These are optional direct controls, **not approval gates**:
 /memory adopt <id>                    # assign an unscoped legacy claim to this directory
 ```
 
-`list all` expands the scope, not the limit; it is not a full export. Lists can show
-conflicted or stale project-state records that search/recall excludes, and their order
-is not guaranteed to be chronological. Status counts include all scopes and tombstones.
+Pages start at 1, sorted by update time descending, then ID. For example,
+`/memory list legacy 2` reaches the next 20 imports. `all` expands the scope, not the
+page size; there is no full export command. Concurrent updates can move records between
+pages. Lists can show conflicted or stale project-state records that search/recall
+excludes. Status counts include all scopes and tombstones and validate source jobs and
+history as well as memory records. Long content previews are capped at 1,440 bytes in
+lists/search or 8,000 bytes in `show`, with an ellipsis when truncated.
 Commands that take exact IDs can address records outside the current cwd; automatic
 learning/recall remains scoped. Pin protects against automatic replacement/age expiry,
-not manual edits, and does not force an unrelated record into every prompt.
+not manual edits, and does not force an unrelated record into every prompt. Pin/unpin
+and adoption preserve the stored evidence date; undo restores the prior date. These
+bookkeeping actions do not restart the seven-day project-state recall window.
 
 Undo reverses claim changes only when the affected records have not changed since;
 it is not a database rollback. Suppression hashes remain, and jobs are not reopened.
+Suppression retires pending sources known to repeat that fact, not just its first parent.
+This skips the entire pending model pass for those sources; unrelated local claims remain,
+but unlearned prose may need to be restated in a new source. Job state `done` also includes
+these retired sources; history identifies actual model transactions.
 There is no `/memory confirm`, `/evolution approve`, or owner-approval step in 0.2.
 
 ## Migration from 0.1
@@ -155,10 +167,17 @@ once in a transaction. **Original files are not modified or deleted.** Corrupt o
 unreadable ledgers stop migration rather than silently ignoring forget/correct actions.
 
 Old records have no project identity, so imports are quarantined under `legacy`.
-Use `/memory list all` and `/memory adopt <id>` to assign needed records; they are
+Use `/memory list legacy [page]` and `/memory adopt <id>` to assign needed records; they are
 not silently exposed to every project. Structured claims are extracted from eligible
 legacy summaries, respecting existing lifecycle actions. Free-form raw summaries
-remain available in the original JSONL but are not injected as claims.
+remain available in the original JSONL but are not injected as claims. New imports
+preserve unchanged children of corrected summaries and carry superseded-content hashes
+when corrected legacy claims are adopted into a project.
+
+These migration fixes do not replay an already completed import or retroactively erase
+previously stored sensitive data. If an older import already lost revision information,
+use the preserved ledgers/backup to review and correct affected records; do not reset the
+migration marker or replace a populated database blindly.
 
 Old signals, agenda, thresholds, proposals, journals and execution plans are historical
 files only. This version neither processes nor deletes them. Back up the entire state
@@ -205,4 +224,5 @@ Actions workflow is currently configured; run these checks locally before pushin
 The real-Pi test uses a fake model, not a live-provider accuracy or multi-day TUI test.
 
 See [docs/design.md](docs/design.md) for invariants and [CHANGELOG.md](CHANGELOG.md)
-for the previous architecture and the 0.2 simplification.
+for the previous architecture and the 0.2 simplification. The follow-up
+[code review](docs/review-0.2.md) records reproduced defects, fixes and validation limits.

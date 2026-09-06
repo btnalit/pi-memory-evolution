@@ -22,6 +22,8 @@ Development is on `main`; this version has not yet been tagged or published to n
 - Direct history/undo/search/status/evolve/adopt commands; no owner approval required
 - Strict typechecking, reproducible development dependencies, real multi-process tests and an optional real-Pi loopback-model test (local commands, not an installed CI workflow)
 - Current-branch installation/update, source deduplication, bounded retry behavior, command limits and storage recovery documentation
+- Paginated current/all/legacy memory browsing and provenance in `/memory show`
+- Follow-up regression cases and mixed lifecycle sequence testing
 
 ### Fixed
 
@@ -30,6 +32,14 @@ Development is on `main`; this version has not yet been tagged or published to n
 - Parent-summary recall bypass, correction/backfill invalidation and repeated startup scans
 - CJK byte-budget overflow, truncated trust guidance, literal identifier corruption and timestamp string ordering
 - Common credential leaks, pending-source replay after suppression, async error handling and provider timeout handling
+- Control-character normalization and multiline quoted/YAML credential redaction
+- Nested/mixed Markdown fences, recursive glob preservation and sibling progress headings
+- Colon-ambiguous scoped IDs, implicit wildcard recall and same-batch cross-kind duplicates
+- Pending repeats surviving forget, unchanged legacy children lost on correction, and suppression history lost on adoption
+- Invalid before/after undo pairings, indexed identity/hash mismatches, malformed source jobs and DDL on unsupported schemas
+- Model-switch provenance, poisoned background queues, UI errors misreporting committed changes and post-shutdown reopening
+- English and long-sentence matching excerpts, unreachable legacy pages and smoke-test startup/cleanup failures
+- Pin/unpin, adoption and undo making old project-state evidence appear fresh
 
 ## Legacy 0.1 history
 

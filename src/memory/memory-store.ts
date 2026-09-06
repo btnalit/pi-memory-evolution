@@ -18,6 +18,8 @@ export interface DurableMemory {
 	revision: number;
 	layer: "durable" | "pinned";
 	status: "provisional" | "confirmed" | "forgotten" | "conflicted";
+	/** Exact superseded content, carried across explicit legacy adoption. */
+	suppressedHashes?: string[];
 }
 export interface Source {
 	id: string;
@@ -60,7 +62,12 @@ export class MemoryStore {
 		chmodSync(file, 0o600);
 		this.db = new Database(file);
 		try {
-			this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+			this.db.exec("PRAGMA busy_timeout=5000");
+			if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").get()) {
+				const schema = this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get();
+				if (schema && schema.value !== "2") throw new Error("Unsupported memory database version");
+			}
+			this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
 				CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 				CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY, scope TEXT NOT NULL, hash TEXT NOT NULL, data TEXT NOT NULL);
 				CREATE INDEX IF NOT EXISTS memories_scope_hash ON memories(scope,hash);
@@ -91,23 +98,23 @@ export class MemoryStore {
 		const key = scope ?? "";
 		let cached = this.cache.get(key);
 		if (!cached || cached.version !== version) {
-			const rows = scope === undefined ? this.db.prepare("SELECT id,scope,data FROM memories").all()
-				: this.db.prepare("SELECT id,scope,data FROM memories WHERE scope=? OR scope='*'").all(scope);
+			const rows = scope === undefined ? this.db.prepare("SELECT id,scope,hash,data FROM memories").all()
+				: this.db.prepare("SELECT id,scope,hash,data FROM memories WHERE scope=?").all(scope);
 			const memories = rows.map((row) => {
 				const memory: unknown = JSON.parse(String(row.data));
-				if (!isMemory(memory) || memory.id !== row.id || memory.scope !== row.scope) throw new Error("Invalid memory record; recall stopped");
+				if (!isMemory(memory) || memory.id !== row.id || memory.scope !== row.scope || fingerprint(memory.content) !== row.hash) throw new Error("Invalid memory record; recall stopped");
 				return memory;
 			});
 			cached = { version, memories };
 			this.cache.set(key, cached);
 		}
-		return cached.memories.map((m) => ({ ...m }));
+		return cached.memories.map((m) => ({ ...m, ...(m.suppressedHashes ? { suppressedHashes: [...m.suppressedHashes] } : {}) }));
 	}
 	private get(id: string): DurableMemory | undefined {
-		const row = this.db.prepare("SELECT data FROM memories WHERE id=?").get(id);
+		const row = this.db.prepare("SELECT scope,hash,data FROM memories WHERE id=?").get(id);
 		if (!row) return undefined;
 		const data: unknown = JSON.parse(String(row.data));
-		if (!isMemory(data) || data.id !== id) throw new Error("Invalid memory record");
+		if (!isMemory(data) || data.id !== id || data.scope !== row.scope || fingerprint(data.content) !== row.hash) throw new Error("Invalid memory record");
 		return data;
 	}
 	private generation(scope: string): number {
@@ -121,20 +128,32 @@ export class MemoryStore {
 			if (!isMemory(memory)) throw new Error("Invalid memory update");
 			this.db.prepare("INSERT INTO memories VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET scope=excluded.scope,hash=excluded.hash,data=excluded.data")
 				.run(memory.id, memory.scope, fingerprint(memory.content), JSON.stringify(memory));
+			for (const hash of memory.suppressedHashes ?? [])
+				this.db.prepare("INSERT OR IGNORE INTO blocked VALUES (?,?)").run(memory.scope, hash);
 		}
 		this.db.prepare("INSERT INTO events VALUES (?,?,?)").run(event.id, scope, JSON.stringify(event));
 		this.cache.clear();
 		return event.id;
 	}
-	private block(memory: DurableMemory): void {
-		this.db.prepare("INSERT OR IGNORE INTO blocked VALUES (?,?)").run(memory.scope, fingerprint(memory.content));
-		// Do not later re-learn a manually suppressed fact from its pending raw source.
-		this.db.prepare("UPDATE sources SET state='done',lease=0 WHERE id=?").run(memory.sourceEntryId);
+	private block(memory: DurableMemory, keepSource?: string): void {
+		const hash = fingerprint(memory.content);
+		this.db.prepare("INSERT OR IGNORE INTO blocked VALUES (?,?)").run(memory.scope, hash);
+		const original = this.db.prepare("SELECT data FROM sources WHERE id=?").get(memory.sourceEntryId);
+		const body = original ? parseSource(original.data).content : undefined;
+		// A claim may have been repeated in several sources, not only its first parent.
+		const pending = this.db.prepare("SELECT id,data FROM sources WHERE json_extract(data,'$.scope')=? AND state!='done'").all(memory.scope);
+		for (const row of pending) {
+			if (row.id === keepSource) continue;
+			const source = parseSource(row.data);
+			if (source.id === memory.sourceEntryId || source.content === body || source.content.includes(memory.content)
+				|| extractStructuredMemories(source.content, Infinity).some((claim) => fingerprint(claim.content) === hash))
+				this.db.prepare("UPDATE sources SET state='done',lease=0 WHERE id=?").run(source.id);
+		}
 	}
 	private claim(source: Source, item: Claim): DurableMemory | undefined {
 		const content = redact(item.content).trim();
 		if (!MEMORY_KINDS.has(item.kind) || content.length < 4 || content.length > 480 || content.includes("[REDACTED")) throw new Error("Invalid or sensitive claim");
-		const id = fingerprint(`${source.scope}:${item.kind}:${content}`);
+		const id = fingerprint(JSON.stringify([source.scope, item.kind, content]));
 		if (this.get(id) || this.db.prepare("SELECT 1 FROM blocked WHERE scope=? AND hash=?").get(source.scope, fingerprint(content))) return undefined;
 		// Also respect forgotten legacy records whose ids predate content-addressing.
 		if (this.db.prepare("SELECT 1 FROM memories WHERE scope=? AND hash=?").get(source.scope, fingerprint(content))) return undefined;
@@ -143,14 +162,18 @@ export class MemoryStore {
 	}
 	/** Persist raw evidence + bounded local claims once, atomically. Raw sources are never recalled. */
 	capture(input: Source): boolean {
-		if (!input.id || !input.scope || !["summary", "user"].includes(input.kind) || !Number.isFinite(Date.parse(input.createdAt))) throw new Error("Invalid memory source");
+		if (!isSource(input)) throw new Error("Invalid memory source");
 		const source = { ...input, createdAt: new Date(input.createdAt).toISOString(), content: clipBytes(redact(input.content), 32_000) };
 		return this.transaction(() => {
 			if (this.db.prepare("SELECT 1 FROM sources WHERE id=?").get(source.id)) return false;
 			this.db.prepare("INSERT INTO sources(id,data) VALUES (?,?)").run(source.id, JSON.stringify(source));
 			const claims = source.kind === "summary" ? extractStructuredMemories(source.content) : [];
-			const memories = claims.map((c) => this.claim(source, c)).filter((m): m is DurableMemory => !!m);
-			this.record("local", `Capture ${source.id}`, memories, source.scope);
+			const memories = new Map<string, DurableMemory>();
+			for (const claim of claims) {
+				const memory = this.claim(source, claim);
+				if (memory && !memories.has(fingerprint(memory.content))) memories.set(fingerprint(memory.content), memory);
+			}
+			this.record("local", `Capture ${source.id}`, [...memories.values()], source.scope);
 			return true;
 		});
 	}
@@ -165,7 +188,8 @@ export class MemoryStore {
 				(state='pending' OR (state='running' AND lease<?) ${retry ? "OR state='failed'" : ""})`).run(Date.now() + 60_000, id, Date.now());
 			if (!changed.changes) return undefined;
 			const row = this.db.prepare("SELECT data,attempt FROM sources WHERE id=?").get(id)!;
-			const source: Source = JSON.parse(String(row.data));
+			const source = parseSource(row.data);
+			if (source.id !== id) throw new Error("Invalid source identity");
 			const memories = this.readMemories(source.scope).filter((m) => m.scope === source.scope && active(m))
 				.sort((a,b) => Date.parse(b.updatedAt)-Date.parse(a.updatedAt)).slice(0, 32);
 			return { source, attempt: Number(row.attempt), generation: this.generation(source.scope), memories };
@@ -177,6 +201,9 @@ export class MemoryStore {
 			if (job?.state !== "running" || job.attempt !== run.attempt || this.generation(run.source.scope) !== run.generation) throw new Error("Memory changed during evolution; stale result discarded");
 			const after = new Map<string, DurableMemory>();
 			const targets = new Set<string>();
+			const stage = (memory: DurableMemory) => {
+				if (![...after.values()].some((m) => active(m) && fingerprint(m.content) === fingerprint(memory.content))) after.set(memory.id, memory);
+			};
 			for (const claim of claims) {
 				if (claim.replaces) {
 					const old = run.memories.find((m) => m.id === claim.replaces);
@@ -188,12 +215,12 @@ export class MemoryStore {
 					const existing = run.memories.find((m) => m.id !== old.id && m.kind === claim.kind && fingerprint(m.content) === fingerprint(claim.content));
 					if (!next && !existing) continue;
 					if (existing && claims.some((c) => c.replaces === existing.id)) throw new Error("Cyclic memory replacement");
-					this.block(old);
+					this.block(old, run.source.id);
 					after.set(old.id, { ...old, status: "forgotten", updatedAt: run.source.createdAt, revision: old.revision + 1 });
-					if (next) after.set(next.id, next);
+					if (next) stage(next);
 				} else {
 					const next = this.claim(run.source, claim);
-					if (next) after.set(next.id, next);
+					if (next) stage(next);
 				}
 			}
 			const event = this.record("model", `${model}: ${run.source.id}`, [...after.values()], run.source.scope);
@@ -209,10 +236,11 @@ export class MemoryStore {
 			const old = this.get(id);
 			if (!old) throw new Error("Unknown memory id");
 			const at = new Date().toISOString();
-			let next = { ...old, updatedAt: at, revision: old.revision + 1 };
+			let next = { ...old, updatedAt: ["pin", "unpin", "adopt"].includes(type) ? old.updatedAt : at, revision: old.revision + 1 };
 			const changes: DurableMemory[] = [];
 			if (type === "forget" || type === "correct") {
 				this.block(old);
+				next.suppressedHashes = [...new Set([...(old.suppressedHashes ?? []), fingerprint(old.content)])];
 				for (const duplicate of this.readMemories(old.scope)) {
 					if (duplicate.id !== id && duplicate.scope === old.scope && fingerprint(duplicate.content) === fingerprint(old.content))
 						changes.push({ ...duplicate, status: "forgotten", updatedAt: at, revision: duplicate.revision + 1 });
@@ -244,20 +272,20 @@ export class MemoryStore {
 		});
 	}
 	history(scope?: string): Event[] {
-		return this.db.prepare(scope ? "SELECT data FROM events WHERE scope=? ORDER BY rowid DESC LIMIT 10" : "SELECT data FROM events ORDER BY rowid DESC LIMIT 10")
-			.all(...(scope ? [scope] : [])).map((row) => JSON.parse(String(row.data)) as Event);
+		return this.db.prepare(scope ? "SELECT id,scope,data FROM events WHERE scope=? ORDER BY rowid DESC LIMIT 10" : "SELECT id,scope,data FROM events ORDER BY rowid DESC LIMIT 10")
+			.all(...(scope ? [scope] : [])).map((row) => parseEvent(row.data, row.id, row.scope));
 	}
 	undo(id: string): string {
 		return this.transaction(() => {
-			const row = this.db.prepare("SELECT data FROM events WHERE id=?").get(id);
+			const row = this.db.prepare("SELECT scope,data FROM events WHERE id=?").get(id);
 			if (!row) throw new Error("Unknown event id");
-			const event: Event = JSON.parse(String(row.data));
+			const event = parseEvent(row.data, id, row.scope);
 			if (!event.after.length) throw new Error("Event has no memory changes");
-			const at = new Date().toISOString();
 			const restored = event.after.map((after, i) => {
 				if (JSON.stringify(this.get(after.id)) !== JSON.stringify(after)) throw new Error("Memory changed since this event; undo refused");
 				this.block(after);
-				return { ...(event.before[i] ?? { ...after, status: "forgotten" as const }), revision: after.revision + 1, updatedAt: at };
+				return { ...(event.before[i] ?? { ...after, status: "forgotten" as const }), revision: after.revision + 1,
+					suppressedHashes: [...new Set([...(event.before[i]?.suppressedHashes ?? []), ...(after.suppressedHashes ?? []), fingerprint(after.content)])] };
 			});
 			return this.record("manual", `Undo ${id}`, restored, event.scope);
 		});
@@ -265,16 +293,47 @@ export class MemoryStore {
 	status(): string {
 		const health = this.db.prepare("PRAGMA quick_check").get();
 		if (health?.quick_check !== "ok") throw new Error("Memory database integrity check failed");
+		for (const row of this.db.prepare("SELECT id,data,state,attempt,lease FROM sources").iterate()) {
+			const source = parseSource(row.data);
+			if (source.id !== row.id || !["pending", "running", "done", "failed"].includes(String(row.state))
+				|| !Number.isSafeInteger(row.attempt) || Number(row.attempt) < 0 || !Number.isSafeInteger(row.lease) || Number(row.lease) < 0) throw new Error("Invalid source job");
+		}
+		for (const row of this.db.prepare("SELECT id,scope,data FROM events").iterate()) parseEvent(row.data, row.id, row.scope);
 		const jobs = this.db.prepare("SELECT state,COUNT(*) AS n FROM sources GROUP BY state").all();
 		return `${this.readMemories().length} memories; ${jobs.map((j) => `${j.state}=${j.n}`).join(", ") || "no sources"}; SQLite ok`;
 	}
 }
 
+function isSource(value: unknown): value is Source {
+	if (!value || typeof value !== "object") return false;
+	const s = value as Source;
+	return typeof s.id === "string" && !!s.id.trim() && typeof s.scope === "string" && !!s.scope.trim()
+		&& ["summary", "user"].includes(s.kind) && typeof s.content === "string"
+		&& typeof s.createdAt === "string" && Number.isFinite(Date.parse(s.createdAt));
+}
+function parseSource(data: unknown): Source {
+	const source: unknown = JSON.parse(String(data));
+	if (!isSource(source)) throw new Error("Invalid source record");
+	return source;
+}
+function parseEvent(data: unknown, id: unknown, scope: unknown): Event {
+	const event = JSON.parse(String(data)) as Event | null;
+	if (!event || typeof event.id !== "string" || !event.id || typeof event.scope !== "string" || !event.scope
+		|| event.id !== id || event.scope !== scope
+		|| !["local", "manual", "model", "migration"].includes(event.actor) || typeof event.reason !== "string"
+		|| typeof event.at !== "string" || !Number.isFinite(Date.parse(event.at))
+		|| !Array.isArray(event.before) || !Array.isArray(event.after) || event.before.length !== event.after.length
+		|| !event.after.every((after, i) => isMemory(after) && (event.before[i] === null
+			|| (isMemory(event.before[i]) && event.before[i]!.id === after.id)))
+		|| new Set(event.after.map((m) => m.id)).size !== event.after.length) throw new Error("Invalid history record");
+	return event;
+}
 function isMemory(value: unknown): value is DurableMemory {
 	if (!value || typeof value !== "object") return false;
 	const m = value as DurableMemory;
 	return typeof m.id === "string" && !!m.id && MEMORY_KINDS.has(m.kind) && typeof m.content === "string" && !!m.content.trim()
-		&& typeof m.scope === "string" && !!m.scope && typeof m.sourceEntryId === "string"
+		&& typeof m.scope === "string" && !!m.scope && typeof m.sourceEntryId === "string" && !!m.sourceEntryId
+		&& (m.suppressedHashes === undefined || (Array.isArray(m.suppressedHashes) && m.suppressedHashes.every((h) => typeof h === "string" && /^[a-f0-9]{24}$/u.test(h))))
 		&& typeof m.createdAt === "string" && typeof m.updatedAt === "string"
 		&& Number.isFinite(Date.parse(m.createdAt)) && Number.isFinite(Date.parse(m.updatedAt))
 		&& Number.isInteger(m.revision) && m.revision > 0 && ["durable", "pinned"].includes(m.layer)

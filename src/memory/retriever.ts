@@ -40,9 +40,22 @@ export function selectRelevantMemories(memories: readonly DurableMemory[], promp
 export function excerpt(content: string, prompt: string, budget: number): string {
 	const clean = redact(content).trim();
 	if (Buffer.byteLength(clean) <= budget) return clean;
+	if (budget <= 3) return clipBytes(clean, Math.max(0, budget));
 	const query = terms(prompt);
-	const sentences = clean.match(/[^。！？!?\n]+[。！？!?]?/gu) ?? [clean];
+	const sentences = clean.split(/(?<=[。！？!?])\s*|(?<=\.)\s+|\n+/u).filter(Boolean);
 	sentences.sort((a,b) => overlap(b, query)-overlap(a, query));
-	const best = sentences[0];
-	return clipBytes(best, Math.max(0, budget-3)) + "…";
+	const best = sentences[0] ?? clean;
+	if (Buffer.byteLength(best) <= budget - 3) return best + "…";
+	let offset = 0;
+	for (const match of best.matchAll(/[\p{L}\p{N}_-]+/gu)) {
+		const tokenTerms = terms(match[0]);
+		const term = [...query].find((word) => tokenTerms.has(word));
+		if (term) { offset = match.index + Math.max(0, match[0].toLowerCase().indexOf(term)); break; }
+	}
+	// Keep a little preceding context, cutting only at code-point boundaries.
+	const reversed = [...best.slice(0, offset)].reverse().join("");
+	const prefix = [...clipBytes(reversed, Math.floor((budget - 6) / 3))].reverse().join("");
+	const start = offset - prefix.length;
+	const lead = start > 0 && budget >= 6 ? "…" : "";
+	return lead + clipBytes(best.slice(start), budget - Buffer.byteLength(lead) - 3) + "…";
 }

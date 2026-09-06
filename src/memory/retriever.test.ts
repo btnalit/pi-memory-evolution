@@ -26,6 +26,11 @@ test('pinned context wins ties, date comparisons use numeric timestamps',()=>{
 test('tokenizes identifiers without changing their literal content',()=>{
 	for(const token of ['foo_bar','foo','bar','camel','case'])assert.ok(terms('foo_bar camelCase').has(token));
 });
+test('excerpt finds English sentences and late matches in a long sentence',()=>{
+	assert.match(excerpt('Unrelated detail. '.repeat(40)+'SQLite is ready.','SQLite',60),/SQLite/);
+	assert.match(excerpt('🙂 '.repeat(100)+'camelNeedleCase remains literal.','needle',60),/Needle/);
+	for(const budget of [0,1,2,3,4,5,6,20,60])assert.ok(Buffer.byteLength(excerpt('🙂 '.repeat(100)+'needle is here.','needle',budget))<=budget);
+});
 test('excerpt preserves matched later sentence within UTF8 budget',()=>{
 	const text='无关内容'.repeat(80)+'。蓝牙音响已配置。';
 	const result=excerpt(text,'蓝牙音响',100);assert.match(result,/蓝牙音响/);assert.ok(Buffer.byteLength(result)<=100);

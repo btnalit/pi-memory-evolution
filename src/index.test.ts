@@ -61,7 +61,7 @@ test('commands cover correct, pin, forget, history, undo and status without conf
 		const digest=await call('before_agent_start',{prompt:'/tmp/Foo',systemPrompt:'Base'});assert.match(digest.systemPrompt,/a  b/);
 		await command(`pin ${id}`);
 		assert.equal(s.readMemories()[0].layer,'pinned');await command(`unpin ${id}`);
-		await command(`show ${id}`);assert.match(notifications.at(-1),/9999/);
+		await command(`show ${id}`);assert.match(notifications.at(-1),/9999/);assert.match(notifications.at(-1),/session-uuid:entry1/);assert.match(notifications.at(-1),/updatedAt/);
 		await command(`forget ${id}`);assert.equal(await call('before_agent_start',{prompt:'Database port',systemPrompt:'base'}),undefined);
 		const event=s.history()[0].id;await command(`undo ${event}`);assert.equal(s.readMemories()[0].status,'confirmed');
 		await command('history');assert.match(notifications.at(-1),/manual/);
@@ -77,6 +77,56 @@ test('model hangs are bounded and no late commit occurs after shutdown',()=>fixt
 	await call('session_compact',compact());await new Promise((r)=>setTimeout(r,60));
 	const s=new MemoryStore(stateDir);try{assert.match(s.status(),/failed=1/);}finally{s.close();}
 },async()=>new Promise(()=>{})));
+test('evolve command retries a failed attempt once and then reports no eligible source',()=>{
+	let calls=0;return fixture(async({call,command,notifications})=>{
+		await call('session_compact',compact());await command('evolve');
+		assert.equal(calls,2);assert.match(notifications.at(-1),/evolution completed/);
+		await command('evolve');assert.equal(calls,2);assert.match(notifications.at(-1),/No eligible source/);
+	},async()=>{if(++calls===1)throw new Error('temporary provider error');return {model:'test',text:'{"memories":[]}'};});
+});
+test('evolve command does not claim success when another connection wins the job lease',()=>{
+	let calls=0;return fixture(async({stateDir,cwd,command,notifications})=>{
+		const other=new MemoryStore(stateDir);
+		try {
+			other.capture({id:'race',scope:cwd,kind:'user',content:'Remember database settings.',createdAt:new Date().toISOString()});
+			const waiting=command('evolve');const run=other.beginEvolution('race')!;assert.ok(run);
+			await waiting;assert.equal(calls,0);assert.match(notifications.at(-1),/no update applied here/);
+			other.failEvolution(run);
+		} finally {other.close();}
+	},async()=>{calls++;return {model:'test',text:'{"memories":[]}'};});
+});
+test('notification failure cannot report rollback or reject a committed command',()=>fixture(async({call,command,ctx,stateDir,notifications})=>{
+	await call('session_compact',compact()); const s=new MemoryStore(stateDir);
+	try {
+		const id=s.readMemories()[0].id; const notify=ctx.ui.notify;
+		ctx.ui.notify=()=>{throw new Error('UI unavailable');};
+		await command(`correct ${id} Database port is 8888.`);
+		assert.match(s.readMemories()[0].content,/8888/);
+		ctx.ui.notify=notify; await command('status'); assert.ok(!notifications.at(-1).includes('operation failed'));
+	} finally {s.close();}
+}));
+test('commands cannot reopen storage after shutdown',()=>fixture(async({call,command,stateDir})=>{
+	await call('session_shutdown'); await command('list'); assert.equal(existsSync(stateDir),false);
+}));
+test('invalidated context getters cannot poison subsequent background jobs',()=>{
+	let calls=0;return fixture(async({call,ctx})=>{
+		Object.defineProperty(ctx,'signal',{configurable:true,get:()=>{throw new Error('invalidated');}});
+		Object.defineProperty(ctx,'hasUI',{configurable:true,get:()=>{throw new Error('invalidated');}});
+		await call('session_compact',compact());
+		delete ctx.signal;Object.defineProperty(ctx,'hasUI',{value:true,configurable:true});
+		const next=compact();next.compactionEntry.id='entry2';await call('session_compact',next);assert.equal(calls,1);
+	},async()=>{calls++;return {model:'test',text:'{"memories":[]}'};});
+});
+test('legacy pagination reaches every imported claim, in stable order',()=>fixture(async({stateDir,command,notifications})=>{
+	const s=new MemoryStore(stateDir);
+	try {
+		for(let i=0;i<25;i++)s.capture({id:`legacy-${i}`,scope:'legacy',kind:'summary',content:`## Critical Context\n- Imported fact number ${i}.`,createdAt:'2026-09-01T00:00:00Z'});
+		await command('list legacy'); const first=notifications.at(-1).match(/^[a-f0-9]{24}/gm);assert.equal(first.length,20);
+		await command('list legacy 2'); const second=notifications.at(-1).match(/^[a-f0-9]{24}/gm);assert.equal(second.length,5);
+		assert.equal(new Set([...first,...second]).size,25);
+		await command('list legacy 2');assert.deepEqual(notifications.at(-1).match(/^[a-f0-9]{24}/gm),second);
+	} finally{s.close();}
+}));
 test('reload/resume processes persisted jobs without a new compaction',()=>{
 	let calls=0;return fixture(async({stateDir,cwd,call})=>{
 		const s=new MemoryStore(stateDir);s.capture({id:'persisted',scope:cwd,kind:'summary',content:'## Critical Context\n- Database uses SQLite.',createdAt:new Date().toISOString()});s.close();

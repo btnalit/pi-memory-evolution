@@ -6,7 +6,7 @@ import { MemoryStore, type MemoryAction } from "./memory/memory-store.ts";
 import { selectRelevantMemories } from "./memory/retriever.ts";
 import { buildRuntimeDigest } from "./injector/digest.ts";
 import { evolve } from "./memory/evolution.ts";
-import { fingerprint, redact } from "./memory/privacy.ts";
+import { clipBytes, fingerprint, redact } from "./memory/privacy.ts";
 import { completeMemory, type CompleteMemory } from "./adapter/pi-api.ts";
 
 export interface MemoryEvolutionDependencies {
@@ -29,28 +29,38 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 	let work = Promise.resolve();
 	let lastError = "";
 	let warned = false;
+	const notify = (ctx: ExtensionContext, text: string, type: "info" | "warning") => {
+		try { ctx.ui.notify(redact(text), type); } catch { /* UI failure does not undo a committed update. */ }
+	};
 	const report = (ctx: ExtensionContext) => {
 		// Do not log exception strings: provider errors can contain credentials or source text.
 		lastError = "Memory operation failed; local records retained. Use /memory status and /memory evolve to retry.";
-		if (!warned && ctx.hasUI) {
-			warned = true;
-			try { ctx.ui.notify(lastError, "warning"); } catch { /* UI errors must not break shutdown. */ }
-		}
+		try {
+			if (!warned && ctx.hasUI) { warned = true; notify(ctx, lastError, "warning"); }
+		} catch { /* Context may have been invalidated during reload. */ }
 	};
 	const guard = <T, R>(fn: (event: T, ctx: ExtensionContext) => R | Promise<R>) => async (event: T, ctx: ExtensionContext): Promise<R | undefined> => {
 		if (lifetime.signal.aborted) return;
 		try { return await fn(event, ctx); } catch { report(ctx); return; }
 	};
 	const enqueue = (id: string, ctx: ExtensionContext, retry = false) => {
-		work = work.then(async () => {
-			if (lifetime.signal.aborted) return;
-			const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(dependencies.timeoutMs ?? 30_000), ...(ctx.signal ? [ctx.signal] : [])]);
+		const task = work.then(async () => {
 			try {
-				await evolve(getStore(), id, ctx, signal, dependencies.complete ?? completeMemory, retry);
-				lastError = "";
-			} catch { if (!lifetime.signal.aborted) report(ctx); }
+				if (lifetime.signal.aborted) return "skipped";
+				const contextSignal = ctx.signal;
+				const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(dependencies.timeoutMs ?? 30_000), ...(contextSignal ? [contextSignal] : [])]);
+				const applied = await evolve(getStore(), id, ctx, signal, dependencies.complete ?? completeMemory, retry);
+				if (!applied) return "skipped";
+				lastError = ""; warned = false;
+				return "completed";
+			} catch {
+				if (lifetime.signal.aborted) return "skipped";
+				report(ctx);
+				return "failed";
+			}
 		});
-		return work;
+		work = task.then(() => {});
+		return task;
 	};
 
 	pi.on("session_start", guard((_event, ctx) => {
@@ -86,6 +96,7 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 	pi.registerCommand("memory", {
 		description: "Automatic memory: list, show, search, status, history, evolve, undo, correct, forget, pin, conflict, resolve, adopt",
 		handler: async (args, ctx) => {
+			if (lifetime.signal.aborted) return;
 			try {
 				const [, operation = "list", id, value = ""] = args.trim().match(/^(\S+)(?:\s+(\S+))?(?:\s+([\s\S]*))?$/u) ?? [];
 				const current = getStore();
@@ -94,25 +105,45 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 				if (operation === "status") text = `${current.status()}\nScope: ${scope}\n${lastError || "Automatic updates enabled; no approval needed."}`;
 				else if (operation === "evolve") {
 					const pending = current.pending(scope, true);
-					if (pending) await enqueue(pending, ctx, true);
-					text = pending ? lastError || "Memory evolution completed." : "No unprocessed source in this scope.";
+					const result = pending ? await enqueue(pending, ctx, true) : undefined;
+					text = result === "completed" ? "Memory evolution completed." : result === "failed" ? lastError
+						: result === "skipped" ? "Source was already processed, claimed, or cancelled; no update applied here." : "No eligible source in this scope.";
 				} else if (operation === "history") {
 					text = current.history(scope).map((e) => `${e.id} ${e.at} ${e.actor}: ${e.reason} (${e.after.length} changes)`).join("\n") || "No history.";
 				} else if (operation === "undo") {
 					if (!id) throw new Error("Usage: /memory undo <event-id>");
 					text = `Undo recorded: ${current.undo(id)}`;
 				} else if (["list", "search", "show"].includes(operation)) {
-					let memories = current.readMemories(id === "all" && operation === "list" ? undefined : scope);
-					if (operation === "show") memories = current.readMemories().filter((m) => m.id === id);
+					const all = operation === "show" || (operation === "list" && id === "all");
+					let memories = current.readMemories(all ? undefined : operation === "list" && id === "legacy" ? "legacy" : scope);
+					let pageInfo = "";
+					if (operation === "show") memories = memories.filter((m) => m.id === id);
 					else if (operation === "search") memories = selectRelevantMemories(memories, [id, value].filter(Boolean).join(" "), 10);
-					else memories = memories.filter((m) => m.status !== "forgotten").slice(-20);
-					text = memories.map((m) => `${m.id} [${m.scope}; ${m.kind}/${m.status}/${m.layer}; r${m.revision}] ${m.content}`).join("\n") || "No matching memories. /memory list all includes unscoped legacy imports.";
+					else {
+						const filtered = id === "all" || id === "legacy";
+						const pageText = (filtered ? value : id) || "1";
+						const page = Number(pageText);
+						if ((!filtered && value) || !/^\d+$/u.test(pageText) || !Number.isSafeInteger(page) || page < 1) throw new Error("Invalid list page");
+						memories = memories.filter((m) => m.status !== "forgotten").sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt) || a.id.localeCompare(b.id));
+						pageInfo = `\nPage ${page}/${Math.max(1, Math.ceil(memories.length / 20))}; ${memories.length} non-forgotten records.`;
+						memories = memories.slice((page - 1) * 20, page * 20);
+					}
+					text = (memories.map((m) => {
+						const clean = redact(m.content);
+						const clipped = clipBytes(clean, operation === "show" ? 8000 : 1440);
+						const content = clipped === clean ? clean : clipped + "…";
+						if (operation === "show") {
+							const { suppressedHashes: _hashes, ...record } = m;
+							return JSON.stringify({ ...record, content }, null, 2);
+						}
+						return `${m.id} [${m.scope}; ${m.kind}/${m.status}/${m.layer}; r${m.revision}] ${content}`;
+					}).join("\n") || "No matching memories. /memory list legacy shows unscoped imports.") + pageInfo;
 				} else if (["correct", "forget", "pin", "unpin", "conflict", "resolve", "adopt"].includes(operation)) {
 					if (!id) throw new Error("A memory id is required");
 					text = `Update recorded: ${current.act(id, operation as MemoryAction, operation === "adopt" ? scope : value)}`;
 				} else throw new Error("Unknown operation. Use /memory list|show|search|status|history|evolve|undo|correct|forget|pin|unpin|conflict|resolve|adopt");
-				ctx.ui.notify(text, "info");
-			} catch { report(ctx); ctx.ui.notify("Memory command failed. Check the operation/id and /memory status; no partial update was committed.", "warning"); }
+				notify(ctx, text, "info");
+			} catch { report(ctx); notify(ctx, "Memory command failed. Check the operation/id and /memory status; no partial update was committed.", "warning"); }
 		},
 	});
 }

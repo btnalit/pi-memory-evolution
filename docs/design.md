@@ -29,7 +29,9 @@ There is no recurring full-ledger backfill or periodic job polling.
 
 `adapter/pi-api.ts` calls Pi 0.85's public
 `ctx.modelRegistry.complete(ctx.model, context, options)`. This preserves Pi's model,
-provider composition and authentication. No credentials are copied to extension state.
+provider composition and authentication. The model identity is captured before awaiting
+completion, so model switching/reload cannot mislabel its provenance. No credentials are
+copied to extension state.
 
 Each input contains a sanitized source (at most 32,000 UTF-8 bytes) and the 32 most
 recently updated active claims in that directory, each excerpt capped at 1,440 bytes.
@@ -53,7 +55,8 @@ used for file operations. Provisional means model-derived, not awaiting approval
 One SQLite database, WAL + FULL synchronous mode, private database permissions.
 `sqlite.ts` selects the bundled Bun or Node SQLite API; no external database package.
 
-- `memories`: current claims, revision/status/layer, source ID, scope and content hash.
+- `memories`: current claims, revision/status/layer, source ID, scope and content hash;
+  optional `suppressedHashes` preserves correction history across legacy adoption.
 - `sources`: sanitized evidence and durable job state/lease/attempt.
 - `blocked`: exact-content hashes (outer whitespace trimmed) for forgotten/superseded claims.
 - `events`: actual before/after changes, actor, timestamp and source/model reason.
@@ -69,7 +72,15 @@ eligible source. These operations do not drain the backlog or wait for leases to
 Completed jobs do not call the model again; failed attempts are explicitly retryable.
 
 Reads are cached per scope and invalidated by local commits or SQLite `data_version`
-when another connection commits. Indexed hashes replace repeated ledger scans.
+when another connection commits. Indexed hashes replace repeated ledger scans. New IDs
+hash a JSON tuple of scope/kind/content, not an ambiguous colon concatenation; existing
+IDs stay valid. Scope lookup is exact, with no implicit wildcard/global lane.
+
+Memory reads validate the indexed identity/scope/hash against JSON. History/undo validates
+before/after shape, paired IDs and unique targets before writing. `/memory status` also
+validates source jobs and history. Unknown schema versions are rejected before applying
+DDL. These checks detect structural corruption, not all well-formed tampering by a local
+user who already has write access to the database.
 Undo only succeeds when all affected records still match the event's after state;
 newly created records become suppressed tombstones instead of being physically erased.
 Undo restores claim state, not the entire database: suppression hashes persist and
@@ -81,8 +92,9 @@ source jobs are not reopened. Logical undo/forget is not physical erasure.
   claims can be corrected/forgotten/conflicted without another parent path leaking them.
 - **No exact resurrection:** automatic extraction does not re-add forgotten content
   under another source ID or kind. Suppression hashes ignore only outer whitespace;
-  case, inner whitespace and Unicode literals remain significant. Manual suppression
-  also retires the corresponding pending source. Explicit correct/undo can restore
+  case, inner whitespace and Unicode literals remain significant. Suppression also retires
+  pending/failed sources known to repeat the fact, including formatted repeats beyond
+  the normal 16-claim ingestion quota. Explicit correct/undo can restore
   records. Paraphrase equivalence and secure erasure are not guaranteed.
 - **No stale overwrite:** changes made while a model request is in flight invalidate
   that result. Older source timestamps cannot replace newer records.
@@ -95,11 +107,15 @@ source jobs are not reopened. Logical undo/forget is not physical erasure.
   ID, kind, status and its stored update date (source date for automatic changes).
   No regenerated 24-hour stamp disguises stale evidence.
 - **Literal preservation:** code identifiers, underscores, home paths and globs retain
-  their meaning; project-state extraction keeps done/pending/blocked labels.
+  their meaning; code spans are protected while removing simple bold labels, and fences
+  close only with a matching marker of sufficient length. A heading stack preserves
+  progress sibling sections and done/pending/blocked labels.
 
 The deterministic retriever uses Latin/identifier tokens and CJK bigrams. Pinned and
 recency scores only break lexical ties; generic continuation may fall back to recency.
-Unpinned project-state claims expire from recall after 7 days. Facts/preferences/decisions
+Unpinned project-state claims expire from recall after 7 days. Pin/unpin and adoption
+preserve the stored evidence date, and undo restores its prior value; the event timestamp
+still records when the operation occurred. Facts/preferences/decisions
 have no automatic age deletion. Matching excerpts and content dedup improve the small
 context budget without embeddings, RRF lanes or a new ranking subsystem.
 
@@ -108,8 +124,11 @@ context budget without embeddings, RRF lanes or a new ranking subsystem.
 Only the memory ledgers are imported, once, without rewriting originals. Invalid
 JSON/actions halt import (especially action corruption must not revive old memories).
 Legacy summary corrections are applied before deriving a fresh claim revision;
-mutated children suppress re-extraction from their old parent. Old records lacking
-project metadata enter `legacy`, never a guessed global/project scope.
+unchanged children survive parent corrections, while explicit child suppression prevents
+re-extraction of obsolete facts. New correction history carries exact suppression hashes
+into the adopted scope. Old records lacking project metadata enter `legacy`, never a
+guessed global/project scope. Already completed imports are not replayed automatically;
+these fixes cannot reconstruct information that an earlier import already discarded.
 
 Signals, agenda, speak gate, thresholds, proposals, executor/archive and unused
 utilization computation were removed from the code path and source tree. Existing
@@ -126,9 +145,12 @@ historical files remain untouched. They are not migrated into automatic actions.
 - Scope is cwd, not repo/branch identity. Moving a project does not infer its new scope.
   Exact-ID manual commands can intentionally operate on other scopes; this is not a
   multi-user access-control boundary. No public global-memory creation command exists.
-- List views are capped at 20 records without guaranteed chronological order; `all`
-  means all scopes, not all records. Search returns up to 10 recallable matches, history
-  the latest 10 scope events. There is no paginated browse/export command.
+- List views are paginated (20 per page), sorted by update time then ID. `all` expands
+  the scope; `legacy` enables paginated migration review. Search returns up to 10
+  recallable matches, history the latest 10 scope events. No full export command exists;
+  concurrent updates may change page boundaries. `show` includes source and timestamps.
+- Suppression skips the entire pending model pass of a known repeating source. Local
+  claims remain, but unrelated unlearned prose in that source is not independently retried.
 - There is no periodic compaction, vector index, learned threshold tuning or rule writer.
 - Background completion usage is not incorporated into Pi's normal token accounting.
 
@@ -137,11 +159,14 @@ historical files remain untouched. They are not migrated into automatic actions.
 Strict TypeScript, temporary-directory unit/integration tests, real SQLite multi-process
 writers, replay/migration/corruption/undo/timeout invariants, and an optional real Pi
 RPC test backed by a localhost-only fake OpenAI-compatible model. This host test matters:
-Node's built-in SQLite is not available in the standalone Bun binary. Node/npm usage
+Node's built-in SQLite is not available in the standalone Bun binary. The host test
+also exercises integrity checks and cleans up child processes/state on startup failure.
+Mixed lifecycle sequence tests complement individual examples. Node/npm usage
 requires 22.19+ to satisfy Pi 0.85's own engine constraint, even though Node's native
 TypeScript support used here is available from 22.18.
 
 No GitHub Actions workflow is installed. `npm run check` and `npm run test:pi` are local
 checks; the latter validates host/provider wiring, not actual model quality or multi-day
 interactive stability. Installation, upgrade, migration and recovery instructions are
-in [README.md](../README.md).
+in [README.md](../README.md). See the [follow-up review](review-0.2.md) for reproduced
+issues and the validation performed after fixes.
