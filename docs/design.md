@@ -2,171 +2,175 @@
 
 ## Goal
 
-Automatically improve the extension's own memory with the model already used by Pi.
-No approval workflow, secondary agent, external retrieval service, or automated changes
-to project/system configuration. Prefer a short, testable path over loosely connected
-scoring and proposal subsystems.
+Automatically improve memory with Pi's active model, then recall relevant claims across
+sessions and directories. Directory placement must not determine which memories a
+conversation can use. No approval workflow, secondary agent, external retrieval service
+or automatic changes to project files, system configuration, skills or extension code.
 
 ## Runtime
 
-1. `session_start`: open/migrate the database lazily and resume at most one eligible
-   pending source, choosing the most recently captured one in the current scope.
-2. `session_compact`: capture a sanitized, session-qualified source and bounded local
-   claims atomically; enqueue automatic semantic consolidation.
-3. `agent_end`: capture explicit user memory/correction cues; assistant/tool text does
-   not constitute a memory command or an approval. Session/run counts are not gates.
-4. `before_agent_start`: retrieve current-directory claims and append a bounded,
-   clearly labeled data digest to this turn's system prompt. No model call here.
-5. `session_shutdown`: abort background work, drain the serial task chain, close DB.
+1. `session_start`: open/migrate lazily and resume at most one most recently captured
+   eligible pending source across all origins.
+2. `session_compact`: atomically capture a sanitized session-qualified source and bounded
+   local claims; enqueue semantic consolidation.
+3. `agent_end`: capture explicit user memory/correction cues. Assistant/tool text is not
+   a memory command or approval; session/run counts are not gates.
+4. `before_agent_start`: resolve the current topic, search the whole memory database and
+   append a bounded, source-labeled digest to this turn's system prompt. No model call.
+5. `session_shutdown`: abort work, drain the serial task chain and close SQLite.
 
 Factories do not write state or start background work. Processes with a nonempty
-`PI_SUBAGENT_AGENT_ID` are skipped; arbitrary child processes are not auto-detected.
-Local summary extraction survives LLM failure. User-cue prose is saved as a source,
-not locally promoted to claims; learning from it needs a successful model attempt.
-There is no recurring full-ledger backfill or periodic job polling.
+`PI_SUBAGENT_AGENT_ID` are skipped. There is no recurring full-ledger backfill, periodic
+job polling or scanning of arbitrary historical Pi session files.
 
-## Model boundary
+## Conversation-aware recall
+
+`adapter/session-context.ts` uses the public `buildContextEntries()` facade, not session
+files or `getEntries()` across branches. It examines up to 64 trailing active entries
+(and up to 64 retained-tail messages per compaction), selecting at most 6 user texts of
+2,048 UTF-8 bytes each. Retained user tails survive compaction. Assistant/tool/custom and
+injected messages are excluded, as are raw compaction summaries. Context is transient:
+it is never re-captured as a source. Missing/invalidated context leaves direct-query
+recall available rather than poisoning the hook.
+
+A topic-less follow-up inherits the nearest identifiable recent user topic. Short related
+follow-ups can add that topic as context. Explicit new subjects stand alone; reset phrases
+stop inheritance. If neither the prompt nor recent users identify a topic, recall is empty.
+A fresh session saying only `continue` cannot identify what to continue; naming a subject
+can retrieve its memory even if it was learned in another directory/session.
+
+All stored claims, including `legacy` imports, are candidates. Retrieval remains local
+and deterministic: Latin/identifier terms and CJK bigrams. Common words such as `没有`
+cannot qualify a claim, and weak configuration terms alone are insufficient. Origin
+basename matches help rank named contexts. Current-origin preference, pinning and dates
+only break relevance ties; there is **no arbitrary recency fallback** or requirement to
+fill all three slots. These are lexical heuristics, not semantic query rewriting or
+exhaustive pronoun resolution.
+
+The digest contains at most 3 claims within 2,048 UTF-8 bytes, with historical-data trust
+guidance reserved first. Each JSON row includes ID, kind, status, origin, source ID,
+stored update date and a matching excerpt of up to 400 bytes. Oversized metadata labels
+are clipped with an ellipsis/hash suffix. Origins are provenance hints, not evidence
+that another project's fact applies here. Identical content is deduplicated only within
+one origin: equal port/path text from different contexts can mean different facts.
+
+Forgotten/conflicted claims never recall. Unpinned project-state claims expire from recall
+after 7 days; facts/preferences/decisions have no automatic age deletion. Pin/unpin and
+legacy annotation preserve the evidence date, and undo restores the prior date. Event
+history separately records when an operation occurred.
+
+## Model boundary and conservative writes
 
 `adapter/pi-api.ts` calls Pi 0.85's public
-`ctx.modelRegistry.complete(ctx.model, context, options)`. This preserves Pi's model,
-provider composition and authentication. The model identity is captured before awaiting
-completion, so model switching/reload cannot mislabel its provenance. No credentials are
-copied to extension state.
+`ctx.modelRegistry.complete(ctx.model, context, options)`, preserving model/provider/auth
+resolution. Model identity is captured before awaiting completion, so switching models
+or invalidating a context cannot mislabel provenance. No credentials are copied to state.
 
-Each input contains a sanitized source (at most 32,000 UTF-8 bytes) and the 32 most
-recently updated active claims in that directory, each excerpt capped at 1,440 bytes.
-Output is validated JSON (an outer Markdown code fence is tolerated), at most 24,000
-bytes and 16 claims of 4–480 UTF-16 code units each. Claim fields are restricted to
-`kind`, `content` and optional `replaces`; malformed claims reject the whole model batch.
-Only a normal `stop` completion is accepted, not truncated/tool/error output.
+Each input contains a sanitized source (at most 32,000 bytes) and up to 32 recently updated
+active claims **from that source origin**, each capped at 1,440 bytes. This deliberately
+limits automatic replacement authority, **not recall eligibility**. One origin can cover
+multiple projects. The prompt requires an explicitly identifiable same subject/fact and
+preservation of project/resource qualifications; matching cwd alone is not identity.
 
-Each attempt makes at most one call, with no tools, a 2048-output-token cap, a fresh
-request session ID and `cacheRetention: "none"`. A 30-second outer deadline bounds the
-extension's wait even if the provider ignores abort. It cannot guarantee cancellation
-of remote computation or billing. Retries may therefore incur additional model charges.
+Output is validated JSON (an outer Markdown fence is tolerated), at most 24,000 bytes
+and 16 claims of 4–480 UTF-16 code units each. Fields are restricted to `kind`, `content`
+and optional `replaces`; malformed claims reject the batch. Unknown, cross-origin, pinned,
+stale, duplicate-target and cyclic replacements are rejected transactionally. Only normal
+`stop` completion is accepted, never truncated/tool/error output. Model paths are not
+used for file operations, and model claims remain `provisional`, not awaiting approval.
 
-A claim can add content or name a specific existing claim to replace. Unknown,
-pinned, stale, duplicate-target and cyclic replacements are rejected transactionally.
-The stored scope comes from the host, not model output. No model-returned path is
-used for file operations. Provisional means model-derived, not awaiting approval.
+Each attempt uses at most one model call, no tools, a 2,048-output-token cap, a fresh
+request session ID and `cacheRetention: "none"`. A 30-second outer deadline bounds waiting
+even when a provider ignores abort; remote computation/billing cannot be guaranteed to
+stop. Failed calls retain local summary claims. User-cue prose is saved but needs a
+successful model attempt to become claims; it has no local extraction fallback.
 
-## Persistence
+Global recall is **not global rewriting**. Cross-origin variants remain separate instead
+of guessing which project they describe. Exact-ID correction/forget works from any
+session, affecting the target and exact duplicates within its origin, not identical text
+from unrelated origins. Suppression hashes and same-origin conflict controls retain that
+boundary. Some truly equivalent cross-origin corrections will consequently coexist;
+explicit controls are available without becoming approval gates for automatic learning.
 
-One SQLite database, WAL + FULL synchronous mode, private database permissions.
-`sqlite.ts` selects the bundled Bun or Node SQLite API; no external database package.
+## Persistence and lifecycle
 
-- `memories`: current claims, revision/status/layer, source ID, scope and content hash;
-  optional `suppressedHashes` preserves correction history across legacy adoption.
+One SQLite database, WAL + FULL synchronous mode and private file permissions.
+`sqlite.ts` selects built-in Bun or Node SQLite, with no external database dependency.
+
+- `memories`: claims, revision/status/layer, source ID, capture origin (`scope`) and hash;
+  optional `suppressedHashes` carries correction history through legacy annotation.
 - `sources`: sanitized evidence and durable job state/lease/attempt.
-- `blocked`: exact-content hashes (outer whitespace trimmed) for forgotten/superseded claims.
-- `events`: actual before/after changes, actor, timestamp and source/model reason.
+- `blocked`: origin-qualified exact-content hashes for forgotten/superseded claims.
+- `events`: actual before/after states, actor, operation timestamp and source/model reason.
 - `metadata`: schema/import marker.
 
-Read/modify/write batches use `BEGIN IMMEDIATE`. No transaction is held during a
-network request. Scope generation and job attempt are checked before applying a
-completion. Duplicate captures have one source ID. A job lease avoids simultaneous
-completion of the same source by multiple Pi processes; abandoned leases expire after
-60 seconds. Session start considers pending/expired-running jobs, not failed jobs.
-`/memory evolve` also considers failed jobs, selecting at most one most recently captured
-eligible source. These operations do not drain the backlog or wait for leases to expire.
-Completed jobs do not call the model again; failed attempts are explicitly retryable.
+The `scope` field records canonical cwd, not an inferred repository/branch/subject identity
+(or an explicit annotation of a legacy record). It is no longer a recall boundary. Reads
+are cached globally or for an explicitly requested origin, invalidated by local commits
+and SQLite `data_version` across connections. New IDs hash a JSON tuple of origin/kind/
+content; existing IDs remain valid. Low-level origin filters are exact, including literal
+`*` values; automatic recall uses the unfiltered reader.
 
-Reads are cached per scope and invalidated by local commits or SQLite `data_version`
-when another connection commits. Indexed hashes replace repeated ledger scans. New IDs
-hash a JSON tuple of scope/kind/content, not an ambiguous colon concatenation; existing
-IDs stay valid. Scope lookup is exact, with no implicit wildcard/global lane.
+Batches use `BEGIN IMMEDIATE`; no transaction spans network I/O. Source-origin generation
+and job attempt are checked before completion can commit. A 60-second lease prevents
+simultaneous execution of the same job. Startup considers pending/expired-running sources
+across all origins; `/memory evolve` additionally considers failed attempts. Each selects
+one newest eligible source, not the entire backlog, and never forces completed jobs to
+run again. A source resumed in another directory retains its original provenance.
 
-Memory reads validate the indexed identity/scope/hash against JSON. History/undo validates
-before/after shape, paired IDs and unique targets before writing. `/memory status` also
-validates source jobs and history. Unknown schema versions are rejected before applying
-DDL. These checks detect structural corruption, not all well-formed tampering by a local
-user who already has write access to the database.
-Undo only succeeds when all affected records still match the event's after state;
-newly created records become suppressed tombstones instead of being physically erased.
-Undo restores claim state, not the entire database: suppression hashes persist and
-source jobs are not reopened. Logical undo/forget is not physical erasure.
+Capture is idempotent. Raw summaries are evidence only, never a parent recall fallback.
+Exact forgotten content cannot be re-added within its origin under another source/kind.
+Suppression also retires known repeating pending/failed sources, including formatted
+claims beyond the normal 16-claim ingestion quota, except the current valid replacement
+transaction's source. This conservatively skips the whole source's pending model pass;
+unrelated local claims remain, but unlearned prose may need a new source.
 
-## Lifecycle and recall invariants
+Memory reads validate indexed identity/origin/hash against JSON. Undo validates paired,
+unique before/after IDs and only succeeds when the current records still equal the event's
+after state. New records become tombstones rather than being physically erased. Status
+also validates source jobs/history. Unsupported schema versions are rejected before DDL.
+These detect structural corruption, not all well-formed edits by an owner of the database.
+Undo does not clear suppression hashes or reopen jobs. Forget/undo is not secure erasure.
 
-- **No parent fallback:** raw summaries never participate directly in recall. Their
-  claims can be corrected/forgotten/conflicted without another parent path leaking them.
-- **No exact resurrection:** automatic extraction does not re-add forgotten content
-  under another source ID or kind. Suppression hashes ignore only outer whitespace;
-  case, inner whitespace and Unicode literals remain significant. Suppression also retires
-  pending/failed sources known to repeat the fact, including formatted repeats beyond
-  the normal 16-claim ingestion quota. Explicit correct/undo can restore
-  records. Paraphrase equivalence and secure erasure are not guaranteed.
-- **No stale overwrite:** changes made while a model request is in flight invalidate
-  that result. Older source timestamps cannot replace newer records.
-- **No fake authorization:** natural language is not parsed for approve/verified.
-  Actual memory transactions replace record-first execution templates.
-- **Scoped recall:** canonical cwd only, with no automatic cross-directory inference.
-  Unscoped legacy records are not recalled until explicitly assigned.
-- **Bounded prompt:** at most 3 distinct claims and 2048 UTF-8 bytes. The historical-data
-  guidance is reserved first, with up to 400 bytes per claim excerpt. Each record shows
-  ID, kind, status and its stored update date (source date for automatic changes).
-  No regenerated 24-hour stamp disguises stale evidence.
-- **Literal preservation:** code identifiers, underscores, home paths and globs retain
-  their meaning; code spans are protected while removing simple bold labels, and fences
-  close only with a matching marker of sufficient length. A heading stack preserves
-  progress sibling sections and done/pending/blocked labels.
+## Existing data and commands
 
-The deterministic retriever uses Latin/identifier tokens and CJK bigrams. Pinned and
-recency scores only break lexical ties; generic continuation may fall back to recency.
-Unpinned project-state claims expire from recall after 7 days. Pin/unpin and adoption
-preserve the stored evidence date, and undo restores its prior value; the event timestamp
-still records when the operation occurred. Facts/preferences/decisions
-have no automatic age deletion. Matching excerpts and content dedup improve the small
-context budget without embeddings, RRF lanes or a new ranking subsystem.
+No migration, copying or marker reset is needed when upgrading the earlier directory-
+filtered 0.2 build. Existing SQLite records, IDs, histories and origin labels stay intact;
+they become eligible for global relevance-based recall, including existing `legacy` claims.
 
-## Legacy import
+Original JSONL memory/action ledgers are imported once, without rewriting originals.
+Invalid JSON/actions halt import rather than losing corrections or reviving forgotten
+facts. Parent corrections preserve unchanged children and derive new facts without
+reintroducing explicitly suppressed child content. Missing origins retain the `legacy`
+label. Adoption is an optional annotation, not a recall prerequisite. Completed imports
+are not replayed; earlier discarded revision information is not automatically reconstructed.
+Old signals/proposals/execution plans remain historical files, never automatic actions.
 
-Only the memory ledgers are imported, once, without rewriting originals. Invalid
-JSON/actions halt import (especially action corruption must not revive old memories).
-Legacy summary corrections are applied before deriving a fresh claim revision;
-unchanged children survive parent corrections, while explicit child suppression prevents
-re-extraction of obsolete facts. New correction history carries exact suppression hashes
-into the adopted scope. Old records lacking project metadata enter `legacy`, never a
-guessed global/project scope. Already completed imports are not replayed automatically;
-these fixes cannot reconstruct information that an earlier import already discarded.
+List defaults to all origins, 20 per page sorted by update time then ID; `all` is an alias.
+`here` and `legacy` are optional inspection filters, not recall settings. Search uses only
+its explicit query and returns up to 10 global recallable matches. History shows the latest
+10 global events. `show` includes provenance. Status identifies capture origin and global
+recall mode. There is no full export command; concurrent writes can shift page boundaries.
 
-Signals, agenda, speak gate, thresholds, proposals, executor/archive and unused
-utilization computation were removed from the code path and source tree. Existing
-historical files remain untouched. They are not migrated into automatic actions.
+## Validation and limits
 
-## Known limits
+Temporary-directory tests cover lifecycle sequences, real SQLite multi-process writes,
+replay/migration/corruption/undo/timeout, global recall, topic switching, weak matches,
+context tails, provenance and cross-origin write guards. The real-Pi RPC test uses a
+loopback fake OpenAI-compatible model: two automatic updates in one directory, then a
+fresh Pi process/session in another directory to verify recall, contextual follow-ups,
+topic changes and exact-ID forget. It also verifies model/auth reuse and no approval.
 
-- Model inference can still be wrong. Provenance, provisional labels, pin, correct and
-  undo are recovery controls, not proof of truth.
-- Sanitization is conservative but not exhaustive. Sources are sent only through the
-  selected Pi provider; this is not fully offline semantic learning.
-- Raw evidence/history grows until deliberately managed. No automatic purge or physical
-  secret erasure is claimed; back up with Pi stopped.
-- Scope is cwd, not repo/branch identity. Moving a project does not infer its new scope.
-  Exact-ID manual commands can intentionally operate on other scopes; this is not a
-  multi-user access-control boundary. No public global-memory creation command exists.
-- List views are paginated (20 per page), sorted by update time then ID. `all` expands
-  the scope; `legacy` enables paginated migration review. Search returns up to 10
-  recallable matches, history the latest 10 scope events. No full export command exists;
-  concurrent updates may change page boundaries. `show` includes source and timestamps.
-- Suppression skips the entire pending model pass of a known repeating source. Local
-  claims remain, but unrelated unlearned prose in that source is not independently retried.
-- There is no periodic compaction, vector index, learned threshold tuning or rule writer.
-- Background completion usage is not incorporated into Pi's normal token accounting.
+Model inference and sanitization are not perfect. Provisional labels, pin/correct/undo
+are recovery controls, not proof of truth. Lexical matching can miss semantic or cross-
+language equivalence. Missing retained user context after compaction can leave a vague
+follow-up unresolved. Cross-origin semantic identity is not inferred reliably. This is
+one user's agent database, not a multi-user access-control boundary. Raw evidence/history
+grows until deliberately managed; no automatic purge or physical secret erasure is claimed.
+Background model usage is not added to Pi's normal session token accounting.
 
-## Validation
-
-Strict TypeScript, temporary-directory unit/integration tests, real SQLite multi-process
-writers, replay/migration/corruption/undo/timeout invariants, and an optional real Pi
-RPC test backed by a localhost-only fake OpenAI-compatible model. This host test matters:
-Node's built-in SQLite is not available in the standalone Bun binary. The host test
-also exercises integrity checks and cleans up child processes/state on startup failure.
-Mixed lifecycle sequence tests complement individual examples. Node/npm usage
-requires 22.19+ to satisfy Pi 0.85's own engine constraint, even though Node's native
-TypeScript support used here is available from 22.18.
-
-No GitHub Actions workflow is installed. `npm run check` and `npm run test:pi` are local
-checks; the latter validates host/provider wiring, not actual model quality or multi-day
-interactive stability. Installation, upgrade, migration and recovery instructions are
-in [README.md](../README.md). See the [follow-up review](review-0.2.md) for reproduced
-issues and the validation performed after fixes.
+Node/npm development requires 22.19+ to match Pi 0.85's engine; the standalone Bun host is
+also tested. There is no installed GitHub Actions workflow: `npm run check` and
+`npm run test:pi` run locally. Fake-provider validation is not live-provider accuracy or a
+multi-day TUI trial. See [README.md](../README.md) for commands/recovery, and the historical
+[follow-up review](review-0.2.md) for previously reproduced defects and validation limits.

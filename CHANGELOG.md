@@ -11,8 +11,10 @@ Development is on `main`; this version has not yet been tagged or published to n
 - Replaced signal/maturity/speak/proposal/approval/plan machinery with direct automatic memory evolution
 - Reuse Pi 0.85's active model and public `modelRegistry.complete`, including provider authentication
 - Store claims, sources, jobs and actual before/after history in transactional SQLite (built-in Bun/Node APIs)
-- One-time, read-only JSONL migration; unscoped legacy memories are quarantined, originals preserved
-- Scoped, deduplicated claim recall; raw summaries no longer provide a lifecycle-bypassing fallback
+- One-time, read-only JSONL migration; unknown origins retain a visible `legacy` label, originals preserved
+- Topic-based recall across sessions and directories, including existing legacy claims without adoption
+- Capture origin is provenance and a conservative write safeguard, no longer a recall eligibility filter
+- Raw summaries never provide a lifecycle-bypassing fallback
 - Require Node 22.19+ for Node development/runtime, matching Pi 0.85's engine requirement; support the standalone Pi Bun binary
 
 ### Added
@@ -24,6 +26,9 @@ Development is on `main`; this version has not yet been tagged or published to n
 - Current-branch installation/update, source deduplication, bounded retry behavior, command limits and storage recovery documentation
 - Paginated current/all/legacy memory browsing and provenance in `/memory show`
 - Follow-up regression cases and mixed lifecycle sequence testing
+- Bounded active-user context for vague follow-ups, without assistant/tool/digest feedback
+- Origin/source labels in injected claims; global list/search/history/retry and an optional `list here` view
+- Real-Pi tests that restart in another directory to verify cross-session recall, topic changes and forget
 
 ### Fixed
 
@@ -40,6 +45,9 @@ Development is on `main`; this version has not yet been tagged or published to n
 - Model-switch provenance, poisoned background queues, UI errors misreporting committed changes and post-shutdown reopening
 - English and long-sentence matching excerpts, unreachable legacy pages and smoke-test startup/cleanup failures
 - Pin/unpin, adoption and undo making old project-state evidence appear fresh
+- Cwd-restricted recall that contradicted the intended cross-session memory behavior
+- Weak matches such as `有没有问题` selecting `没有 CI`, and context-free continuation pulling arbitrary recent claims
+- Recall deduplication hiding distinct same-text facts from different origins
 
 ## Legacy 0.1 history
 

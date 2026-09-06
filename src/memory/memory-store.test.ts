@@ -65,10 +65,36 @@ test("unknown replacement rolls back entire batch, including earlier additions",
 	assert.throws(() => s.finishEvolution(run,[{kind:"fact",content:"A valid new fact."},{kind:"fact",content:"Another fact.",replaces:"../../outside"}],"model"));
 	assert.deepEqual(s.readMemories(),before);
 }));
-test("LLM cannot overwrite pinned memories or another scope", () => using((s) => {
+test("LLM cannot overwrite pinned memories", () => using((s) => {
 	s.capture(source()); const old=s.readMemories()[0]; s.act(old.id,"pin");
 	const run=s.beginEvolution("s1")!;
 	assert.throws(() => s.finishEvolution(run,[{kind:"fact",content:"Database port is 1111.",replaces:old.id}],"model"));
+}));
+test("global recall does not grant automatic cross-origin replacement authority", () => using((s) => {
+	s.capture(source('a','## Critical Context\n- Database port is 5432.','/Alpha'));
+	const original=s.readMemories()[0];
+	s.capture({...source('b','Remember Beta database port is 7777.','/Beta'),kind:'user'});
+	const run=s.beginEvolution('b')!;
+	assert.ok(!run.memories.some(m=>m.id===original.id));
+	assert.throws(()=>s.finishEvolution(run,[{kind:'fact',content:'Database port is 7777.',replaces:original.id}],'model'));
+	// Even a future caller accidentally widening candidates cannot bypass the write guard.
+	run.memories.push(original);
+	assert.throws(()=>s.finishEvolution(run,[{kind:'fact',content:'Database port is 7777.',replaces:original.id}],'model'));
+	assert.equal(s.readMemories()[0].status,'provisional');
+}));
+test("identical cross-origin facts are not merged or silently deleted by an exact-ID action", () => using((s) => {
+	s.capture(source('a',undefined,'/Alpha'));s.capture(source('b',undefined,'/Beta'));
+	const [a,b]=s.readMemories();assert.equal(selectRelevantMemories(s.readMemories(),'Database port').length,2);
+	s.act(a.id,'correct','Database port is 9999.');
+	assert.equal(s.readMemories().find(m=>m.id===b.id)!.content,'Database port is 5432.');
+	s.act(a.id,'forget');assert.deepEqual(selectRelevantMemories(s.readMemories(),'Database port').map(m=>m.id),[b.id]);
+	s.capture(source('again',undefined,'/Alpha'));assert.equal(s.readMemories().length,2);
+}));
+test("pending selection and explicit retry work across capture origins", () => using((s) => {
+	s.capture(source('a',undefined,'/Alpha'));s.capture(source('b',undefined,'/Beta'));
+	assert.equal(s.pending(),'b');assert.equal(s.pending('/Alpha'),'a');
+	s.failEvolution(s.beginEvolution('b')!);
+	assert.equal(s.pending(),'a');assert.equal(s.pending(undefined,true),'b');
 }));
 test("in-flight model output loses authority after manual edit", () => using((s) => {
 	s.capture(source()); const run=s.beginEvolution("s1")!;
@@ -122,12 +148,13 @@ test("sensitive captures and edits never leak synthetic credentials", () => usin
 }));
 
 const legacy = (id:string,content:string,kind="compaction_summary") => ({version:1,id,kind,sourceEntryId:"entry1",createdAt:"2026-09-01T00:00:00.000Z",content});
-test("legacy import is once-only, preserves files, quarantines unknown scope", () => {
+test("legacy import is once-only, preserves files and recalls unknown-origin claims without adoption", () => {
 	const dir=temp();const data=JSON.stringify(legacy("parent","## Critical Context\n- Database port is 5432."))+"\n";
 	writeFileSync(join(dir,"memories.jsonl"),data);
 	let s=new MemoryStore(dir);
 	try {
 		assert.equal(s.readMemories().length,1);assert.equal(s.readMemories("/project").length,0);
+		assert.equal(selectRelevantMemories(s.readMemories(),'Database port')[0].scope,'legacy');
 		const id=s.readMemories()[0].id;s.act(id,"adopt","/project");assert.equal(s.readMemories("/project").length,1);
 		s.close();s=new MemoryStore(dir);assert.equal(s.readMemories().length,1);assert.equal(readFileSync(join(dir,"memories.jsonl"),"utf8"),data);
 	}finally{s.close();rmSync(dir,{recursive:true,force:true});}

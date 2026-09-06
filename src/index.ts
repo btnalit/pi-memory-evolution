@@ -3,7 +3,8 @@ import { realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { isSubagentProcess } from "./child-process.ts";
 import { MemoryStore, type MemoryAction } from "./memory/memory-store.ts";
-import { selectRelevantMemories } from "./memory/retriever.ts";
+import { recallQuery, selectRelevantMemories } from "./memory/retriever.ts";
+import { recentUserMessages } from "./adapter/session-context.ts";
 import { buildRuntimeDigest } from "./injector/digest.ts";
 import { evolve } from "./memory/evolution.ts";
 import { clipBytes, fingerprint, redact } from "./memory/privacy.ts";
@@ -18,7 +19,7 @@ export interface MemoryEvolutionDependencies {
 }
 const MEMORY_CUE = /记住|偏好|更正|纠正|应该改成|改为|不对|以后|不要|\b(?:remember|prefer|correction|instead)\b/iu;
 
-/** Capture → automatic memory update → scoped recall. No proposals or approval parser. */
+/** Capture → automatic memory update → topic-based recall across sessions/directories. */
 export default async function memoryEvolution(pi: ExtensionAPI, dependencies: MemoryEvolutionDependencies = {}): Promise<void> {
 	if (!pi || typeof pi.on !== "function" || isSubagentProcess(dependencies.env ?? process.env)) return;
 	// Resolve Pi's public path only in the host, not in isolated dependency-injected tests.
@@ -64,7 +65,7 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 	};
 
 	pi.on("session_start", guard((_event, ctx) => {
-		const pending = getStore().pending(scopeOf(ctx));
+		const pending = getStore().pending();
 		if (pending) void enqueue(pending, ctx);
 	}));
 	pi.on("session_compact", guard((event, ctx) => {
@@ -83,8 +84,10 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 		}
 	}));
 	pi.on("before_agent_start", guard((event, ctx) => {
-		const selected = selectRelevantMemories(getStore().readMemories(scopeOf(ctx)), event.prompt);
-		const digest = buildRuntimeDigest(selected, event.prompt);
+		const query = recallQuery(event.prompt, recentUserMessages(ctx));
+		if (!query) return;
+		const selected = selectRelevantMemories(getStore().readMemories(), query, 3, Date.now(), scopeOf(ctx));
+		const digest = buildRuntimeDigest(selected, query);
 		if (digest) return { systemPrompt: `${event.systemPrompt}\n\n${digest}` };
 	}));
 	pi.on("session_shutdown", async () => {
@@ -102,25 +105,25 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 				const current = getStore();
 				const scope = scopeOf(ctx);
 				let text: string;
-				if (operation === "status") text = `${current.status()}\nScope: ${scope}\n${lastError || "Automatic updates enabled; no approval needed."}`;
+				if (operation === "status") text = `${current.status()}\nCapture origin: ${scope}\nRecall: all origins, topic-based\n${lastError || "Automatic updates enabled; no approval needed."}`;
 				else if (operation === "evolve") {
-					const pending = current.pending(scope, true);
+					const pending = current.pending(undefined, true);
 					const result = pending ? await enqueue(pending, ctx, true) : undefined;
 					text = result === "completed" ? "Memory evolution completed." : result === "failed" ? lastError
-						: result === "skipped" ? "Source was already processed, claimed, or cancelled; no update applied here." : "No eligible source in this scope.";
+						: result === "skipped" ? "Source was already processed, claimed, or cancelled; no update applied here." : "No eligible source.";
 				} else if (operation === "history") {
-					text = current.history(scope).map((e) => `${e.id} ${e.at} ${e.actor}: ${e.reason} (${e.after.length} changes)`).join("\n") || "No history.";
+					text = current.history().map((e) => `${e.id} ${e.at} [${e.scope}] ${e.actor}: ${e.reason} (${e.after.length} changes)`).join("\n") || "No history.";
 				} else if (operation === "undo") {
 					if (!id) throw new Error("Usage: /memory undo <event-id>");
 					text = `Undo recorded: ${current.undo(id)}`;
 				} else if (["list", "search", "show"].includes(operation)) {
-					const all = operation === "show" || (operation === "list" && id === "all");
-					let memories = current.readMemories(all ? undefined : operation === "list" && id === "legacy" ? "legacy" : scope);
+					let memories = current.readMemories(operation === "list" && id === "legacy" ? "legacy"
+						: operation === "list" && id === "here" ? scope : undefined);
 					let pageInfo = "";
 					if (operation === "show") memories = memories.filter((m) => m.id === id);
-					else if (operation === "search") memories = selectRelevantMemories(memories, [id, value].filter(Boolean).join(" "), 10);
+					else if (operation === "search") memories = selectRelevantMemories(memories, recallQuery([id, value].filter(Boolean).join(" ")), 10);
 					else {
-						const filtered = id === "all" || id === "legacy";
+						const filtered = id === "all" || id === "legacy" || id === "here";
 						const pageText = (filtered ? value : id) || "1";
 						const page = Number(pageText);
 						if ((!filtered && value) || !/^\d+$/u.test(pageText) || !Number.isSafeInteger(page) || page < 1) throw new Error("Invalid list page");

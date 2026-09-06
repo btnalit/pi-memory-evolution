@@ -74,7 +74,7 @@ test('pin/unpin, adoption and undo do not refresh stale project evidence', () =>
 	assert.equal(Date.parse(store.readMemories()[0].updatedAt),Date.parse(at));
 	assert.deepEqual(selectRelevantMemories(store.readMemories('/project'),'database'),[]);
 }));
-test('wildcard-like scope names do not bypass project isolation', () => using((store) => {
+test('explicit origin filters treat wildcard-like scope names literally', () => using((store) => {
 	store.capture(source('s1', '## Critical Context\n- Private project preference.', '*'));
 	assert.equal(store.readMemories('/project').length,0);
 }));

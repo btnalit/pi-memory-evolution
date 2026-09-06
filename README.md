@@ -1,13 +1,13 @@
 # pi-memory-evolution
 
-Automatic project memory for Pi. **No owner approval, proposal queue, or manual execution plans.**
+Automatic cross-session memory for Pi, recalled by topic from any working directory. **No owner approval, proposal queue, or manual execution plans.**
 
 ```text
 compaction / explicit user correction
     → local extraction
     → automatic consolidation with Pi's active model
     → transactional memory update
-    → scoped recall on the next prompt
+    → topic-based recall across sessions and directories
 ```
 
 Automatic changes are limited to this extension's memory database. The model gets
@@ -59,7 +59,8 @@ from 0.1; see [Migration](#migration-from-01) and [Recovery](#recovery-and-troub
   `偏好`, `纠正`, `不对`, `以后`, or `不要` also trigger learning, without waiting for
   another compaction. Ordinary messages, assistant replies and tool results do not.
 - Each processing attempt makes at most one background model call, using up to 32
-  recently updated active memories in the current scope.
+  recently updated active memories from that source's capture origin. This is a
+  conservative automatic-replacement safeguard, **not a recall restriction**.
   It uses **the current Pi session model and Pi's own provider/auth resolution**.
   With no model override in the session, this is Pi's configured default model.
   There is no extra API key, provider setting, subagent, or alternate-model fallback.
@@ -70,21 +71,31 @@ from 0.1; see [Migration](#migration-from-01) and [Recovery](#recovery-and-troub
   cancelled on session shutdown/reload. Structured summary claims survive model failure.
   User-cue prose has no local-extraction fallback: its sanitized source is saved, but
   learning its claims requires a successful model attempt.
-- Session start resumes at most **one**, most recently captured eligible pending source.
+- Session start resumes at most **one**, most recently captured eligible pending source
+  across all origins, even if this session starts in a different directory.
   `/memory evolve` similarly selects one source, also allowing failed attempts. Neither
   action drains the whole backlog. Jobs left running by a crash become eligible after
   their 60-second lease expires; there is no timer that automatically polls/retries them.
-- Recall is local: literal/identifier tokens, CJK bigrams, recency and pinned tie-breaks.
-  It injects at most three deduplicated claims within **2048 UTF-8 bytes**. Trust guidance
-  cannot be truncated. Ordinary project-state claims age out of recall after seven
-  days; pinned claims do not. A continuation prompt may fall back to recent claims.
+- Recall searches **the whole memory database**, including previous sessions, other
+  directories and existing legacy claims. No project-directory startup or manual adoption
+  is needed. Matching uses literal/identifier tokens and CJK bigrams locally, without an LLM.
+- Vague follow-ups such as `继续` or `这个有问题` use the nearest identifiable topic from
+  recent user messages in the active session branch. Explicit new topics do not inherit
+  unrelated old topics. Assistant/tool/injected text is not used as the topic source.
+  A fresh session saying only `继续` has no identifiable topic and injects nothing; naming
+  the topic makes related memories available regardless of their original directory.
+- Common words such as `没有` or `现在`, recency, pinning or cwd alone cannot trigger recall.
+  At most three claims fit within **2048 UTF-8 bytes**, with origin/source labels and
+  non-truncatable trust guidance. Fewer matches means fewer claims, not padding with recent
+  records. Identical content from different origins retains separate provenance.
+  Unpinned project-state claims age out after seven days; pinned claims do not.
 
 A model call may incur the usual charges of your active provider. These background
 calls are not assistant turns and their usage is not added to Pi's session token totals.
 There is no additional call on ordinary recall. Model mistakes remain possible; use
 history, correction, pinning and undo rather than treating generated claims as verified facts.
 
-## Local storage and isolation
+## Local storage and provenance
 
 State lives under Pi's public agent directory (`getAgentDir()`). By default:
 
@@ -96,19 +107,28 @@ State lives under Pi's public agent directory (`getAgentDir()`). By default:
 ```
 
 If `PI_CODING_AGENT_DIR` is set, replace `~/.pi/agent` with that directory. Using a
-different agent directory means a different database; changing cwd selects a different
-scope within the same database.
+different agent directory means a different database. Changing cwd does **not** hide
+memories in that database or create a recall boundary.
 
 SQLite transactions/WAL protect concurrent processes and interrupted commits.
 Model calls run outside transactions; stale responses cannot overwrite intervening
 changes. Raw summaries are evidence only, **never a separate recall fallback**, so
 forgetting a derived claim cannot expose it again through its parent summary.
 
-Scope is the canonical current working directory, not an inferred repository root.
-Different directories have separate memories. Exact forgotten/superseded content is
-suppressed across later extraction in the same scope. Forget is logical suppression,
-not secure erasure of history or Pi's original session transcript. Arbitrarily
-paraphrased facts cannot be perfectly identified as equivalent by a local hash.
+The stored `scope` field records capture origin (canonical cwd, not an inferred project
+identity). It is retained for provenance and conservative write protection, not eligibility
+for recall. An origin can cover multiple projects; facts must retain explicit subject names
+where available. Origin names help matching and current cwd only breaks relevance ties.
+
+Global recall does **not** mean global rewriting: automatic replacement candidates remain
+within the source origin, and the model must identify the same subject/fact, not just a
+matching port or path. Cross-origin variants are not automatically merged or overwritten.
+Exact-ID manual corrections/forget work from any session and affect the selected record
+and exact duplicates within its origin, **not identical text from unrelated origins**.
+Suppression hashes likewise remain origin-qualified. Arbitrary paraphrases or semantic
+identity across origins cannot be resolved reliably by a local hash. These safeguards
+may leave ambiguous variants for inspection rather than guessing which one to retire.
+Forget is logical suppression, not secure erasure of history or the original Pi transcript.
 
 Sensitive lines/blocks are suppressed before capture, edits, model submission and
 recall. This covers common token/password/JSON/Chinese/Bearer/private-key formats,
@@ -121,14 +141,15 @@ sources and selected existing memories go to the already-configured Pi model pro
 These are optional direct controls, **not approval gates**:
 
 ```text
-/memory list [page]                  # current scope, 20 non-forgotten records per page
-/memory list all [page]              # all scopes, paginated
-/memory list legacy [page]           # browse unscoped imports for adoption
+/memory list [page]                  # all origins, 20 non-forgotten records per page
+/memory list all [page]              # alias for list
+/memory list here [page]             # optional current-origin view
+/memory list legacy [page]           # optional unknown-origin view
 /memory show <id>                     # exact ID, any scope/status; includes provenance
-/memory search <query>                # up to 10 recallable matches in the current scope
-/memory status                       # database-wide counts/integrity + current scope
-/memory history                      # last 10 events in this scope
-/memory evolve                       # retry one pending/failed source
+/memory search <query>                # up to 10 recallable matches across all origins
+/memory status                       # database-wide integrity + capture origin/recall mode
+/memory history                      # last 10 events across all origins
+/memory evolve                       # retry one pending/failed source, any origin
 /memory undo <event-id>               # reverse actual changes, if not modified since
 /memory correct <id> <replacement>    # literal replacement, 4–480 characters
 /memory forget <id>
@@ -136,18 +157,20 @@ These are optional direct controls, **not approval gates**:
 /memory unpin <id>
 /memory conflict <id> <other-id>       # suppress both
 /memory resolve <id>                  # restore this conflicted side; other stays suppressed
-/memory adopt <id>                    # assign an unscoped legacy claim to this directory
+/memory adopt <id>                    # optionally label a legacy claim with this directory
 ```
 
 Pages start at 1, sorted by update time descending, then ID. For example,
-`/memory list legacy 2` reaches the next 20 imports. `all` expands the scope, not the
-page size; there is no full export command. Concurrent updates can move records between
+`/memory list legacy 2` reaches the next 20 imports. `all` is retained as an alias;
+`here` and `legacy` are optional inspection filters, never recall settings. There is no
+full export command. Concurrent updates can move records between
 pages. Lists can show conflicted or stale project-state records that search/recall
 excludes. Status counts include all scopes and tombstones and validate source jobs and
 history as well as memory records. Long content previews are capped at 1,440 bytes in
 lists/search or 8,000 bytes in `show`, with an ellipsis when truncated.
-Commands that take exact IDs can address records outside the current cwd; automatic
-learning/recall remains scoped. Pin protects against automatic replacement/age expiry,
+Commands that take exact IDs can address records outside the current cwd. `search` uses
+only its explicit query, whereas automatic recall can resolve follow-ups from recent
+user context. Pin protects against automatic replacement/age expiry,
 not manual edits, and does not force an unrelated record into every prompt. Pin/unpin
 and adoption preserve the stored evidence date; undo restores the prior date. These
 bookkeeping actions do not restart the seven-day project-state recall window.
@@ -166,13 +189,20 @@ On first database use, valid `memories.jsonl` and `memory-actions.jsonl` are imp
 once in a transaction. **Original files are not modified or deleted.** Corrupt or
 unreadable ledgers stop migration rather than silently ignoring forget/correct actions.
 
-Old records have no project identity, so imports are quarantined under `legacy`.
-Use `/memory list legacy [page]` and `/memory adopt <id>` to assign needed records; they are
-not silently exposed to every project. Structured claims are extracted from eligible
+Old records without origin metadata retain the label `legacy`. They participate in
+relevance-based recall without adoption, with their unknown origin visible. Use
+`/memory list legacy [page]` for inspection; `/memory adopt <id>` is an optional metadata
+annotation, not a prerequisite for recall. Structured claims are extracted from eligible
 legacy summaries, respecting existing lifecycle actions. Free-form raw summaries
 remain available in the original JSONL but are not injected as claims. New imports
 preserve unchanged children of corrected summaries and carry superseded-content hashes
 when corrected legacy claims are adopted into a project.
+
+**Upgrading from the earlier directory-scoped 0.2 development build:** existing SQLite
+records, IDs, histories and origin labels remain unchanged. No copying, marker reset or
+re-import is needed; they are immediately eligible for global relevance-based recall.
+Legacy claims previously excluded by cwd filtering become eligible too. This shares
+relevant stored claims with the active Pi session/provider, not raw session archives.
 
 These migration fixes do not replay an already completed import or retroactively erase
 previously stored sensitive data. If an older import already lost revision information,
@@ -189,9 +219,11 @@ JSONL, not changes made in the new database.
 - **No `/memory` command:** check `pi list`, then `/reload` (or restart Pi). Only one
   source of this extension should be installed. Processes marked by a nonempty
   `PI_SUBAGENT_AGENT_ID` deliberately do not load it.
-- **No recalled memories:** check the cwd shown by `/memory status`, the active agent
-  directory, legacy quarantine, and query relevance. Forgotten/conflicted records and
-  unpinned project state older than seven days are not recalled.
+- **No recalled memories:** check the active agent directory and `/memory search <topic>`.
+  Name the topic if the current session has no recent user context; cwd is not a recall
+  gate. Forgotten/conflicted records and unpinned project state older than seven days
+  are not recalled. Matching remains lexical, not a guarantee of semantic or cross-language
+  equivalence; vague references can be missed.
 - **Pending/failed jobs:** ensure Pi 0.85+ has a working current model/authentication,
   then `/memory evolve`. After a crash, wait for the 60-second lease to expire. Repeat
   the command to process more eligible sources; successful jobs cannot be forced to
@@ -219,7 +251,8 @@ npm run test:pi           # optional: real installed Pi, loopback fake model, no
 
 Tests use temporary directories and synthetic data. `test:pi` accepts
 `PI_TEST_BINARY=/path/to/pi`; it verifies real host loading, reuse of the active model
-and authentication, automatic replacement and absence of approval dialogs. No GitHub
+and authentication, automatic replacement, fresh cross-directory sessions, contextual
+follow-ups, topic switches, provenance and forget, without approval dialogs. No GitHub
 Actions workflow is currently configured; run these checks locally before pushing.
 The real-Pi test uses a fake model, not a live-provider accuracy or multi-day TUI test.
 

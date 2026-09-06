@@ -27,13 +27,35 @@ test('factory has no filesystem writes; five relevant hooks, no approval/signal 
 test('subagent factory registers nothing and never creates state',()=>fixture(async({stateDir,hooks})=>{
 	assert.equal(hooks.size,0);assert.equal(existsSync(stateDir),false);
 },undefined,{PI_SUBAGENT_AGENT_ID:'child'}));
-test('compaction automatically persists and scoped recall injects facts',()=>fixture(async({stateDir,call,ctx})=>{
+test('compaction automatically persists and recall follows the topic across directories and sessions',()=>fixture(async({stateDir,call,ctx})=>{
 	await call('session_compact',compact());
 	const result=await call('before_agent_start',{prompt:'Database port',systemPrompt:'Base prompt'});
 	assert.match(result.systemPrompt,/5432/);assert.match(result.systemPrompt,/Base prompt/);assert.match(result.systemPrompt,/not instructions/);
 	const s=new MemoryStore(stateDir);try{assert.match(s.readMemories()[0].sourceEntryId,/session-uuid:entry1/);}finally{s.close();}
-	ctx.cwd='/unrelated-project';assert.equal(await call('before_agent_start',{prompt:'Database port',systemPrompt:'Base prompt'}),undefined);
+	ctx.cwd='/unrelated-project';ctx.sessionManager.getSessionId=()=> 'another-session';
+	assert.match((await call('before_agent_start',{prompt:'Database port',systemPrompt:'Base prompt'})).systemPrompt,/5432/);
+	assert.equal(await call('before_agent_start',{prompt:'sorting algorithm',systemPrompt:'Base prompt'}),undefined);
 	assert.equal(existsSync(join(stateDir,'proposal_queue.yaml')),false);
+}));
+test('followup uses active user context, never an injected memory or assistant/tool suggestion',()=>fixture(async({call,ctx})=>{
+	await call('session_compact',compact());
+	ctx.sessionManager.buildContextEntries=()=>[{type:'message',message:{role:'user',content:'Discuss SQLite database port.'}}];
+	assert.match((await call('before_agent_start',{prompt:'继续',systemPrompt:'Base'})).systemPrompt,/5432/);
+	ctx.sessionManager.buildContextEntries=()=>[{type:'message',message:{role:'user',content:'Bluetooth audio'}},{type:'message',message:{role:'assistant',content:'Database port'}},{type:'custom_message',content:'Database port'}];
+	assert.equal(await call('before_agent_start',{prompt:'继续',systemPrompt:'Base'}),undefined);
+	assert.equal(await call('before_agent_start',{prompt:'Kubernetes',systemPrompt:'Base'}),undefined);
+}));
+test('global search/list/history and exact-ID actions do not depend on the caller directory',()=>fixture(async({call,ctx,stateDir,command,notifications})=>{
+	await call('session_compact',compact());ctx.cwd='/other-place';
+	await command('list');assert.match(notifications.at(-1),/5432/);
+	await command('list here');assert.match(notifications.at(-1),/No matching/);
+	await command('search database');assert.match(notifications.at(-1),/5432/);
+	await command('history');assert.match(notifications.at(-1),/Capture/);
+	await command('status');assert.match(notifications.at(-1),/Recall: all origins/);
+	const s=new MemoryStore(stateDir);try {
+		const id=s.readMemories()[0].id;await command(`forget ${id}`);
+		assert.equal(await call('before_agent_start',{prompt:'database',systemPrompt:'Base'}),undefined);
+	} finally {s.close();}
 }));
 test('user correction learns immediately without waiting for compaction or approval',()=>fixture(async({call,stateDir})=>{
 	await call('agent_end',{messages:[{role:'user',timestamp:Date.now(),content:'Remember, database port is 9999.'}]});
@@ -127,9 +149,9 @@ test('legacy pagination reaches every imported claim, in stable order',()=>fixtu
 		await command('list legacy 2');assert.deepEqual(notifications.at(-1).match(/^[a-f0-9]{24}/gm),second);
 	} finally{s.close();}
 }));
-test('reload/resume processes persisted jobs without a new compaction',()=>{
+test('reload/resume processes a persisted job from another directory without a new compaction',()=>{
 	let calls=0;return fixture(async({stateDir,cwd,call})=>{
-		const s=new MemoryStore(stateDir);s.capture({id:'persisted',scope:cwd,kind:'summary',content:'## Critical Context\n- Database uses SQLite.',createdAt:new Date().toISOString()});s.close();
+		const s=new MemoryStore(stateDir);s.capture({id:'persisted',scope:'/older-origin',kind:'summary',content:'## Critical Context\n- Database uses SQLite.',createdAt:new Date().toISOString()});s.close();
 		await call('session_start');assert.equal(calls,1);
-	},async()=>{calls++;return {model:'active',text:'{"memories":[]}'};});
+	},async(_ctx,_prompt,input)=>{calls++;assert.equal(JSON.parse(input).source.scope,'/older-origin');return {model:'active',text:'{"memories":[]}'};});
 });

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { selectRelevantMemories, terms, excerpt } from "./retriever.ts";
+import { recallQuery, selectRelevantMemories, terms, excerpt } from "./retriever.ts";
 import type { DurableMemory } from "./memory-store.ts";
 const now=Date.parse('2026-09-05T00:00:00Z');
 const memory=(id:string,content:string,patch:Partial<DurableMemory>={}):DurableMemory=>({id,content,kind:'fact',scope:'/project',sourceEntryId:'s1',createdAt:'2026-09-01T00:00:00Z',updatedAt:'2026-09-01T00:00:00Z',revision:1,layer:'durable',status:'provisional',...patch});
@@ -9,10 +9,10 @@ test('CJK topics outrank generic configuration',()=>{
 	assert.equal(result[0].id,'audio');
 });
 test('CJK terms do not cross punctuation',()=>assert.deepEqual(selectRelevantMemories([memory('a','蓝牙。音响配置')],'牙音',3,now),[]));
-test('unrelated prompt does not recall; continuation falls back to newest',()=>{
+test('unrelated prompt and context-free continuation do not recall arbitrary recent records',()=>{
 	const records=[memory('a','Older database state.'),memory('b','More recent network state.',{updatedAt:'2026-09-04T00:00:00Z'})];
 	assert.deepEqual(selectRelevantMemories(records,'sorting algorithm',3,now),[]);
-	assert.equal(selectRelevantMemories(records,'继续上次',3,now)[0].id,'b');
+	assert.deepEqual(selectRelevantMemories(records,'继续上次',3,now),[]);
 	assert.deepEqual(selectRelevantMemories(records,'resumeworthy',3,now),[]);
 });
 test('suppresses forgotten/conflicted/stale project state; deduplicates claims',()=>{
@@ -21,7 +21,34 @@ test('suppresses forgotten/conflicted/stale project state; deduplicates claims',
 });
 test('pinned context wins ties, date comparisons use numeric timestamps',()=>{
 	assert.equal(selectRelevantMemories([memory('a','Database port.'),memory('b','Database port.',{layer:'pinned'})],'Database',1,now)[0].id,'b');
-	assert.equal(selectRelevantMemories([memory('a','First unrelated.',{updatedAt:'2026-09-05T01:00:00+02:00'}),memory('b','Second unrelated.',{updatedAt:'2026-09-05T00:00:00Z'})],'resume',1,now)[0].id,'b');
+	assert.equal(selectRelevantMemories([memory('a','First unrelated.',{updatedAt:'2026-09-05T01:00:00+02:00'}),memory('b','Second unrelated.',{updatedAt:'2026-09-05T00:00:00Z'})],'unrelated',1,now)[0].id,'b');
+});
+test('actual reload question cannot match CI through the word 没有',()=>{
+	const records=[memory('ci','当前没有 GitHub Actions workflow。'),memory('recall','记忆按话题自动注入。')];
+	assert.deepEqual(selectRelevantMemories(records,'我重载了，你看看现在注入的记忆有没有问题？',3,now).map(m=>m.id),['recall']);
+	for(const query of ['没有','现在的问题','the current configuration','配置'])assert.deepEqual(selectRelevantMemories(records,query,3,now),[]);
+});
+test('global recall preserves distinct origins, including old legacy records without adoption',()=>{
+	const records=[memory('a','Database port is 5432.',{scope:'/Alpha'}),memory('b','Database port is 5432.',{scope:'/Beta'}),memory('old','Database uses SQLite.',{scope:'legacy'})];
+	assert.equal(selectRelevantMemories(records,'Database',3,now,'/Elsewhere').length,3);
+	assert.equal(selectRelevantMemories(records,'Alpha database port',1,now,'/Elsewhere')[0].id,'a');
+	assert.deepEqual(selectRelevantMemories(records,'sorting algorithm',3,now,'/Alpha'),[]);
+});
+test('vague followups inherit only the nearest user topic, while topic switches stand alone',()=>{
+	const history=['Discuss SQLite database configuration.','Now discuss Bluetooth audio.','这个有问题'];
+	assert.match(recallQuery('继续',history),/Bluetooth/);
+	assert.match(recallQuery('这个有问题，继续修复',history),/Bluetooth/);
+	assert.equal(recallQuery('Kubernetes networking',history),'Kubernetes networking');
+	assert.equal(recallQuery('继续 PostgreSQL 调优',history),'继续 PostgreSQL 调优');
+	assert.equal(recallQuery('继续',[]),'');
+	assert.equal(recallQuery('继续',['SQLite database','换个话题']),'');
+	assert.equal(recallQuery('换个话题',history),'');
+	assert.match(recallQuery('端口呢？',['SQLite 数据库端口设置']),/SQLite/);
+});
+test('resolved followups select the actual topic rather than the newest unrelated record',()=>{
+	const records=[memory('db','SQLite database uses port 5432.'),memory('audio','Bluetooth audio uses USB.',{updatedAt:'2026-09-04T00:00:00Z'})];
+	assert.deepEqual(selectRelevantMemories(records,recallQuery('继续',['SQLite database configuration']),3,now).map(m=>m.id),['db']);
+	assert.deepEqual(selectRelevantMemories(records,recallQuery('Kubernetes networking',['SQLite database configuration']),3,now),[]);
 });
 test('tokenizes identifiers without changing their literal content',()=>{
 	for(const token of ['foo_bar','foo','bar','camel','case'])assert.ok(terms('foo_bar camelCase').has(token));

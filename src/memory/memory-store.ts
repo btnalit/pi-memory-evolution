@@ -11,6 +11,7 @@ export interface DurableMemory {
 	id: string;
 	kind: MemoryKind;
 	content: string;
+	/** Capture origin, not a recall boundary or a guaranteed project identity. */
 	scope: string;
 	sourceEntryId: string;
 	createdAt: string;
@@ -177,9 +178,9 @@ export class MemoryStore {
 			return true;
 		});
 	}
-	pending(scope: string, retry = false): string | undefined {
-		const row = this.db.prepare(`SELECT id FROM sources WHERE json_extract(data,'$.scope')=? AND
-			(state='pending' OR (state='running' AND lease<?) ${retry ? "OR state='failed'" : ""}) ORDER BY rowid DESC LIMIT 1`).get(scope, Date.now());
+	pending(scope?: string, retry = false): string | undefined {
+		const row = this.db.prepare(`SELECT id FROM sources WHERE ${scope === undefined ? "" : "json_extract(data,'$.scope')=? AND"}
+			(state='pending' OR (state='running' AND lease<?) ${retry ? "OR state='failed'" : ""}) ORDER BY rowid DESC LIMIT 1`).get(...(scope === undefined ? [] : [scope]), Date.now());
 		return row ? String(row.id) : undefined;
 	}
 	beginEvolution(id: string, retry = false): EvolutionRun | undefined {
@@ -207,7 +208,7 @@ export class MemoryStore {
 			for (const claim of claims) {
 				if (claim.replaces) {
 					const old = run.memories.find((m) => m.id === claim.replaces);
-					if (!old || targets.has(old.id) || old.layer === "pinned" || Date.parse(old.updatedAt) > Date.parse(run.source.createdAt)) throw new Error("Invalid replacement target");
+					if (!old || old.scope !== run.source.scope || targets.has(old.id) || old.layer === "pinned" || Date.parse(old.updatedAt) > Date.parse(run.source.createdAt)) throw new Error("Invalid replacement target");
 					targets.add(old.id);
 					if (fingerprint(old.content) === fingerprint(claim.content)) continue;
 					const next = this.claim(run.source, claim);

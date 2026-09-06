@@ -1,5 +1,11 @@
 # Follow-up review of memory evolution 0.2
 
+**Historical implementation review at `038de65`.** Its directory-scoped recall assumption
+was subsequently identified as a requirements error: memory must follow the conversation,
+not the working directory. Current behavior is documented in [design.md](design.md):
+all-origin recall, recent-user topic context, visible provenance and conservative writes.
+The test counts below describe that earlier review, not the current test suite.
+
 Baseline: `9c84010` on `main`. Scope: all implementation modules, tests, the real-Pi
 smoke script, package metadata and documentation. This review keeps automatic memory
 updates, Pi's active model/authentication and the no-tools/no-approval boundary.

@@ -1,7 +1,7 @@
 {
 	"name": "pi-memory-evolution",
 	"version": "0.2.0",
-	"description": "Automatic, scoped memory evolution using Pi's active model, transactional local storage, and bounded recall.",
+	"description": "Automatic cross-session memory using Pi's active model, transactional local storage, and topic-based recall across directories.",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
