@@ -14,7 +14,8 @@ or automatic changes to project files, system configuration, skills or extension
    after the previous check/call ends).
 2. `session_compact`: atomically capture a sanitized session-qualified source and bounded
    local claims; enqueue semantic consolidation.
-3. `agent_end`: capture explicit user memory/correction cues. For a non-cue completed
+3. `agent_end`: capture explicit user memory/correction cues, distinguishing recall
+   questions (`What do you remember ...?`) from new learning instructions. For a non-cue completed
    work request with linked tool results, optionally capture a bounded `progress`
    observation targeting existing related project states. Assistant/tool text is never
    a user memory instruction; assistant-only replies cannot trigger this path.
@@ -40,11 +41,19 @@ injected messages are excluded, as are raw compaction summaries. Context is tran
 it is never re-captured as a source. Missing/invalidated context leaves direct-query
 recall available rather than poisoning the hook.
 
-A topic-less follow-up inherits the nearest identifiable recent user topic. Short related
-follow-ups can add that topic as context. Explicit new subjects stand alone; reset phrases
-stop inheritance. If neither the prompt nor recent users identify a topic, recall is empty.
-A fresh session saying only `continue` cannot identify what to continue; naming a subject
-can retrieve its memory even if it was learned in another directory/session.
+`memory/query.ts` separates conversational recall framing from the subject, without
+rewriting literal paths/filenames or stored evidence. Its query-only discourse vocabulary
+handles Chinese/English asking/remembering phrases; technical memory/recall questions
+retain those concepts. Unknown single-character query subjects remain unmatched barriers,
+not permission to inherit an old topic or generate CJK fragment matches.
+
+The bounded user history is replayed oldest first. Topic-less follow-ups inherit the last
+resolved subject/focus. Related or attribute-only follow-ups carry a **structured** plan:
+current query plus supporting subject context. Thus `SQLite → port? → auth? → continue`
+retains SQLite without treating old port matches as answers about authentication. The
+context does not grow by concatenating every earlier facet. Explicit new subjects stand
+alone, even when unknown to the database; reset phrases stop inheritance. A fresh session
+saying only `continue` identifies no topic and injects nothing.
 
 All stored claims, including `legacy` imports, are candidates. Retrieval is local:
 `Intl.Segmenter` words, exact path/filename identifiers, and a small Chinese/English
@@ -53,22 +62,43 @@ concept map. Synonyms contribute one feature rather than duplicated votes. Model
 concepts. Paths such as `/work/pi-memory-evolution` do not imply the topic `memory`.
 Common/filler words and generic configuration words cannot qualify a record.
 
-For eligible records, each query feature has weight `1 + log((N+1)/(df+1))` (literal
-features multiply this by 2). A matching feature contributes its weight times the
-strongest applicable field factor: **body 1, aliases 0.8, explicit origin identifier 0.2**.
-Concept words in origin names are excluded. Source IDs, `legacy` labels and current cwd
-have no authority bonus. Require weighted query coverage >=45%; queries with at least 3
-features need at least 2 matches. Reject scores below 75% of the best eligible result.
-Pin/date/ID only resolve relevance ties. Same-origin results whose facets are already
-covered by a strong multi-facet lead may be omitted; distinct origins are not merged.
+For eligible records, a seen query feature weighs `1 + log((N+1)/(df+1))`; an unseen
+feature weighs **1**, not the maximum IDF. Literals multiply weight by 2. Strongest field
+factors are **assertion body 1, aliases 0.8, quoted question mention 0.25, explicit origin
+identifier 0.2**. Quoted questions (`“...?”`, `「...？」`, `"...?"`) cannot qualify alone:
+a replay note repeating a user's question is not evidence of its answer. Other quoted
+facts remain ordinary evidence. Concept words in origins are excluded. Source IDs, legacy
+labels and cwd have no authority bonus.
+
+Current-focus coverage must be >=45%; at least 3 focus features still require 2 matches.
+A single match cannot qualify alongside unknown non-attribute words. All explicit literal
+constraints must match, including qualified paths rather than only shared basenames.
+Supporting context contributes at 0.35 weight and cannot replace current-focus evidence.
+Named context subject features must match; a concept-only contextual subject needs 60%
+weighted subject coverage. Generic attributes are not subject anchors. Evidence gets mild
+length normalization `0.8 + 0.2 * min(1, 12 / max(1, bodyFeatureCount))`. This cannot bypass
+the subject/coverage gates. Scores below 75% of the best eligible result are rejected.
+Pin/date/ID only break relevance ties. Facet redundancy is tracked per origin **and kind**,
+so a project-state mention cannot suppress a factual/preference answer. Exact same-content
+same-origin duplicates are still removed, and distinct origins remain separate.
 There is **no arbitrary recency fallback** or minimum result count.
+
+One evaluation provides selection and bounded diagnostics. `/memory explain` shows the
+last automatic snapshot, including actual digest count/bytes; `/memory explain <query>`
+previews an explicit query without user-history inheritance. Snapshots hold normalized
+focus/context (up to 32 features each), lifecycle counts and up to 10 scored candidates
+(up to 16 matched features each), with no memory bodies. Serialized diagnostics are
+sanitized/capped at 8,000 bytes plus an ellipsis, held only in the extension instance,
+replaced on every automatic attempt (including empty/error), and never persisted as
+learning input. Selection is not a guarantee of model understanding.
 
 These are precision-oriented heuristics, not semantic verification or universal
 translation. Word segmentation can vary with the runtime's ICU version; uncommon
 languages, short/ambiguous queries and unannotated old records may still be missed.
 
 The digest contains at most 3 claims within 2,048 UTF-8 bytes, with historical-data trust
-guidance reserved first. Each JSON row includes ID, kind, status, origin, source ID,
+guidance reserved first and an explicit warning that selected matches are not the complete
+inventory. Each JSON row includes ID, kind, status, origin, source ID,
 stored update date and a matching excerpt of up to 400 bytes. Oversized metadata labels
 are clipped with an ellipsis/hash suffix. Origins are provenance hints, not evidence
 that another project's fact applies here. Identical content is deduplicated only within

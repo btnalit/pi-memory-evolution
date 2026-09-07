@@ -8,6 +8,9 @@ Development is on `main`; this version has not yet been tagged or published to n
 
 ### Changed
 
+- General conversational query planning: separate asking/remembering phrases from the subject, retain current focus across multi-hop user follow-ups, and stop inheritance on explicit/unknown/reset topics
+- Evidence-based IDF for unseen terms, mandatory literal resource constraints, focused-context gates, bounded length normalization, and reduced weight for quoted questions rather than their answers
+- Track redundant facets per origin and evidence kind so a project-state replay note cannot hide a preference/fact answering the same question
 - Increase model deadline from 30 to 120 seconds and output cap from 2048 to 8192 tokens (bounded by model capability); allow up to 64 KB of validated result JSON without relaxing claim limits
 - Replaced signal/maturity/speak/proposal/approval/plan machinery with direct automatic memory evolution
 - Reuse Pi 0.85's active model and public `modelRegistry.complete`, including provider authentication
@@ -20,6 +23,8 @@ Development is on `main`; this version has not yet been tagged or published to n
 
 ### Added
 
+- `/memory explain [query]`: bounded transient recall diagnostics, normalized focus/context, candidate rejection reasons and last automatic injection counts; no query/body history persisted
+- Multi-domain Chinese/English natural-question regressions, learned-alias paraphrases, multi-hop attribute refinement, unknown-topic barriers, quoted-question distractors and real-Pi provider-payload validation
 - Automatic startup and 15-second timer recovery across origins, with persisted 1m/5m/15m/1h backoff and a five-failure per-source cap plus pause warning
 - Safe fixed-code failure diagnostics, attempt/failure counts, last failure and next retry times in `/memory status`; manual evolve remains an optional one-off override
 - Transactional schema 2/3 → 4 migration preserving memory/history, automatically discovering old failures without inventing missing diagnostics
@@ -42,6 +47,9 @@ Development is on `main`; this version has not yet been tagged or published to n
 
 ### Fixed
 
+- Natural recall questions failing or selecting the memory implementation because generic asking words diluted the actual topic
+- Recall questions containing `remember` accidentally triggering a paid learning call; explicit learning instructions remain supported
+- Unknown single-character subjects and Chinese question-particle cleanup accidentally becoming topic-less continuations or spurious query fragments
 - Failed jobs remaining stuck until manual retry, and missing durable failure reasons/times
 - Synchronize leases with longer deadlines (150 seconds by default); recover expired jobs with bounded backoff and release shutdown-cancelled work without consuming failure budgets
 - False approval/verification, ineffective thresholds and dropped deferred proposals: obsolete workflow removed

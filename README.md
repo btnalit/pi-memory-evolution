@@ -102,15 +102,24 @@ from 0.1; see [Migration](#migration-from-01) and [Recovery](#recovery-and-troub
   locally, without a model call. Paths/filenames do not earn extra votes for their component
   words; for example, a repository named `pi-memory-evolution` is not itself evidence
   about cross-session memory.
-- Vague follow-ups such as `继续` or `这个有问题` use the nearest identifiable topic from
-  recent user messages in the active session branch. Explicit new topics do not inherit
-  unrelated old topics. Assistant/tool/injected text is not used as the topic source.
-  A fresh session saying only `继续` has no identifiable topic and injects nothing; naming
-  the topic makes related memories available regardless of their original directory.
-- Query coverage, document-frequency weights, a relative relevance cutoff and redundant-
-  facet filtering reject weak secondary matches. Source IDs and current cwd carry no
-  authority bonus; provenance labels do not mean verification. Pinning/dates only break
-  relevance ties. Common words such as `没有` or `现在` cannot trigger recall.
+- Natural questions such as `X相关记忆你还记得吗？` or `What do you remember about X?`
+  separate the recall request from its actual subject. This applies across topics, not
+  through per-device exceptions. Technical questions about memory/recall remain topics.
+  Asking what Pi remembers does not itself trigger a paid learning call.
+- Vague follow-ups use bounded recent **user** messages from the active branch, including
+  retained compaction tails. Multi-hop refinements such as `SQLite 数据库 → 端口呢？ →
+  认证呢？ → 继续` retain the subject and require the current attribute; prior-topic-only
+  matches cannot satisfy the new question. Explicit new, unknown and reset topics stop
+  old-topic inheritance. Assistant/tool/injected text never supplies the topic.
+  A fresh session saying only `继续` injects nothing; naming a topic enables cross-session
+  recall regardless of its original directory.
+- Query coverage, evidence-based document frequency, field weights, mild length
+  normalization and a relative cutoff reject weak secondary matches. Unseen query words
+  no longer receive the highest rarity weight. Exact paths must match, and a quoted
+  question in a replay/incident note is weaker than evidence answering it. Redundancy
+  filtering cannot let a project-state note hide a preference of the same origin.
+  Source IDs/cwd have no authority bonus; pinning/dates only break relevance ties.
+  Common words such as `没有` or `现在` cannot trigger recall.
   At most three claims fit within **2048 UTF-8 bytes**, with origin/source labels and
   non-truncatable trust guidance. Fewer matches means fewer claims, not padding with recent
   records. Identical content from different origins retains separate provenance.
@@ -182,6 +191,8 @@ These are optional direct controls, **not approval gates**:
 /memory list legacy [page]           # optional unknown-origin view
 /memory show <id>                     # exact ID, any scope/status; includes provenance
 /memory search <query>                # up to 10 recallable matches across all origins
+/memory explain                       # last automatic recall snapshot, including injection count
+/memory explain <query>               # preview retrieval reasons for an explicit query (3-claim cap)
 /memory status                       # integrity + retry/paused diagnostics + recall mode
 /memory history                      # last 10 events across all origins
 /memory evolve                       # optional one-off retry, overriding delay/failure limit
@@ -203,9 +214,14 @@ pages. Lists can show conflicted or stale project-state records that search/reca
 excludes. Status counts include all scopes and tombstones and validate source jobs and
 history as well as memory records. Long content previews are capped at 1,440 bytes in
 lists/search or 8,000 bytes in `show`, with an ellipsis when truncated.
-Commands that take exact IDs can address records outside the current cwd. `search` uses
-only its explicit query, whereas automatic recall can resolve follow-ups from recent
-user context. Pin protects against automatic replacement/age expiry,
+Commands that take exact IDs can address records outside the current cwd. `search` and
+`explain <query>` use only their explicit query, whereas automatic recall can resolve
+follow-ups from recent user context. `explain` without arguments shows the last automatic
+snapshot: normalized focus/context features, eligible/excluded counts, scores, coverage,
+up to 10 candidate IDs and rejection/selection reasons, plus actual injected count/bytes.
+It retains at most 8,000 bytes (+ truncation marker) in memory, not a database/session log;
+no memory bodies or provider errors are included. It resets on reload and is not proof
+of what the model subsequently understood. Empty/no-match turns replace the old snapshot. Pin protects against automatic replacement/age expiry,
 not manual edits, and does not force an unrelated record into every prompt. Pin/unpin
 and adoption preserve the stored evidence date; undo restores the prior date. These
 bookkeeping actions do not restart the seven-day project-state recall window. Alias-only
@@ -264,7 +280,8 @@ JSONL, not changes made in the new database.
   `PI_SUBAGENT_AGENT_ID` deliberately do not load it.
 - **No recalled memories:** check the active agent directory and `/memory search <topic>`.
   Name the topic if the current session has no recent user context; cwd is not a recall
-  gate. Forgotten/conflicted records and unpinned project state older than seven days
+  gate. `/memory explain` shows the last automatic decision; `explain <query>` previews
+  an explicit query without invoking a model or updating claims. Forgotten/conflicted records and unpinned project state older than seven days
   are not recalled. Matching remains lexical, not a guarantee of semantic or cross-language
   equivalence; vague references and languages/terms outside the concept map or learned
   aliases can still be missed.
@@ -318,4 +335,5 @@ See [docs/design.md](docs/design.md) for invariants and [CHANGELOG.md](CHANGELOG
 for the previous architecture and the 0.2 simplification. The follow-up
 [code review](docs/review-0.2.md) records reproduced defects, fixes and validation limits.
 The later [quality validation](docs/quality-validation.md) covers relevance, bilingual
-recall and completed-work progress updates.
+recall and completed-work progress updates. [Conversation recall](docs/conversation-recall.md)
+documents natural-question handling, multi-hop matching, diagnostics and validation limits.

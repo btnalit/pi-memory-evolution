@@ -259,6 +259,40 @@ test('exhausted jobs stay paused across repeated startup and polling without pai
 		}finally{s.close();}
 	},async()=>{calls++;return {model:'test',text:'{"memories":[]}'};},{},{pollMs:5});
 });
+test('automatic natural-language recall and explain share the same contextual result',()=>fixture(async({call,ctx,command,notifications,stateDir})=>{
+	const s=new MemoryStore(stateDir);
+	try {
+		s.capture({id:'seed',scope:'/other-origin',kind:'summary',content:'## Critical Context\n- SQLite 数据库端口是 5432。\n- SQLite 数据库认证使用本地凭据。\n- PostgreSQL 数据库认证使用独立账户。',createdAt:new Date().toISOString()});
+		const before=s.readMemories(), history=s.history();
+		ctx.sessionManager.buildContextEntries=()=>[{type:'message',message:{role:'user',content:'SQLite 数据库'}},{type:'message',message:{role:'user',content:'端口呢？'}}];
+		const result=await call('before_agent_start',{prompt:'认证呢？',systemPrompt:'Base'});
+		assert.match(result.systemPrompt,/本地凭据/);assert.ok(!result.systemPrompt.includes('独立账户'));assert.ok(!result.systemPrompt.includes('5432'));
+		await command('explain');const snapshot=notifications.at(-1);assert.match(snapshot,/followup/);assert.match(snapshot,/context-mismatch/);assert.match(snapshot,/"injected": 1/);
+		await command('explain What do you remember about ornithology?');assert.match(notifications.at(-1),/"selected": \[\]/);
+		await command('explain');assert.equal(notifications.at(-1),snapshot,'manual diagnostics must not replace the automatic snapshot');
+		await command('search 数据库相关记忆你还能记得吗？');assert.match(notifications.at(-1),/SQLite/);
+		assert.deepEqual(s.readMemories(),before);assert.deepEqual(s.history(),history);
+	}finally{s.close();}
+}));
+test('recall questions do not trigger a learning/model call; actual remember instructions still do',()=>{
+	let calls=0;return fixture(async({call})=>{
+		for(const content of ['What do you remember about coffee?','Do you still remember whether I prefer coffee?','你还记得我的咖啡偏好吗？'])
+			await call('agent_end',{messages:[{role:'user',timestamp:Date.now(),content}]});
+		assert.equal(calls,0);
+		await call('agent_end',{messages:[{role:'user',timestamp:Date.now(),content:'Please remember that I prefer tea.'}]});
+		assert.equal(calls,1);
+	},async()=>{calls++;return {model:'test',text:'{"memories":[]}'};});
+});
+test('empty and failed recall do not leave a misleading successful diagnostic snapshot',()=>fixture(async({call,command,notifications,stateDir})=>{
+	await call('before_agent_start',{prompt:'继续',systemPrompt:'Base'});await command('explain');assert.match(notifications.at(-1),/"injected": 0/);
+	const db=new Database(join(stateDir,'memory.sqlite'));
+	try {
+		db.exec('DROP TABLE memories');
+		assert.equal(await call('before_agent_start',{prompt:'database',systemPrompt:'Base'}),undefined);
+		await command('explain');assert.match(notifications.at(-1),/Last automatic recall failed/);
+	}finally{db.close();}
+}));
+
 test('reload/resume processes a persisted job from another directory without a new compaction',()=>{
 	let calls=0;return fixture(async({stateDir,cwd,call})=>{
 		const s=new MemoryStore(stateDir);s.capture({id:'persisted',scope:'/older-origin',kind:'summary',content:'## Critical Context\n- Database uses SQLite.',createdAt:new Date().toISOString()});s.close();

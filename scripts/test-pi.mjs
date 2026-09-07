@@ -133,6 +133,14 @@ try {
 	assert.match(await ask('数据库端口是多少？'), /7777/, 'Chinese query must retrieve the English fact');
 	assert.match(await ask('service endpoint'), /7777/, 'model search aliases must work in the real Bun host');
 	assert.match(await ask('继续'), /7777/, 'actual active user context must resolve a followup');
+	assert.match(await ask('数据库相关记忆你还能记得吗？'), /7777/, 'conversational framing must not dilute the subject');
+	assert.match(await ask('Do you still remember our database discussion?'), /7777/);
+	assert.match(await ask('端口呢？'), /7777/, 'a new facet must inherit the database topic');
+	assert.match(await ask('继续'), /7777/, 'chained followups must retain the subject and focus');
+	assert.equal(await ask('What do you remember about narwhals?'), '');
+	assert.equal(await ask('继续'), '', 'an unknown subject must not fall back to the previous matched topic');
+	send({ type: 'prompt', message: '/memory explain' });
+	await waitFor(() => output.includes('Last automatic recall snapshot'));
 	assert.equal(await ask('Kubernetes networking'), '');
 	assert.equal(await ask('继续'), '', 'topic switch must not revive the old database topic');
 	send({ type: 'prompt', message: '/memory status' });
@@ -141,7 +149,7 @@ try {
 	await waitFor(() => store.readMemories().every((m) => m.status === 'forgotten'));
 	assert.equal(await ask('What is the database port?'), '');
 	assert.equal(requests.filter((r) => r.semantic).length, 2);
-	assert.equal(requests.filter((r) => !r.semantic).length, 10);
+	assert.equal(requests.filter((r) => !r.semantic).length, 16);
 
 	// Real local Git commit + intentionally failed push, not an assistant-only success claim.
 	execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'init', '-b', 'main'], { cwd: projectB, env: { ...fixtureEnv, HOME: dir }, stdio: 'pipe' });
@@ -156,7 +164,16 @@ try {
 	assert.match(progressDigest, /commit created; push pending/);
 	assert.ok(!progressDigest.includes('are not committed'));
 	assert.equal(requests.filter((r) => r.semantic).length, 3);
-	assert.equal(requests.filter((r) => !r.semantic).length, 13);
+	assert.equal(requests.filter((r) => !r.semantic).length, 19);
+	store.capture({ id: 'facet-fixture', scope: '/synthetic-other-origin', kind: 'summary', content: '## Critical Context\n- SQLite 数据库认证使用本地凭据。\n- SQLite 数据库超时是 10 秒。\n- PostgreSQL 数据库认证使用独立账户。', createdAt: new Date().toISOString() });
+	store.finishEvolution(store.beginEvolution('facet-fixture'), [], 'fixture-seed');
+	await ask('SQLite 数据库');
+	const authDigest = await ask('认证呢？');
+	assert.match(authDigest, /本地凭据/); assert.ok(!authDigest.includes('独立账户')); assert.ok(!authDigest.includes('10 秒'));
+	const timeoutDigest = await ask('超时呢？');
+	assert.match(timeoutDigest, /10 秒/); assert.ok(!timeoutDigest.includes('凭据'));
+	assert.match(await ask('继续'), /10 秒/);
+	assert.equal(requests.filter((r) => r.semantic).length, 3, 'ordinary recall questions must not spend a learning call');
 	// A persisted failure is picked up on startup, then a malformed response retries
 	// on the real recurring timer with no user prompt or /memory evolve command.
 	await stopChild();
@@ -170,7 +187,7 @@ try {
 	await waitFor(() => recoveryCalls === 2 && !store.status().includes('failed='), 25_000);
 	assert.match(store.status(), /retrying=0, paused=0/);
 	assert.equal(output.includes('extension_error'), false);
-	console.log('PASS: real Pi model/auth, cross-session recall, contextual followups, topic switch, provenance, forget, tool-backed progress update, failed push not called success, automatic startup/timer recovery, no approval.');
+	console.log('PASS: real Pi model/auth, cross-session recall, natural-language questions, multi-hop focus/subject matching, unknown-topic barriers, explain diagnostics, no recall-time learning calls, topic switch, provenance, forget, tool-backed progress update, failed push not called success, automatic startup/timer recovery, no approval.');
 } finally {
 	store?.close();
 	await stopChild();

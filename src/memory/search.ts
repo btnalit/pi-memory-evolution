@@ -28,6 +28,17 @@ const CONCEPTS: [string, RegExp][] = [
 	["done", /已完成|完成了|\b(?:completed|finished|done)\b/giu],
 	["test", /测试|\btests?(?:ing|ed)?\b/giu],
 	["verification", /验证|校验|\b(?:verify|verified|verification|validation|validate)\b/giu],
+	// General conversational attributes, including short CJK words ICU may split.
+	["timeout", /超时|\btime[ -]?outs?\b/giu],
+	["version", /版本|\bversions?\b/giu],
+	["price", /价格|价钱|\b(?:prices?|pricing|costs?)\b/giu],
+	["status", /状态|\bstatus\b/giu],
+	["path", /路径|\bpaths?\b/giu],
+	["output", /输出|\boutputs?\b/giu],
+	["input", /输入|\binputs?\b/giu],
+	["installation", /安装|\binstall(?:ation|ed|ing)?\b/giu],
+	["connection", /连接|\bconnect(?:ion|ions|ed|ing)?\b/giu],
+	["performance", /性能|\bperformance\b/giu],
 ];
 const STOP = new Set(`的 了 是 在 有 没有 现在 目前 当前 这个 那个 这些 那些 什么 哪些 哪个 为什么 怎样 如何 怎么 是否 可以 需要 问题 看看 一下 我们 你们 然后 但是 以及 关于 帮我 谢谢 应该 还是 继续 之前 上次 修复 修改 检查 处理 记住
  the and for with continue resume previous this that these those it its they them their we our you your i me my a an of to in on at is are was were be been do does did has have had no not without now current currently what which who how why can could should would please help check look see any there here also just again about other anything something else one problem problems issue issues wrong broken use used using work home src tmp user users fix change changes need remember discuss show describe explain tell where`.split(/\s+/u));
@@ -36,7 +47,17 @@ const WORDS = new Intl.Segmenter("zh", { granularity: "word" });
 // repository named pi-memory-evolution into evidence about the meaning of "memory".
 const LITERALS = /(?<![\p{L}\p{N}_])(?:~?\/|\.\.?\/)[^\s`"'<>，。！？,;!?]+|(?<![\w./-])(?:[\w.-]+\/)*[\w-]+\.(?:[cm]?[jt]sx?|json|md|sqlite|toml|ya?ml|sh|py|go|rs)\b|(?<![a-z0-9-])[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}/giu;
 
-export function features(text: string): Set<string> {
+/** Query-language cleanup must never rewrite literal paths/filenames. */
+export function transformProse(text: string, transform: (prose: string) => string): string {
+	let result = "", start = 0;
+	for (const match of text.matchAll(LITERALS)) {
+		result += transform(text.slice(start, match.index)) + match[0];
+		start = match.index + match[0].length;
+	}
+	return result + transform(text.slice(start));
+}
+
+export function features(text: string, includeSingle = false): Set<string> {
 	const result = new Set<string>();
 	let prose = redact(text).replace(/\[REDACTED[^\]\n]*\]/gu, " ");
 	prose = prose.replace(LITERALS, (literal) => {
@@ -58,7 +79,7 @@ export function features(text: string): Set<string> {
 	prose = masked.join("");
 	prose = prose.replace(/([a-z])([A-Z])/gu, "$1 $2").toLowerCase();
 	for (const word of WORDS.segment(prose)) {
-		if (!word.isWordLike || word.segment.length < 2 || STOP.has(word.segment)) continue;
+		if (!word.isWordLike || (!includeSingle && word.segment.length < 2) || STOP.has(word.segment)) continue;
 		result.add(word.segment);
 	}
 	return result;
