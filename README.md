@@ -76,15 +76,26 @@ from 0.1; see [Migration](#migration-from-01) and [Recovery](#recovery-and-troub
 - Valid additions/replacements commit immediately, with provenance and before/after
   history. Inferred memories remain labeled `provisional`, but are recallable without
   approval. Pinned memories cannot be automatically replaced.
-- Replayed source events are idempotent. Calls have a 30-second deadline and are
+- Replayed source events are idempotent. Calls have a **120-second deadline** and an
+  **8192-output-token cap** (clamped to the active model's smaller limit). They are
   cancelled on session shutdown/reload. Structured summary claims survive model failure.
   User-cue prose has no local-extraction fallback: its sanitized source is saved, but
   learning its claims requires a successful model attempt.
-- Session start resumes at most **one**, most recently captured eligible pending source
-  across all origins, even if this session starts in a different directory.
-  `/memory evolve` similarly selects one source, also allowing failed attempts. Neither
-  action drains the whole backlog. Jobs left running by a crash become eligible after
-  their 60-second lease expires; there is no timer that automatically polls/retries them.
+- Session start checks persisted work across **all origins**. While Pi remains running,
+  a local recovery timer checks every **15 seconds** (after the previous check/call ends),
+  gradually draining eligible pending/failed work one source per check. Selection favors
+  the earliest retry time, then oldest capture; a failed source does not block other work.
+- Failed attempts retry automatically after **1 minute, 5 minutes, 15 minutes, then 1 hour**.
+  After **5 consecutive failures**, that source pauses and a warning points to diagnostics;
+  there are no indefinite paid probes. Retry times/budgets survive reloads and restarts.
+  `/memory status` shows safe error categories, failure times, attempt counts, next retry
+  times and paused counts. `/memory evolve` remains an optional one-off override of the
+  delay/limit, not the normal recovery path; successful/retired jobs are never rerun.
+- A job lease lasts **150 seconds** (120-second deadline plus 30-second grace). The timer
+  detects expired running jobs and schedules them with the same bounded backoff. Shutdown/
+  reload cancellation returns work to pending without consuming the failure budget.
+  Timers stop at shutdown and do not keep a print-mode process alive. Recovery resumes
+  next time Pi runs; this is not a standalone daemon.
 - Recall searches **the whole memory database**, including previous sessions, other
   directories and existing legacy claims. No project-directory startup or manual adoption
   is needed. Matching uses exact literals, word segmentation and weighted topic coverage
@@ -113,7 +124,8 @@ A model call may incur the usual charges of your active provider. These backgrou
 calls are not assistant turns and their usage is not added to Pi's session token totals.
 There is no additional call on ordinary recall. Eligible work turns may now incur one
 additional background call each; no related tracked state or no tool observation means
-no progress call. Failed attempts are not automatically retried in a loop. Model mistakes
+no progress call. Automatic retries may add up to four calls per source after the initial
+failure; every attempt uses the session's then-current model/authentication. Model mistakes
 remain possible; tool observations and model-generated aliases are not proof of truth. Use
 history, correction, pinning and undo rather than treating generated claims as verified facts.
 
@@ -170,9 +182,9 @@ These are optional direct controls, **not approval gates**:
 /memory list legacy [page]           # optional unknown-origin view
 /memory show <id>                     # exact ID, any scope/status; includes provenance
 /memory search <query>                # up to 10 recallable matches across all origins
-/memory status                       # database-wide integrity + capture origin/recall mode
+/memory status                       # integrity + retry/paused diagnostics + recall mode
 /memory history                      # last 10 events across all origins
-/memory evolve                       # retry one pending/failed source, any origin
+/memory evolve                       # optional one-off retry, overriding delay/failure limit
 /memory undo <event-id>               # reverse actual changes, if not modified since
 /memory correct <id> <replacement>    # literal replacement, 4–480 characters
 /memory forget <id>
@@ -225,11 +237,13 @@ preserve unchanged children of corrected summaries and carry superseded-content 
 when corrected legacy claims are adopted into a project.
 
 **Upgrading from earlier 0.2 development builds:** stop Pi and back up the state directory
-first, then update/reload all Pi processes sharing it. Schema marker **2 upgrades to 3**
-transactionally for the new observation/alias contract; existing records, IDs, histories
-and evidence dates remain unchanged. No copying, manual marker reset or JSONL re-import
-is needed. Older builds reject schema 3; rollback requires a matching backup, not editing
-the marker. Existing records are immediately eligible for global relevance-based recall.
+first, then update/reload all Pi processes sharing it. Schema markers **2 and 3 upgrade
+transactionally to 4**, adding durable retry diagnostics/scheduling alongside the observation/
+alias contract; existing records, IDs, histories and evidence dates remain unchanged.
+Existing failures below the limit become automatically eligible; their old error cause/time
+remain labeled unknown rather than invented. No copying, manual marker reset or JSONL
+re-import is needed. Older builds reject schema 4; rollback requires a matching backup,
+not editing the marker. Existing records are immediately eligible for global relevance-based recall.
 Legacy claims previously excluded by cwd filtering become eligible too. This shares
 relevant stored claims with the active Pi session/provider, not raw session archives.
 
@@ -258,10 +272,15 @@ JSONL, not changes made in the new database.
   work observation or compaction can update tracked progress; upgrading alone does not
   invent completion or replay old tool transcripts. Inspect `/memory show <id>` and
   history, or correct the record explicitly when you know the current state.
-- **Pending/failed jobs:** ensure Pi 0.85+ has a working current model/authentication,
-  then `/memory evolve`. After a crash, wait for the 60-second lease to expire. Repeat
-  the command to process more eligible sources; successful jobs cannot be forced to
-  run again with this command.
+- **Pending/failed jobs:** normally no command is needed: leave Pi running and recovery
+  automatically processes due work. `/memory status` distinguishes scheduled retries from
+  paused sources and shows the next eligible time (the next poll may be up to 15 seconds
+  later when no local work is queued). After a crash, the 150-second lease must expire first.
+  If a source reaches 5 failures, inspect its category: `timeout`, `output_limit`,
+  `invalid_output`, `write_rejected`, `stale`, `provider`, `unavailable`, `interrupted` or
+  `unknown`. Fix model/authentication or investigate repeated output/write rejection;
+  `/memory evolve` can then make one extra attempt without resetting the automatic budget.
+  A bad source remains saved/visible rather than being deleted or labeled successful.
 - **Persistent storage/import errors:** stop all Pi processes using that agent directory
   and back up the **entire** state directory, including any SQLite sidecars and legacy
   ledgers. Check file permissions and restore a known-good matching backup if needed.
@@ -273,7 +292,7 @@ JSONL, not changes made in the new database.
   stopped; do not mix one backup's database with another's WAL/SHM files.
 
 Diagnostics intentionally do not echo provider error bodies, which may contain secrets.
-`SQLite ok (schema 3)` checks database structure/record validity, not the truth of model claims.
+`SQLite ok (schema 4)` checks database structure/record validity, not the truth of model claims.
 
 ## Development
 
@@ -290,6 +309,9 @@ follow-ups, topic switches, bilingual aliases, provenance and forget, without ap
 dialogs. It also executes a real Git commit in a temporary repository and an intentionally
 failed push (no remote), verifying the progress observation/update path using a fake model. No GitHub
 Actions workflow is currently configured; run these checks locally before pushing.
+The real-Pi test also seeds a persisted failure, injects malformed model output, and
+verifies startup plus timer-driven recovery without `/memory evolve` or user activity.
+Only the synthetic retry due time is accelerated; the real 15-second timer runs normally.
 The real-Pi test uses a fake model, not a live-provider accuracy or multi-day TUI test.
 
 See [docs/design.md](docs/design.md) for invariants and [CHANGELOG.md](CHANGELOG.md)

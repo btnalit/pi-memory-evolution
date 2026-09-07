@@ -8,6 +8,7 @@ Development is on `main`; this version has not yet been tagged or published to n
 
 ### Changed
 
+- Increase model deadline from 30 to 120 seconds and output cap from 2048 to 8192 tokens (bounded by model capability); allow up to 64 KB of validated result JSON without relaxing claim limits
 - Replaced signal/maturity/speak/proposal/approval/plan machinery with direct automatic memory evolution
 - Reuse Pi 0.85's active model and public `modelRegistry.complete`, including provider authentication
 - Store claims, sources, jobs and actual before/after history in transactional SQLite (built-in Bun/Node APIs)
@@ -19,6 +20,10 @@ Development is on `main`; this version has not yet been tagged or published to n
 
 ### Added
 
+- Automatic startup and 15-second timer recovery across origins, with persisted 1m/5m/15m/1h backoff and a five-failure per-source cap plus pause warning
+- Safe fixed-code failure diagnostics, attempt/failure counts, last failure and next retry times in `/memory status`; manual evolve remains an optional one-off override
+- Transactional schema 2/3 → 4 migration preserving memory/history, automatically discovering old failures without inventing missing diagnostics
+- Recovery regressions for durable scheduling, cancellations, concurrent leases, backlog draining, migration and real-Pi timer-driven retries with a loopback fake model
 - Background consolidation after compaction or explicit user corrections, with bounded output/deadline and shutdown cancellation
 - Source idempotency, job leases, stale-result guards, exact-content suppression, and indexed/cached reads
 - Direct history/undo/search/status/evolve/adopt commands; no owner approval required
@@ -37,6 +42,8 @@ Development is on `main`; this version has not yet been tagged or published to n
 
 ### Fixed
 
+- Failed jobs remaining stuck until manual retry, and missing durable failure reasons/times
+- Synchronize leases with longer deadlines (150 seconds by default); recover expired jobs with bounded backoff and release shutdown-cancelled work without consuming failure budgets
 - False approval/verification, ineffective thresholds and dropped deferred proposals: obsolete workflow removed
 - Cross-process lost updates and partial JSONL writes: transactional database replaces multi-file mutation
 - Parent-summary recall bypass, correction/backfill invalidation and repeated startup scans

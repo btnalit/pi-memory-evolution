@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { completeMemory, type CompleteMemory } from "../adapter/pi-api.ts";
-import { MEMORY_KINDS, type MemoryStore } from "./memory-store.ts";
+import { MEMORY_KINDS, type MemoryStore, type RetryMode } from "./memory-store.ts";
+import { EVOLUTION_TIMEOUT_MS, EvolutionError, failureCode, type FailureCode } from "./recovery.ts";
 import type { Claim } from "./extractor.ts";
 import { clipBytes, redact } from "./privacy.ts";
 import { validSearchTerms } from "./search.ts";
@@ -14,7 +15,7 @@ At most 16 claims, each 4-480 characters. Extract only facts/preferences/decisio
 Use replaces only for the SAME fact about the SAME explicitly identifiable subject, corrected/superseded by newer evidence. Existing candidates are confined to this source origin as a conservative write safeguard; global recall is not permission to overwrite facts from other origins. Never replace a pinned memory. Do not repeat unchanged facts unless enriching searchTerms or incorporating a fresh progress observation; do not rewrite unrelated memories. If evidence is ambiguous, omit it. A user source is the user's current statement, not proof that a technical task succeeded. A summary may describe old history, not just new facts. Return an empty array when there is nothing to learn. No tools, shell commands, file changes or approval workflow.`;
 
 export function parseClaims(text: string): Claim[] {
-	if (Buffer.byteLength(text) > 24_000) throw new Error("Memory result too large");
+	if (Buffer.byteLength(text) > 64_000) throw new Error("Memory result too large");
 	const value: unknown = JSON.parse(text.trim().replace(/^```(?:json)?\s*/u, "").replace(/\s*```$/u, ""));
 	if (!value || typeof value !== "object" || !Array.isArray((value as { memories?: unknown }).memories)) throw new Error("Invalid memory result");
 	const claims = (value as { memories: unknown[] }).memories;
@@ -30,10 +31,12 @@ export function parseClaims(text: string): Claim[] {
 }
 
 /** One bounded model call per source. No lock held over network; stale results cannot commit. */
-export async function evolve(store: MemoryStore, sourceId: string, ctx: ExtensionContext, signal: AbortSignal, complete: CompleteMemory = completeMemory, retry = false): Promise<boolean> {
-	const run = store.beginEvolution(sourceId, retry);
+export async function evolve(store: MemoryStore, sourceId: string, ctx: ExtensionContext, signal: AbortSignal, complete: CompleteMemory = completeMemory, retry: RetryMode = false, timeoutMs = EVOLUTION_TIMEOUT_MS): Promise<boolean> {
+	signal.throwIfAborted();
+	const run = store.beginEvolution(sourceId, retry, timeoutMs);
 	if (!run) return false;
 	let cancel: (() => void) | undefined;
+	let stage: FailureCode = "provider";
 	try {
 		signal.throwIfAborted();
 		const input = JSON.stringify({
@@ -46,8 +49,16 @@ export async function evolve(store: MemoryStore, sourceId: string, ctx: Extensio
 		});
 		const result = await Promise.race([complete(ctx, PROMPT, input, signal), cancelled]);
 		signal.throwIfAborted();
-		store.finishEvolution(run, parseClaims(result.text), result.model);
+		stage = "invalid_output";
+		const claims = parseClaims(result.text);
+		stage = "write_rejected";
+		store.finishEvolution(run, claims, result.model);
 		return true;
-	} catch (error) { store.failEvolution(run); throw error; }
+	} catch (error) {
+		const code = failureCode(error, signal);
+		const safe = code === "unknown" ? stage : code;
+		store.failEvolution(run, safe);
+		throw new EvolutionError(safe);
+	}
 	finally { if (cancel) signal.removeEventListener("abort", cancel); }
 }

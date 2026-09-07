@@ -9,8 +9,9 @@ or automatic changes to project files, system configuration, skills or extension
 
 ## Runtime
 
-1. `session_start`: open/migrate lazily and resume at most one most recently captured
-   eligible pending source across all origins.
+1. `session_start`: open/migrate lazily, check persisted pending/failed work across all
+   origins and start a bounded recovery timer (one source per check, every 15 seconds
+   after the previous check/call ends).
 2. `session_compact`: atomically capture a sanitized session-qualified source and bounded
    local claims; enqueue semantic consolidation.
 3. `agent_end`: capture explicit user memory/correction cues. For a non-cue completed
@@ -19,11 +20,15 @@ or automatic changes to project files, system configuration, skills or extension
    a user memory instruction; assistant-only replies cannot trigger this path.
 4. `before_agent_start`: resolve the current topic, search the whole memory database and
    append a bounded, source-labeled digest to this turn's system prompt. No model call.
-5. `session_shutdown`: abort work, drain the serial task chain and close SQLite.
+5. `session_shutdown`: stop polling, abort work, return cancelled jobs to pending without
+   increasing their failure count, drain the serial task chain and close SQLite.
 
 Factories do not write state or start background work. Processes with a nonempty
-`PI_SUBAGENT_AGENT_ID` are skipped. There is no recurring full-ledger backfill, periodic
-job polling or scanning of arbitrary historical Pi session files.
+`PI_SUBAGENT_AGENT_ID` are skipped. Recovery polls only indexed persisted job state;
+there is no full-ledger backfill or scanning of arbitrary historical Pi session files.
+The timer is unreferenced so it cannot hold a print process open and is never started
+from the factory. Session-scoped context getters resolve the current model/auth at each
+attempt; no stale model snapshot or foreground turn cancellation controls recovery.
 
 ## Conversation-aware recall
 
@@ -115,7 +120,7 @@ limits automatic replacement authority, **not recall eligibility**. One origin c
 multiple projects. The prompt requires an explicitly identifiable same subject/fact and
 preservation of project/resource qualifications; matching cwd alone is not identity.
 
-Output is validated JSON (an outer Markdown fence is tolerated), at most 24,000 bytes
+Output is validated JSON (an outer Markdown fence is tolerated), at most 64,000 bytes
 and 16 claims of 4–480 UTF-16 code units each. Fields are restricted to `kind`, `content`,
 optional `replaces` and `searchTerms`. Aliases are at most 8 sanitized strings of 2–64
 characters, with total JSON <=1024 bytes. Malformed claims/aliases reject the batch.
@@ -126,8 +131,9 @@ stale, duplicate-target and cyclic replacements are rejected transactionally. On
 `stop` completion is accepted, never truncated/tool/error output. Model paths are not
 used for file operations, and model claims remain `provisional`, not awaiting approval.
 
-Each attempt uses at most one model call, no tools, a 2,048-output-token cap, a fresh
-request session ID and `cacheRetention: "none"`. A 30-second outer deadline bounds waiting
+Each attempt uses at most one model call, no tools, an 8,192-output-token cap (clamped
+against a smaller model limit), a fresh request session ID and `cacheRetention: "none"`.
+A 120-second outer deadline bounds waiting
 even when a provider ignores abort; remote computation/billing cannot be guaranteed to
 stop. Failed calls retain local summary claims. User-cue prose is saved but needs a
 successful model attempt to become claims; it has no local extraction fallback.
@@ -146,8 +152,9 @@ One SQLite database, WAL + FULL synchronous mode and private file permissions.
 
 - `memories`: claims, optional search aliases, revision/status/layer, source ID, capture origin (`scope`) and hash;
   optional `suppressedHashes` carries correction history through legacy annotation.
-- `sources`: sanitized evidence and durable job state/lease/attempt; `progress` evidence
-  additionally carries a bounded, unique target-ID list.
+- `sources`: sanitized evidence and durable job state/lease/attempt, consecutive failure
+  count, next retry timestamp, last failure timestamp and a fixed error category;
+  `progress` evidence additionally carries a bounded, unique target-ID list.
 - `blocked`: origin-qualified exact-content hashes for forgotten/superseded claims.
 - `events`: actual before/after states, actor, operation timestamp and source/model reason.
 - `metadata`: schema/import marker.
@@ -160,11 +167,28 @@ content; existing IDs remain valid. Low-level origin filters are exact, includin
 `*` values; automatic recall uses the unfiltered reader.
 
 Batches use `BEGIN IMMEDIATE`; no transaction spans network I/O. Source-origin generation
-and job attempt are checked before completion can commit. A 60-second lease prevents
-simultaneous execution of the same job. Startup considers pending/expired-running sources
-across all origins; `/memory evolve` additionally considers failed attempts. Each selects
-one newest eligible source, not the entire backlog, and never forces completed jobs to
-run again. A source resumed in another directory retains its original provenance.
+and job attempt are checked before completion can commit. A lease lasts the attempt
+budget plus 30 seconds (150 seconds by default), preventing another process from stealing
+work at the old 60-second boundary. The timer converts expired leases to an `interrupted`
+failure with backoff; attempt/state checks prevent late results or failures from changing
+a new owner's job. Model waiting and recurring recovery use the same serial task chain;
+queued capture/manual work prevents the timer from piling up duplicate tasks.
+
+Automatic selection/claim both enforce persisted due time and failure budget, ordered by
+retry time then oldest source. Each actual failure schedules 1 minute, 5 minutes, 15 minutes,
+then 1 hour of backoff. Five consecutive failures pause that source with a warning and
+status diagnostics; repeated crashes also consume the budget. Shutdown cancellation does
+not. Successful completion resets the failure fields. Other eligible work continues;
+there is no unbounded per-source model loop. `/memory evolve` selects one newest eligible
+source and can override the delay/cap for one explicit attempt (not reset the budget).
+Completed/retired jobs are never forced to run again. A source resumed in another directory
+retains its original provenance. While Pi is closed no polling occurs.
+
+Only allowlisted error codes are persisted, never exception strings, provider error bodies,
+model response text or credentials. Stage categories distinguish provider/unavailable,
+output limit, invalid output, write rejection, stale output, timeout and interrupted work.
+Status reports retrying/paused counts and up to five failed-job details with next due times;
+normal structural validation is still separate from model/job health.
 
 Capture is idempotent. Raw summaries are evidence only, never a parent recall fallback.
 Exact forgotten content cannot be re-added within its origin under another source/kind.
@@ -177,8 +201,10 @@ Memory reads validate indexed identity/origin/hash against JSON. Undo validates 
 unique before/after IDs and only succeeds when the current records still equal the event's
 after state. New records become tombstones rather than being physically erased. Status
 also validates source jobs/history and the schema marker. Unsupported schema versions
-are rejected before DDL. Schema 2 upgrades transactionally to 3 without rewriting
-claims/history or resetting timestamps; the new source/alias contract is validated on read.
+are rejected before DDL. Schemas 2/3 upgrade transactionally to 4 without rewriting
+claims/history or resetting evidence timestamps; missing retry columns/indexes are added.
+Old failures below the cap are due immediately, with unknown cause/time explicitly labeled.
+The source/alias/retry contract is validated on read.
 These detect structural corruption, not all well-formed edits by an owner of the database.
 Undo does not clear suppression hashes or reopen jobs. Forget/undo is not secure erasure.
 
@@ -186,7 +212,7 @@ Undo does not clear suppression hashes or reopen jobs. Forget/undo is not secure
 
 Earlier 0.2 SQLite records, IDs, histories and origin labels stay intact and become
 eligible for global relevance-based recall, including existing `legacy` claims. The
-schema-2-to-3 marker upgrade requires no data copying, JSONL re-import or manual reset.
+schema-2/3-to-4 upgrade requires no data copying, JSONL re-import or manual reset.
 Stop/back up before upgrading, reload all processes sharing the DB, and restore a matching
 backup for rollback; older code must not be pointed at a manually downgraded marker.
 
@@ -213,7 +239,11 @@ loopback fake OpenAI-compatible model: two automatic updates in one directory, t
 fresh Pi process/session in another directory to verify recall, contextual follow-ups,
 topic changes, bilingual aliases and exact-ID forget. A real temporary Git repository
 also exercises commit success + push failure through actual tool events and the
-constrained progress-update path. It also verifies model/auth reuse and no approval.
+constrained progress-update path. It also verifies model/auth reuse, no approval, startup
+recovery of persisted failures, and recovery after malformed model output via the real
+15-second timer without user activity. Unit tests cover persisted backoff/caps, migration
+from the actual schema-3 table shape, long leases, competing owners, cancellation, timeout,
+late results, suppressed sources, backlog draining, and fixed-code diagnostics.
 The [quality validation record](quality-validation.md) records the three-issue follow-up
 and distinguishes synthetic/real-host checks from real-data read-only replay.
 

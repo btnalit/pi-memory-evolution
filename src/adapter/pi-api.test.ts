@@ -6,9 +6,22 @@ import { completeMemory } from './pi-api.ts';
 test('uses exact active model and Pi registry completion/auth, no secondary model config',async()=>{
 	const model={id:'active-model',provider:'active-provider'};
 	const signal=AbortSignal.timeout(1000);let calls=0;
-	const registry={async complete(actual:unknown,context:any,options:any){assert.equal(this,registry);assert.equal(actual,model);assert.equal(options.signal,signal);assert.equal(options.apiKey,undefined);assert.equal(context.tools,undefined);assert.equal(options.maxTokens,2048);calls++;return {stopReason:'stop',content:[{type:'text',text:'{"memories":[]}'}]};}};
+	const registry={async complete(actual:unknown,context:any,options:any){assert.equal(this,registry);assert.equal(actual,model);assert.equal(options.signal,signal);assert.equal(options.apiKey,undefined);assert.equal(context.tools,undefined);assert.equal(options.maxTokens,8192);calls++;return {stopReason:'stop',content:[{type:'text',text:'{"memories":[]}'}]};}};
 	const result=await completeMemory({model,modelRegistry:registry} as unknown as ExtensionContext,'system','input',signal);
 	assert.equal(result.model,'active-provider/active-model');assert.equal(calls,1);
+});
+test('output budget respects a smaller model limit',async()=>{
+	const model={id:'small',provider:'test',maxTokens:4096};
+	const ctx={model,modelRegistry:{complete:async(_model:unknown,_context:unknown,options:any)=>{
+		assert.equal(options.maxTokens,4096);return {stopReason:'stop',content:[{type:'text',text:'{"memories":[]}'}]};
+	}}};
+	await completeMemory(ctx as unknown as ExtensionContext,'system','input',AbortSignal.timeout(1000));
+});
+test('truncation and error responses expose fixed codes, not provider bodies',async()=>{
+	for(const [stopReason,code] of [['length','output_limit'],['error','provider']]){
+		const ctx={model:{id:'test',provider:'test'},modelRegistry:{complete:async()=>({stopReason,errorMessage:'private-secret',content:[]})}};
+		await assert.rejects(completeMemory(ctx as unknown as ExtensionContext,'system','input',AbortSignal.timeout(1000)),(error:any)=>error.code===code&&!error.message.includes('private-secret'));
+	}
 });
 test('model switching during completion cannot rewrite provenance',async()=>{
 	const original={id:'original',provider:'provider-a'};

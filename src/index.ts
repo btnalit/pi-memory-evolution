@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { isSubagentProcess } from "./child-process.ts";
-import { MemoryStore, type MemoryAction } from "./memory/memory-store.ts";
+import { MemoryStore, type MemoryAction, type RetryMode } from "./memory/memory-store.ts";
 import { recallQuery, selectRelevantMemories } from "./memory/retriever.ts";
 import { features } from "./memory/search.ts";
 import { recentUserMessages } from "./adapter/session-context.ts";
@@ -11,13 +11,15 @@ import { buildRuntimeDigest } from "./injector/digest.ts";
 import { evolve } from "./memory/evolution.ts";
 import { clipBytes, fingerprint, redact } from "./memory/privacy.ts";
 import { completeMemory, type CompleteMemory } from "./adapter/pi-api.ts";
+import { EVOLUTION_TIMEOUT_MS, RECOVERY_POLL_MS, failureCode } from "./memory/recovery.ts";
 
 export interface MemoryEvolutionDependencies {
 	stateDir?: string;
 	env?: NodeJS.ProcessEnv;
 	complete?: CompleteMemory;
-	/** Tests can exercise timeout without waiting 30 seconds. */
+	/** Test-only timing overrides; production uses the bounded recovery policy. */
 	timeoutMs?: number;
+	pollMs?: number;
 }
 const MEMORY_CUE = /记住|偏好|更正|纠正|应该改成|改为|不对|以后|不要|\b(?:remember|prefer|correction|instead)\b/iu;
 
@@ -30,14 +32,17 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 	const getStore = () => store ??= new MemoryStore(stateDir);
 	const lifetime = new AbortController();
 	let work = Promise.resolve();
+	let queued = 0;
+	let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+	let pausedWarning = false;
 	let lastError = "";
 	let warned = false;
 	const notify = (ctx: ExtensionContext, text: string, type: "info" | "warning") => {
 		try { ctx.ui.notify(redact(text), type); } catch { /* UI failure does not undo a committed update. */ }
 	};
-	const report = (ctx: ExtensionContext) => {
+	const report = (ctx: ExtensionContext, error?: unknown) => {
 		// Do not log exception strings: provider errors can contain credentials or source text.
-		lastError = "Memory operation failed; local records retained. Use /memory status and /memory evolve to retry.";
+		lastError = `Memory operation failed (${failureCode(error)}); local records retained. Automatic recovery retries eligible jobs; /memory status shows retry times or paused jobs.`;
 		try {
 			if (!warned && ctx.hasUI) { warned = true; notify(ctx, lastError, "warning"); }
 		} catch { /* Context may have been invalidated during reload. */ }
@@ -46,29 +51,55 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 		if (lifetime.signal.aborted) return;
 		try { return await fn(event, ctx); } catch { report(ctx); return; }
 	};
-	const enqueue = (id: string, ctx: ExtensionContext, retry = false) => {
+	const enqueue = (id: string, ctx: ExtensionContext, retry: RetryMode = false) => {
+		queued++;
 		const task = work.then(async () => {
 			try {
 				if (lifetime.signal.aborted) return "skipped";
 				const contextSignal = ctx.signal;
-				const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(dependencies.timeoutMs ?? 30_000), ...(contextSignal ? [contextSignal] : [])]);
-				const applied = await evolve(getStore(), id, ctx, signal, dependencies.complete ?? completeMemory, retry);
+				// Background recovery is independent of a foreground turn's Esc signal.
+				const timeoutMs = dependencies.timeoutMs ?? EVOLUTION_TIMEOUT_MS;
+				const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(timeoutMs), ...(retry !== "auto" && contextSignal ? [contextSignal] : [])]);
+				const applied = await evolve(getStore(), id, ctx, signal, dependencies.complete ?? completeMemory, retry, timeoutMs);
 				if (!applied) return "skipped";
 				lastError = ""; warned = false;
 				return "completed";
-			} catch {
+			} catch (error) {
 				if (lifetime.signal.aborted) return "skipped";
-				report(ctx);
+				report(ctx, error);
 				return "failed";
-			}
+			} finally { queued--; }
 		});
 		work = task.then(() => {});
 		return task;
 	};
 
+	const recover = async (ctx: ExtensionContext): Promise<void> => {
+		try {
+			if (lifetime.signal.aborted) return;
+			if (queued === 0) {
+				getStore().recoverExpired();
+				const pending = getStore().pending(undefined, "auto");
+				if (pending) await enqueue(pending, ctx, "auto");
+				if (!lifetime.signal.aborted) {
+					const paused = getStore().pausedJobs();
+					if (paused && !pausedWarning) notify(ctx, `Memory automatic recovery paused for ${paused} source(s) after repeated failures; records retained. /memory status shows diagnostics.`, "warning");
+					pausedWarning = paused > 0;
+				}
+			}
+		} catch (error) { if (!lifetime.signal.aborted) report(ctx, error); }
+		finally {
+			if (!lifetime.signal.aborted) {
+				recoveryTimer = setTimeout(() => { void recover(ctx); }, dependencies.pollMs ?? RECOVERY_POLL_MS);
+				recoveryTimer.unref(); // Do not keep print/RPC processes alive solely to poll.
+			}
+		}
+	};
+	let recoveryStarted = false;
 	pi.on("session_start", guard((_event, ctx) => {
-		const pending = getStore().pending();
-		if (pending) void enqueue(pending, ctx);
+		if (recoveryStarted) return;
+		recoveryStarted = true;
+		void recover(ctx);
 	}));
 	pi.on("session_compact", guard((event, ctx) => {
 		const entry = event.compactionEntry;
@@ -111,6 +142,7 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 	}));
 	pi.on("session_shutdown", async () => {
 		lifetime.abort();
+		if (recoveryTimer) clearTimeout(recoveryTimer);
 		await work;
 		store?.close(); store = undefined;
 	});
@@ -124,7 +156,7 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 				const current = getStore();
 				const scope = scopeOf(ctx);
 				let text: string;
-				if (operation === "status") text = `${current.status()}\nCapture origin: ${scope}\nRecall: all origins, topic-based\n${lastError || "Automatic updates enabled; no approval needed."}`;
+				if (operation === "status") text = `${current.status()}\nCapture origin: ${scope}\nRecall: all origins, topic-based\nRecovery polling: every ${(dependencies.pollMs ?? RECOVERY_POLL_MS) / 1000}s while Pi is running\n${lastError || "Automatic updates enabled; no approval needed."}`;
 				else if (operation === "evolve") {
 					const pending = current.pending(undefined, true);
 					const result = pending ? await enqueue(pending, ctx, true) : undefined;

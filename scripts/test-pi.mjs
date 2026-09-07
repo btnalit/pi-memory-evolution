@@ -7,11 +7,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MemoryStore } from '../src/memory/memory-store.ts';
+import { Database } from '../src/memory/sqlite.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'pme-real-pi-'));
 const agentDir = join(dir, 'agent');
 const stateDir = join(agentDir, 'agent-suite', 'memory-evolution');
 const requests = [];
+let recoveryCalls = 0;
 // The synthetic Git work must not inherit hooks, repo paths, signing or user config.
 const fixtureEnv = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
 	GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_GLOBAL: '/dev/null' };
@@ -30,7 +32,10 @@ const server = createServer(async (req, res) => {
 		if (semantic) {
 			assert.ok(!input.tools?.length, 'memory model must not receive tools');
 			const data = JSON.parse(text(input.messages.at(-1).content));
-			if (data.source.kind === 'progress') {
+			if (data.source.id === 'recovery-fixture') {
+				assert.equal(input.max_tokens ?? input.max_completion_tokens, 4096, 'cap must respect the model limit');
+				answer = ++recoveryCalls === 1 ? 'deliberately invalid JSON' : '{"memories":[]}';
+			} else if (data.source.kind === 'progress') {
 				const evidence = JSON.parse(data.source.content);
 				assert.equal(evidence.observations.at(-1).isError, true);
 				assert.match(evidence.observations.at(-1).output, /No configured push destination/i);
@@ -57,8 +62,8 @@ let processError;
 let output = '';
 let errors = '';
 const send = (message) => child.stdin.write(JSON.stringify(message) + '\n');
-async function waitFor(check) {
-	const deadline = Date.now() + 15_000;
+async function waitFor(check, timeoutMs = 15_000) {
+	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
 		if (processError) throw processError;
 		if (childClosed || child.exitCode !== null || child.signalCode !== null) throw new Error(`Pi exited: ${errors}`);
@@ -152,7 +157,20 @@ try {
 	assert.ok(!progressDigest.includes('are not committed'));
 	assert.equal(requests.filter((r) => r.semantic).length, 3);
 	assert.equal(requests.filter((r) => !r.semantic).length, 13);
-	console.log('PASS: real Pi model/auth, cross-session recall, contextual followups, topic switch, provenance, forget, tool-backed progress update, failed push not called success, no approval.');
+	// A persisted failure is picked up on startup, then a malformed response retries
+	// on the real recurring timer with no user prompt or /memory evolve command.
+	await stopChild();
+	store.capture({ id: 'recovery-fixture', kind: 'user', scope: '/other-origin', content: 'Remember SQLite storage.', createdAt: new Date().toISOString() });
+	store.failEvolution(store.beginEvolution('recovery-fixture'), 'timeout', Date.now() - 120_000);
+	await startChild(projectA);
+	await waitFor(() => store.status().includes('invalid_output'));
+	assert.equal(recoveryCalls, 1);
+	const db = new Database(join(stateDir, 'memory.sqlite'));
+	try { db.exec("UPDATE sources SET retry_at=0 WHERE id='recovery-fixture'"); } finally { db.close(); }
+	await waitFor(() => recoveryCalls === 2 && !store.status().includes('failed='), 25_000);
+	assert.match(store.status(), /retrying=0, paused=0/);
+	assert.equal(output.includes('extension_error'), false);
+	console.log('PASS: real Pi model/auth, cross-session recall, contextual followups, topic switch, provenance, forget, tool-backed progress update, failed push not called success, automatic startup/timer recovery, no approval.');
 } finally {
 	store?.close();
 	await stopChild();

@@ -20,6 +20,21 @@ test('automatically applies valid model output, no approval and one call per sou
 	assert.equal(await evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),complete),false);
 	assert.equal(calls,1);assert.equal(store.readMemories().length,2);assert.match(store.history()[0].reason,/active\/model/);
 }));
+test('large valid bilingual output fits the new byte budget while oversized output is rejected',()=>{
+	const text=JSON.stringify({memories:Array.from({length:16},()=>({kind:'fact',content:'中'.repeat(480),searchTerms:Array.from({length:8},(_,i)=>`关键词${i}`+'中'.repeat(20))}))});
+	assert.ok(Buffer.byteLength(text)>24000);assert.equal(parseClaims(text).length,16);
+	assert.throws(()=>parseClaims(' '.repeat(64001)),/too large/);
+});
+test('provider, parse and transaction failures have distinct persisted categories',()=>using(async(store)=>{
+	for(const [complete,code] of [
+		[async()=>{throw new Error('private-secret');},'provider'],
+		[async()=>({model:'test',text:'bad JSON'}),'invalid_output'],
+		[async()=>({model:'test',text:'{"memories":[{"kind":"fact","content":"Valid but unauthorized fact.","replaces":"unknown"}]}'}),'write_rejected'],
+	] as const){
+		await assert.rejects(evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),complete,true),(error:any)=>error.code===code);
+		assert.match(store.status(),new RegExp(code));assert.ok(!store.status().includes('private-secret'));
+	}
+}));
 test('invalid completion never partially applies changes; local fallback remains',()=>using(async(store)=>{
 	await assert.rejects(evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'test',text:'not JSON'})));
 	assert.equal(store.readMemories().length,1);assert.match(store.status(),/failed=1/);

@@ -131,6 +131,6 @@ test('schema 2 upgrade preserves records and history instead of reimporting or r
  try {s.capture(source('s','## Critical Context\n- Database uses SQLite.'));const records=s.readMemories(),history=s.history();s.close();
   const db=new Database(join(dir,'memory.sqlite'));db.exec("UPDATE metadata SET value='2' WHERE key='schema'");db.close();
   s=new MemoryStore(dir);assert.deepEqual(s.readMemories(),records);assert.deepEqual(s.history(),history);
-  const check=new Database(join(dir,'memory.sqlite'));try{assert.equal(check.prepare("SELECT value FROM metadata WHERE key='schema'").get()!.value,'3');}finally{check.close();}
+  const check=new Database(join(dir,'memory.sqlite'));try{assert.equal(check.prepare("SELECT value FROM metadata WHERE key='schema'").get()!.value,'4');}finally{check.close();}
  }finally{s.close();rmSync(dir,{recursive:true,force:true});}
 });
