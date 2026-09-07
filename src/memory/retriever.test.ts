@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { recallQuery, selectRelevantMemories, terms, excerpt } from "./retriever.ts";
+import { recallQuery, selectRelevantMemories, excerpt } from "./retriever.ts";
+import { features } from "./search.ts";
 import type { DurableMemory } from "./memory-store.ts";
 const now=Date.parse('2026-09-05T00:00:00Z');
 const memory=(id:string,content:string,patch:Partial<DurableMemory>={}):DurableMemory=>({id,content,kind:'fact',scope:'/project',sourceEntryId:'s1',createdAt:'2026-09-01T00:00:00Z',updatedAt:'2026-09-01T00:00:00Z',revision:1,layer:'durable',status:'provisional',...patch});
@@ -30,14 +31,16 @@ test('actual reload question cannot match CI through the word 没有',()=>{
 });
 test('global recall preserves distinct origins, including old legacy records without adoption',()=>{
 	const records=[memory('a','Database port is 5432.',{scope:'/Alpha'}),memory('b','Database port is 5432.',{scope:'/Beta'}),memory('old','Database uses SQLite.',{scope:'legacy'})];
-	assert.equal(selectRelevantMemories(records,'Database',3,now,'/Elsewhere').length,3);
-	assert.equal(selectRelevantMemories(records,'Alpha database port',1,now,'/Elsewhere')[0].id,'a');
-	assert.deepEqual(selectRelevantMemories(records,'sorting algorithm',3,now,'/Alpha'),[]);
+	assert.equal(selectRelevantMemories(records,'Database',3,now).length,3);
+	assert.equal(selectRelevantMemories(records,'Alpha database port',1,now)[0].id,'a');
+	assert.deepEqual(selectRelevantMemories(records,'sorting algorithm',3,now),[]);
 });
 test('vague followups inherit only the nearest user topic, while topic switches stand alone',()=>{
 	const history=['Discuss SQLite database configuration.','Now discuss Bluetooth audio.','这个有问题'];
 	assert.match(recallQuery('继续',history),/Bluetooth/);
 	assert.match(recallQuery('这个有问题，继续修复',history),/Bluetooth/);
+	assert.match(recallQuery('接上之前未完成的继续',history),/Bluetooth/);
+	assert.equal(recallQuery('/tmp/this_memory.ts',history),'/tmp/this_memory.ts');
 	assert.equal(recallQuery('Kubernetes networking',history),'Kubernetes networking');
 	assert.equal(recallQuery('继续 PostgreSQL 调优',history),'继续 PostgreSQL 调优');
 	assert.equal(recallQuery('继续',[]),'');
@@ -51,7 +54,7 @@ test('resolved followups select the actual topic rather than the newest unrelate
 	assert.deepEqual(selectRelevantMemories(records,recallQuery('Kubernetes networking',['SQLite database configuration']),3,now),[]);
 });
 test('tokenizes identifiers without changing their literal content',()=>{
-	for(const token of ['foo_bar','foo','bar','camel','case'])assert.ok(terms('foo_bar camelCase').has(token));
+	for(const token of ['foo_bar','camel','case'])assert.ok(features('foo_bar camelCase').has(token));
 });
 test('excerpt finds English sentences and late matches in a long sentence',()=>{
 	assert.match(excerpt('Unrelated detail. '.repeat(40)+'SQLite is ready.','SQLite',60),/SQLite/);

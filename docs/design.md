@@ -13,8 +13,10 @@ or automatic changes to project files, system configuration, skills or extension
    eligible pending source across all origins.
 2. `session_compact`: atomically capture a sanitized session-qualified source and bounded
    local claims; enqueue semantic consolidation.
-3. `agent_end`: capture explicit user memory/correction cues. Assistant/tool text is not
-   a memory command or approval; session/run counts are not gates.
+3. `agent_end`: capture explicit user memory/correction cues. For a non-cue completed
+   work request with linked tool results, optionally capture a bounded `progress`
+   observation targeting existing related project states. Assistant/tool text is never
+   a user memory instruction; assistant-only replies cannot trigger this path.
 4. `before_agent_start`: resolve the current topic, search the whole memory database and
    append a bounded, source-labeled digest to this turn's system prompt. No model call.
 5. `session_shutdown`: abort work, drain the serial task chain and close SQLite.
@@ -39,13 +41,26 @@ stop inheritance. If neither the prompt nor recent users identify a topic, recal
 A fresh session saying only `continue` cannot identify what to continue; naming a subject
 can retrieve its memory even if it was learned in another directory/session.
 
-All stored claims, including `legacy` imports, are candidates. Retrieval remains local
-and deterministic: Latin/identifier terms and CJK bigrams. Common words such as `没有`
-cannot qualify a claim, and weak configuration terms alone are insufficient. Origin
-basename matches help rank named contexts. Current-origin preference, pinning and dates
-only break relevance ties; there is **no arbitrary recency fallback** or requirement to
-fill all three slots. These are lexical heuristics, not semantic query rewriting or
-exhaustive pronoun resolution.
+All stored claims, including `legacy` imports, are candidates. Retrieval is local:
+`Intl.Segmenter` words, exact path/filename identifiers, and a small Chinese/English
+concept map. Synonyms contribute one feature rather than duplicated votes. Model-derived
+`searchTerms` extend the vocabulary; old records need no reprocessing for the bootstrap
+concepts. Paths such as `/work/pi-memory-evolution` do not imply the topic `memory`.
+Common/filler words and generic configuration words cannot qualify a record.
+
+For eligible records, each query feature has weight `1 + log((N+1)/(df+1))` (literal
+features multiply this by 2). A matching feature contributes its weight times the
+strongest applicable field factor: **body 1, aliases 0.8, explicit origin identifier 0.2**.
+Concept words in origin names are excluded. Source IDs, `legacy` labels and current cwd
+have no authority bonus. Require weighted query coverage >=45%; queries with at least 3
+features need at least 2 matches. Reject scores below 75% of the best eligible result.
+Pin/date/ID only resolve relevance ties. Same-origin results whose facets are already
+covered by a strong multi-facet lead may be omitted; distinct origins are not merged.
+There is **no arbitrary recency fallback** or minimum result count.
+
+These are precision-oriented heuristics, not semantic verification or universal
+translation. Word segmentation can vary with the runtime's ICU version; uncommon
+languages, short/ambiguous queries and unannotated old records may still be missed.
 
 The digest contains at most 3 claims within 2,048 UTF-8 bytes, with historical-data trust
 guidance reserved first. Each JSON row includes ID, kind, status, origin, source ID,
@@ -58,6 +73,34 @@ Forgotten/conflicted claims never recall. Unpinned project-state claims expire f
 after 7 days; facts/preferences/decisions have no automatic age deletion. Pin/unpin and
 legacy annotation preserve the evidence date, and undo restores the prior date. Event
 history separately records when an operation occurred.
+
+## Completed-work observations
+
+The old cue/compaction-only input loop could retain “not committed” even when a normal
+work turn later committed/pushed: that turn was never an evolution source.
+`progress-observation.ts` now requires a work-request keyword, linked call/result IDs,
+and a normal final assistant stop. It keeps at most 8 recent observations (from the last
+64 turn messages), each operation path/command <=1024 bytes and output <=2048 bytes,
+plus a bounded request/report; serialized evidence <=28,000 bytes. Head/tail previews
+preserve failure endings and sanitize credentials before storage.
+
+User topic and explicit operation paths nominate at most 8 active, unpinned
+`project_state` targets in the capture origin. Qualified operation paths have priority
+before the target cap; shell flags do not dilute the topic query. States expired from
+ordinary recall may still be nominated for a new observation, without reviving forgotten
+or conflicted records. Tool output cannot nominate targets. No tracked related state means no call. `progress` sources are not parsed as local
+summary claims: the model must return `project_state` plus `replaces` naming an eligible
+host-nominated ID. Store guards enforce these restrictions even for a malformed model
+batch. No new preference/fact, unrelated target or cross-origin overwrite is allowed.
+The prompt requires evidence for each outcome and warns that commit/test success is not
+push success, assistant reports are not proof, and failures/unfinished clauses must
+remain. Outputs stay **provisional**: this is not independent success verification.
+
+One qualified turn may add one normal background call. Mixed explicit-cue/work turns use
+only the cue path; no assistant-only/ordinary-chat polling or startup transcript replay.
+Existing stale records are not guessed complete on upgrade. New observations/compactions
+can retire them; exact-ID correction remains available. An incorporated new observation
+may refresh an unchanged pending state's evidence date. Alias-only enrichment cannot.
 
 ## Model boundary and conservative writes
 
@@ -73,8 +116,12 @@ multiple projects. The prompt requires an explicitly identifiable same subject/f
 preservation of project/resource qualifications; matching cwd alone is not identity.
 
 Output is validated JSON (an outer Markdown fence is tolerated), at most 24,000 bytes
-and 16 claims of 4–480 UTF-16 code units each. Fields are restricted to `kind`, `content`
-and optional `replaces`; malformed claims reject the batch. Unknown, cross-origin, pinned,
+and 16 claims of 4–480 UTF-16 code units each. Fields are restricted to `kind`, `content`,
+optional `replaces` and `searchTerms`. Aliases are at most 8 sanitized strings of 2–64
+characters, with total JSON <=1024 bytes. Malformed claims/aliases reject the batch.
+The prompt asks for concise Chinese/English aliases, never added facts. Existing text
+can gain aliases without changing its provenance/evidence date; correction clears stale
+aliases and undo restores the actual prior metadata. Unknown, cross-origin, pinned,
 stale, duplicate-target and cyclic replacements are rejected transactionally. Only normal
 `stop` completion is accepted, never truncated/tool/error output. Model paths are not
 used for file operations, and model claims remain `provisional`, not awaiting approval.
@@ -97,9 +144,10 @@ explicit controls are available without becoming approval gates for automatic le
 One SQLite database, WAL + FULL synchronous mode and private file permissions.
 `sqlite.ts` selects built-in Bun or Node SQLite, with no external database dependency.
 
-- `memories`: claims, revision/status/layer, source ID, capture origin (`scope`) and hash;
+- `memories`: claims, optional search aliases, revision/status/layer, source ID, capture origin (`scope`) and hash;
   optional `suppressedHashes` carries correction history through legacy annotation.
-- `sources`: sanitized evidence and durable job state/lease/attempt.
+- `sources`: sanitized evidence and durable job state/lease/attempt; `progress` evidence
+  additionally carries a bounded, unique target-ID list.
 - `blocked`: origin-qualified exact-content hashes for forgotten/superseded claims.
 - `events`: actual before/after states, actor, operation timestamp and source/model reason.
 - `metadata`: schema/import marker.
@@ -128,15 +176,19 @@ unrelated local claims remain, but unlearned prose may need a new source.
 Memory reads validate indexed identity/origin/hash against JSON. Undo validates paired,
 unique before/after IDs and only succeeds when the current records still equal the event's
 after state. New records become tombstones rather than being physically erased. Status
-also validates source jobs/history. Unsupported schema versions are rejected before DDL.
+also validates source jobs/history and the schema marker. Unsupported schema versions
+are rejected before DDL. Schema 2 upgrades transactionally to 3 without rewriting
+claims/history or resetting timestamps; the new source/alias contract is validated on read.
 These detect structural corruption, not all well-formed edits by an owner of the database.
 Undo does not clear suppression hashes or reopen jobs. Forget/undo is not secure erasure.
 
 ## Existing data and commands
 
-No migration, copying or marker reset is needed when upgrading the earlier directory-
-filtered 0.2 build. Existing SQLite records, IDs, histories and origin labels stay intact;
-they become eligible for global relevance-based recall, including existing `legacy` claims.
+Earlier 0.2 SQLite records, IDs, histories and origin labels stay intact and become
+eligible for global relevance-based recall, including existing `legacy` claims. The
+schema-2-to-3 marker upgrade requires no data copying, JSONL re-import or manual reset.
+Stop/back up before upgrading, reload all processes sharing the DB, and restore a matching
+backup for rollback; older code must not be pointed at a manually downgraded marker.
 
 Original JSONL memory/action ledgers are imported once, without rewriting originals.
 Invalid JSON/actions halt import rather than losing corrections or reviving forgotten
@@ -159,7 +211,11 @@ replay/migration/corruption/undo/timeout, global recall, topic switching, weak m
 context tails, provenance and cross-origin write guards. The real-Pi RPC test uses a
 loopback fake OpenAI-compatible model: two automatic updates in one directory, then a
 fresh Pi process/session in another directory to verify recall, contextual follow-ups,
-topic changes and exact-ID forget. It also verifies model/auth reuse and no approval.
+topic changes, bilingual aliases and exact-ID forget. A real temporary Git repository
+also exercises commit success + push failure through actual tool events and the
+constrained progress-update path. It also verifies model/auth reuse and no approval.
+The [quality validation record](quality-validation.md) records the three-issue follow-up
+and distinguishes synthetic/real-host checks from real-data read-only replay.
 
 Model inference and sanitization are not perfect. Provisional labels, pin/correct/undo
 are recovery controls, not proof of truth. Lexical matching can miss semantic or cross-

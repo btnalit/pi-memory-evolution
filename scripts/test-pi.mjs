@@ -1,7 +1,7 @@
 // Real Pi/Bun hosts and modelRegistry.complete, using only a loopback fake LLM.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, realpathSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +12,9 @@ const dir = mkdtempSync(join(tmpdir(), 'pme-real-pi-'));
 const agentDir = join(dir, 'agent');
 const stateDir = join(agentDir, 'agent-suite', 'memory-evolution');
 const requests = [];
+// The synthetic Git work must not inherit hooks, repo paths, signing or user config.
+const fixtureEnv = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
+	GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_GLOBAL: '/dev/null' };
 const text = (content) => typeof content === 'string' ? content : content.map((c) => c.text ?? '').join('\n');
 const server = createServer(async (req, res) => {
 	try {
@@ -23,17 +26,28 @@ const server = createServer(async (req, res) => {
 		assert.equal(input.model, 'memory-test');
 		assert.equal(req.headers.authorization, 'Bearer synthetic-local-key');
 		let answer = 'Noted.';
+		let toolCall;
 		if (semantic) {
 			assert.ok(!input.tools?.length, 'memory model must not receive tools');
 			const data = JSON.parse(text(input.messages.at(-1).content));
-			const port = data.source.content.includes('7777') ? '7777' : '9999';
-			answer = JSON.stringify({ memories: [{ kind: 'fact', content: `Database port is ${port}.`, ...(data.existing[0] ? { replaces: data.existing[0].id } : {}) }] });
-		}
+			if (data.source.kind === 'progress') {
+				const evidence = JSON.parse(data.source.content);
+				assert.equal(evidence.observations.at(-1).isError, true);
+				assert.match(evidence.observations.at(-1).output, /No configured push destination/i);
+				answer = JSON.stringify({ memories: [{ kind: 'project_state', content: 'Fixture commit created; push pending because no remote is configured.', replaces: data.existing[0].id, searchTerms: ['commit', 'push', '提交', '推送'] }] });
+			} else {
+				const port = data.source.content.includes('7777') ? '7777' : '9999';
+				answer = JSON.stringify({ memories: [{ kind: 'fact', content: `Database port is ${port}.`, ...(data.existing[0] ? { replaces: data.existing[0].id } : {}), searchTerms: ['database', 'port', '数据库', '端口', 'service endpoint'] }] });
+			}
+		} else if (input.messages.at(-1).role === 'user' && text(input.messages.at(-1).content).includes('Commit fixture changes and push them.')) {
+			const git = 'git -c core.hooksPath=/dev/null -c commit.gpgsign=false -c user.name=Fixture -c user.email=fixture@example.invalid';
+			toolCall = { index: 0, id: 'fixture-commit', type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command: `${git} add fixture.txt && ${git} commit -m fixture-checkpoint && ${git} push`, timeout: 15 }) } };
+		} else if (input.messages.at(-1).role === 'tool') answer = 'A local commit was created, but push failed; it is still pending.';
 		const digest = system.includes('# Pi Memory\n') ? system.slice(system.lastIndexOf('# Pi Memory\n')) : '';
 		requests.push({ semantic, digest });
 		res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
 		const chunk = (delta, finish_reason, usage) => `data: ${JSON.stringify({ id: 'test', object: 'chat.completion.chunk', created: 1, model: 'memory-test', choices: [{ index: 0, delta, finish_reason }], ...(usage ? { usage } : {}) })}\n\n`;
-		res.end(chunk({ role: 'assistant', content: answer }, null) + chunk({}, 'stop', { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 }) + 'data: [DONE]\n\n');
+		res.end(chunk(toolCall ? { role: 'assistant', tool_calls: [toolCall] } : { role: 'assistant', content: answer }, null) + chunk({}, toolCall ? 'tool_calls' : 'stop', { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 }) + 'data: [DONE]\n\n');
 	} catch (error) { if (!res.destroyed && !res.headersSent) { res.writeHead(500); res.end(String(error)); } }
 });
 let child;
@@ -63,8 +77,8 @@ async function stopChild() {
 }
 async function startChild(cwd) {
 	output = ''; errors = ''; childClosed = false; processError = undefined;
-	child = spawn(process.env.PI_TEST_BINARY ?? 'pi', ['--mode', 'rpc', '--no-session', '--no-extensions', '--no-tools', '-e', fileURLToPath(new URL('../src/index.ts', import.meta.url))], {
-		cwd, env: { ...process.env, HOME: dir, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1', PI_SUBAGENT_AGENT_ID: '' }, stdio: ['pipe', 'pipe', 'pipe'],
+	child = spawn(process.env.PI_TEST_BINARY ?? 'pi', ['--mode', 'rpc', '--no-session', '--no-extensions', '--tools', 'bash', '-e', fileURLToPath(new URL('../src/index.ts', import.meta.url))], {
+		cwd, env: { ...fixtureEnv, HOME: dir, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1', PI_SUBAGENT_AGENT_ID: '' }, stdio: ['pipe', 'pipe', 'pipe'],
 	});
 	child.on('error', (error) => { processError = error; });
 	child.stdin.on('error', (error) => { processError = error; });
@@ -111,6 +125,8 @@ try {
 	assert.ok(recalled.includes(realpathSync(projectA)), 'origin must follow the claim, not the current cwd');
 	assert.ok(recalled.includes(active[0].sourceEntryId));
 	assert.ok(Buffer.byteLength(recalled) <= 2048);
+	assert.match(await ask('数据库端口是多少？'), /7777/, 'Chinese query must retrieve the English fact');
+	assert.match(await ask('service endpoint'), /7777/, 'model search aliases must work in the real Bun host');
 	assert.match(await ask('继续'), /7777/, 'actual active user context must resolve a followup');
 	assert.equal(await ask('Kubernetes networking'), '');
 	assert.equal(await ask('继续'), '', 'topic switch must not revive the old database topic');
@@ -120,8 +136,23 @@ try {
 	await waitFor(() => store.readMemories().every((m) => m.status === 'forgotten'));
 	assert.equal(await ask('What is the database port?'), '');
 	assert.equal(requests.filter((r) => r.semantic).length, 2);
-	assert.equal(requests.filter((r) => !r.semantic).length, 8);
-	console.log('PASS: real Pi default model/auth, automatic replacement, fresh cross-directory session recall, contextual followups, topic switch, provenance, forget, no approval.');
+	assert.equal(requests.filter((r) => !r.semantic).length, 10);
+
+	// Real local Git commit + intentionally failed push, not an assistant-only success claim.
+	execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'init', '-b', 'main'], { cwd: projectB, env: { ...fixtureEnv, HOME: dir }, stdio: 'pipe' });
+	writeFileSync(join(projectB, 'fixture.txt'), 'Synthetic test data only.\n');
+	store.capture({ id: 'fixture-state', scope: realpathSync(projectB), kind: 'summary', content: '## Progress\n- Fixture changes are not committed or pushed.', createdAt: new Date().toISOString() });
+	store.finishEvolution(store.beginEvolution('fixture-state'), [], 'fixture-seed');
+	const oldProgress = store.readMemories().find((m) => m.kind === 'project_state' && m.status !== 'forgotten');
+	await ask('Commit fixture changes and push them.');
+	await waitFor(() => store.readMemories().some((m) => m.sourceEntryId.startsWith('progress:') && m.status !== 'forgotten'));
+	assert.equal(store.readMemories().find((m) => m.id === oldProgress.id).status, 'forgotten');
+	const progressDigest = await ask('Fixture commit push status?');
+	assert.match(progressDigest, /commit created; push pending/);
+	assert.ok(!progressDigest.includes('are not committed'));
+	assert.equal(requests.filter((r) => r.semantic).length, 3);
+	assert.equal(requests.filter((r) => !r.semantic).length, 13);
+	console.log('PASS: real Pi model/auth, cross-session recall, contextual followups, topic switch, provenance, forget, tool-backed progress update, failed push not called success, no approval.');
 } finally {
 	store?.close();
 	await stopChild();

@@ -6,6 +6,8 @@ export interface Claim {
 	content: string;
 	/** Existing memory replaced by this claim; absent means addition. */
 	replaces?: string;
+	/** Optional bilingual search aliases; not additional factual claims. */
+	searchTerms?: string[];
 }
 
 const RULES: [MemoryKind, RegExp][] = [

@@ -29,6 +29,11 @@ Development is on `main`; this version has not yet been tagged or published to n
 - Bounded active-user context for vague follow-ups, without assistant/tool/digest feedback
 - Origin/source labels in injected claims; global list/search/history/retry and an optional `list here` view
 - Real-Pi tests that restart in another directory to verify cross-session recall, topic changes and forget
+- Word/concept retrieval with query coverage, document-frequency weighting, weak-result cutoffs and literal path handling
+- Bounded bilingual `searchTerms`, validated/persisted/undoable without refreshing evidence dates
+- Tool-backed completed-work observations that may only replace host-nominated existing project states
+- Schema 2 → 3 marker upgrade preserving existing records/history; older builds require a matching backup for rollback
+- Real-Pi bilingual/alias and temporary Git commit + failed-push tests, with no live model charges
 
 ### Fixed
 
@@ -48,6 +53,11 @@ Development is on `main`; this version has not yet been tagged or published to n
 - Cwd-restricted recall that contradicted the intended cross-session memory behavior
 - Weak matches such as `有没有问题` selecting `没有 CI`, and context-free continuation pulling arbitrary recent claims
 - Recall deduplication hiding distinct same-text facts from different origins
+- Weak secondary results promoted by CJK fragments, path-component words and insufficient relevance coverage
+- Current-cwd tie preference; source labels are not authority or verification weights
+- Common Chinese/English memory-boundary questions missing the actual user preference
+- Ordinary completed work not reaching evolution, leaving tracked project progress stale until compaction
+- Corrections retaining search aliases from old content, and forgetting a target leaving queued progress observers eligible
 
 ## Legacy 0.1 history
 

@@ -4,7 +4,9 @@ import { join, resolve } from "node:path";
 import { isSubagentProcess } from "./child-process.ts";
 import { MemoryStore, type MemoryAction } from "./memory/memory-store.ts";
 import { recallQuery, selectRelevantMemories } from "./memory/retriever.ts";
+import { features } from "./memory/search.ts";
 import { recentUserMessages } from "./adapter/session-context.ts";
+import { progressObservation } from "./adapter/progress-observation.ts";
 import { buildRuntimeDigest } from "./injector/digest.ts";
 import { evolve } from "./memory/evolution.ts";
 import { clipBytes, fingerprint, redact } from "./memory/privacy.ts";
@@ -82,11 +84,28 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 			const id = `user:${ctx.sessionManager.getSessionId()}:${message.timestamp}:${fingerprint(redact(content))}`;
 			if (getStore().capture({ id, scope: scopeOf(ctx), kind: "user", content, createdAt: new Date(message.timestamp).toISOString() })) void enqueue(id, ctx);
 		}
+		const observed = progressObservation(event.messages, ctx.sessionManager.getSessionId());
+		// Explicit memory cues keep their existing path; don't spend a second call or
+		// race two sources over the same targets for a mixed cue/work turn.
+		if (!observed || MEMORY_CUE.test(observed.userText)) return;
+		const scope = scopeOf(ctx);
+		const query = recallQuery(observed.userText, recentUserMessages(ctx));
+		const candidates = getStore().readMemories(scope).filter((m) => m.kind === "project_state" && m.layer !== "pinned");
+		const paths = [...features(observed.queryHints)].filter((word) => word.startsWith("literal:") && word.includes("/"));
+		// Shell flags/code are not conversational query terms. Qualified operation
+		// paths form a separate nomination lane rather than diluting query coverage.
+		// Fresh evidence may update a state that has aged out of ordinary recall.
+		const nominate = (text: string, limit: number) => selectRelevantMemories(candidates, text, limit, Date.now(), { includeExpiredProjectState: true });
+		const targets = [...new Set([...paths.slice(-8).flatMap((path) => nominate(path.slice(8), 2)),
+			...nominate(query, 8)].map((m) => m.id))].slice(0, 8);
+		if (!targets.length) return;
+		const { userText: _request, queryHints: _hints, ...source } = observed;
+		if (getStore().capture({ ...source, scope, targets })) void enqueue(source.id, ctx);
 	}));
 	pi.on("before_agent_start", guard((event, ctx) => {
 		const query = recallQuery(event.prompt, recentUserMessages(ctx));
 		if (!query) return;
-		const selected = selectRelevantMemories(getStore().readMemories(), query, 3, Date.now(), scopeOf(ctx));
+		const selected = selectRelevantMemories(getStore().readMemories(), query);
 		const digest = buildRuntimeDigest(selected, query);
 		if (digest) return { systemPrompt: `${event.systemPrompt}\n\n${digest}` };
 	}));

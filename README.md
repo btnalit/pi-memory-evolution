@@ -3,7 +3,7 @@
 Automatic cross-session memory for Pi, recalled by topic from any working directory. **No owner approval, proposal queue, or manual execution plans.**
 
 ```text
-compaction / explicit user correction
+compaction / explicit user correction / completed work observations
     → local extraction
     → automatic consolidation with Pi's active model
     → transactional memory update
@@ -57,7 +57,16 @@ from 0.1; see [Migration](#migration-from-01) and [Recovery](#recovery-and-troub
   facts, preferences, decisions or project-state claims using recognizable headings.
 - Explicit user statements containing cues such as `remember`, `prefer`, `记住`,
   `偏好`, `纠正`, `不对`, `以后`, or `不要` also trigger learning, without waiting for
-  another compaction. Ordinary messages, assistant replies and tool results do not.
+  another compaction. Assistant/tool text never becomes a user memory instruction.
+- A completed, non-cue work turn (commit/push/fix/test/review, etc.) can update existing
+  related project-state memories without waiting for compaction. It needs linked tool
+  calls/results and a normal final assistant response. The extension saves bounded,
+  sanitized observations, including failure flags, and nominates at most 8 existing
+  unpinned project-state IDs from that capture origin, including states aged out of recall.
+  Forgotten/conflicted states stay excluded. The model can only update those
+  states, not create preferences or unrelated facts from tool output. Mere requests or
+  assistant-only success claims do not trigger this path. Mixed explicit-cue/work turns
+  retain the existing cue path, without a second progress call.
 - Each processing attempt makes at most one background model call, using up to 32
   recently updated active memories from that source's capture origin. This is a
   conservative automatic-replacement safeguard, **not a recall restriction**.
@@ -78,21 +87,34 @@ from 0.1; see [Migration](#migration-from-01) and [Recovery](#recovery-and-troub
   their 60-second lease expires; there is no timer that automatically polls/retries them.
 - Recall searches **the whole memory database**, including previous sessions, other
   directories and existing legacy claims. No project-directory startup or manual adoption
-  is needed. Matching uses literal/identifier tokens and CJK bigrams locally, without an LLM.
+  is needed. Matching uses exact literals, word segmentation and weighted topic coverage
+  locally, without a model call. Paths/filenames do not earn extra votes for their component
+  words; for example, a repository named `pi-memory-evolution` is not itself evidence
+  about cross-session memory.
 - Vague follow-ups such as `继续` or `这个有问题` use the nearest identifiable topic from
   recent user messages in the active session branch. Explicit new topics do not inherit
   unrelated old topics. Assistant/tool/injected text is not used as the topic source.
   A fresh session saying only `继续` has no identifiable topic and injects nothing; naming
   the topic makes related memories available regardless of their original directory.
-- Common words such as `没有` or `现在`, recency, pinning or cwd alone cannot trigger recall.
+- Query coverage, document-frequency weights, a relative relevance cutoff and redundant-
+  facet filtering reject weak secondary matches. Source IDs and current cwd carry no
+  authority bonus; provenance labels do not mean verification. Pinning/dates only break
+  relevance ties. Common words such as `没有` or `现在` cannot trigger recall.
   At most three claims fit within **2048 UTF-8 bytes**, with origin/source labels and
   non-truncatable trust guidance. Fewer matches means fewer claims, not padding with recent
   records. Identical content from different origins retains separate provenance.
   Unpinned project-state claims age out after seven days; pinned claims do not.
+- Common Chinese/English concepts are normalized locally for existing records. Evolution
+  can add up to 8 validated bilingual `searchTerms` per claim, extending matching without
+  changing its factual text or adding a recall-time translation call. Aliases alone do
+  not refresh evidence dates. This is bounded bilingual support, not universal translation.
 
 A model call may incur the usual charges of your active provider. These background
 calls are not assistant turns and their usage is not added to Pi's session token totals.
-There is no additional call on ordinary recall. Model mistakes remain possible; use
+There is no additional call on ordinary recall. Eligible work turns may now incur one
+additional background call each; no related tracked state or no tool observation means
+no progress call. Failed attempts are not automatically retried in a loop. Model mistakes
+remain possible; tool observations and model-generated aliases are not proof of truth. Use
 history, correction, pinning and undo rather than treating generated claims as verified facts.
 
 ## Local storage and provenance
@@ -118,7 +140,8 @@ forgetting a derived claim cannot expose it again through its parent summary.
 The stored `scope` field records capture origin (canonical cwd, not an inferred project
 identity). It is retained for provenance and conservative write protection, not eligibility
 for recall. An origin can cover multiple projects; facts must retain explicit subject names
-where available. Origin names help matching and current cwd only breaks relevance ties.
+where available. Explicit origin identifiers can help a named-context query at low weight;
+current cwd, `legacy` labels and source IDs do not boost a claim's authority or relevance.
 
 Global recall does **not** mean global rewriting: automatic replacement candidates remain
 within the source origin, and the model must identify the same subject/fact, not just a
@@ -173,7 +196,10 @@ only its explicit query, whereas automatic recall can resolve follow-ups from re
 user context. Pin protects against automatic replacement/age expiry,
 not manual edits, and does not force an unrelated record into every prompt. Pin/unpin
 and adoption preserve the stored evidence date; undo restores the prior date. These
-bookkeeping actions do not restart the seven-day project-state recall window.
+bookkeeping actions do not restart the seven-day project-state recall window. Alias-only
+model enrichment also preserves that date. A new, explicitly incorporated progress
+observation can refresh it, even if the observed state is still unchanged/pending.
+Manual correction clears old search aliases rather than attaching them to new content.
 
 Undo reverses claim changes only when the affected records have not changed since;
 it is not a database rollback. Suppression hashes remain, and jobs are not reopened.
@@ -198,9 +224,12 @@ remain available in the original JSONL but are not injected as claims. New impor
 preserve unchanged children of corrected summaries and carry superseded-content hashes
 when corrected legacy claims are adopted into a project.
 
-**Upgrading from the earlier directory-scoped 0.2 development build:** existing SQLite
-records, IDs, histories and origin labels remain unchanged. No copying, marker reset or
-re-import is needed; they are immediately eligible for global relevance-based recall.
+**Upgrading from earlier 0.2 development builds:** stop Pi and back up the state directory
+first, then update/reload all Pi processes sharing it. Schema marker **2 upgrades to 3**
+transactionally for the new observation/alias contract; existing records, IDs, histories
+and evidence dates remain unchanged. No copying, manual marker reset or JSONL re-import
+is needed. Older builds reject schema 3; rollback requires a matching backup, not editing
+the marker. Existing records are immediately eligible for global relevance-based recall.
 Legacy claims previously excluded by cwd filtering become eligible too. This shares
 relevant stored claims with the active Pi session/provider, not raw session archives.
 
@@ -223,7 +252,12 @@ JSONL, not changes made in the new database.
   Name the topic if the current session has no recent user context; cwd is not a recall
   gate. Forgotten/conflicted records and unpinned project state older than seven days
   are not recalled. Matching remains lexical, not a guarantee of semantic or cross-language
-  equivalence; vague references can be missed.
+  equivalence; vague references and languages/terms outside the concept map or learned
+  aliases can still be missed.
+- **Old progress still shown:** age/weight does not prove a task finished. A new eligible
+  work observation or compaction can update tracked progress; upgrading alone does not
+  invent completion or replay old tool transcripts. Inspect `/memory show <id>` and
+  history, or correct the record explicitly when you know the current state.
 - **Pending/failed jobs:** ensure Pi 0.85+ has a working current model/authentication,
   then `/memory evolve`. After a crash, wait for the 60-second lease to expire. Repeat
   the command to process more eligible sources; successful jobs cannot be forced to
@@ -239,7 +273,7 @@ JSONL, not changes made in the new database.
   stopped; do not mix one backup's database with another's WAL/SHM files.
 
 Diagnostics intentionally do not echo provider error bodies, which may contain secrets.
-`SQLite ok` checks database structure/record validity, not the truth of model claims.
+`SQLite ok (schema 3)` checks database structure/record validity, not the truth of model claims.
 
 ## Development
 
@@ -252,10 +286,14 @@ npm run test:pi           # optional: real installed Pi, loopback fake model, no
 Tests use temporary directories and synthetic data. `test:pi` accepts
 `PI_TEST_BINARY=/path/to/pi`; it verifies real host loading, reuse of the active model
 and authentication, automatic replacement, fresh cross-directory sessions, contextual
-follow-ups, topic switches, provenance and forget, without approval dialogs. No GitHub
+follow-ups, topic switches, bilingual aliases, provenance and forget, without approval
+dialogs. It also executes a real Git commit in a temporary repository and an intentionally
+failed push (no remote), verifying the progress observation/update path using a fake model. No GitHub
 Actions workflow is currently configured; run these checks locally before pushing.
 The real-Pi test uses a fake model, not a live-provider accuracy or multi-day TUI test.
 
 See [docs/design.md](docs/design.md) for invariants and [CHANGELOG.md](CHANGELOG.md)
 for the previous architecture and the 0.2 simplification. The follow-up
 [code review](docs/review-0.2.md) records reproduced defects, fixes and validation limits.
+The later [quality validation](docs/quality-validation.md) covers relevance, bilingual
+recall and completed-work progress updates.

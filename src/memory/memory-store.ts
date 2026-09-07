@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { extractStructuredMemories, type Claim } from "./extractor.ts";
 import { loadLegacyMemories } from "./legacy.ts";
 import { clipBytes, fingerprint, redact } from "./privacy.ts";
+import { validSearchTerms } from "./search.ts";
 
 export type MemoryKind = "fact" | "preference" | "decision" | "project_state";
 export interface DurableMemory {
@@ -21,13 +22,16 @@ export interface DurableMemory {
 	status: "provisional" | "confirmed" | "forgotten" | "conflicted";
 	/** Exact superseded content, carried across explicit legacy adoption. */
 	suppressedHashes?: string[];
+	searchTerms?: string[];
 }
 export interface Source {
 	id: string;
 	scope: string;
-	kind: "summary" | "user";
+	kind: "summary" | "user" | "progress";
 	content: string;
 	createdAt: string;
+	/** Host-selected existing project-state IDs; tools cannot nominate their own targets. */
+	targets?: string[];
 }
 export interface EvolutionRun {
 	source: Source;
@@ -66,7 +70,7 @@ export class MemoryStore {
 			this.db.exec("PRAGMA busy_timeout=5000");
 			if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").get()) {
 				const schema = this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get();
-				if (schema && schema.value !== "2") throw new Error("Unsupported memory database version");
+				if (schema && !["2", "3"].includes(String(schema.value))) throw new Error("Unsupported memory database version");
 			}
 			this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
 				CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -79,11 +83,14 @@ export class MemoryStore {
 				CREATE TABLE IF NOT EXISTS blocked (scope TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(scope,hash));`);
 			this.transaction(() => {
 				const schema = this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get();
-				if (schema && schema.value !== "2") throw new Error("Unsupported memory database version");
+				if (schema && !["2", "3"].includes(String(schema.value))) throw new Error("Unsupported memory database version");
 				if (!schema) {
 					const legacy = loadLegacyMemories(stateDir);
 					if (legacy.length) this.record("migration", "Import legacy JSONL; originals unchanged", legacy, "legacy");
-					this.db.prepare("INSERT INTO metadata VALUES ('schema','2')").run();
+					this.db.prepare("INSERT INTO metadata VALUES ('schema','3')").run();
+				} else if (schema.value === "2") {
+					// New source kind/metadata contract; do not replay imports or rewrite facts.
+					this.db.prepare("UPDATE metadata SET value='3' WHERE key='schema'").run();
 				}
 			});
 		} catch (error) { this.db.close(); throw error; }
@@ -109,7 +116,8 @@ export class MemoryStore {
 			cached = { version, memories };
 			this.cache.set(key, cached);
 		}
-		return cached.memories.map((m) => ({ ...m, ...(m.suppressedHashes ? { suppressedHashes: [...m.suppressedHashes] } : {}) }));
+		return cached.memories.map((m) => ({ ...m, ...(m.suppressedHashes ? { suppressedHashes: [...m.suppressedHashes] } : {}),
+			...(m.searchTerms ? { searchTerms: [...m.searchTerms] } : {}) }));
 	}
 	private get(id: string): DurableMemory | undefined {
 		const row = this.db.prepare("SELECT scope,hash,data FROM memories WHERE id=?").get(id);
@@ -146,20 +154,21 @@ export class MemoryStore {
 		for (const row of pending) {
 			if (row.id === keepSource) continue;
 			const source = parseSource(row.data);
-			if (source.id === memory.sourceEntryId || source.content === body || source.content.includes(memory.content)
+			if (source.id === memory.sourceEntryId || source.targets?.includes(memory.id) || source.content === body || source.content.includes(memory.content)
 				|| extractStructuredMemories(source.content, Infinity).some((claim) => fingerprint(claim.content) === hash))
 				this.db.prepare("UPDATE sources SET state='done',lease=0 WHERE id=?").run(source.id);
 		}
 	}
 	private claim(source: Source, item: Claim): DurableMemory | undefined {
 		const content = redact(item.content).trim();
-		if (!MEMORY_KINDS.has(item.kind) || content.length < 4 || content.length > 480 || content.includes("[REDACTED")) throw new Error("Invalid or sensitive claim");
+		if (!validSearchTerms(item.searchTerms) || !MEMORY_KINDS.has(item.kind) || content.length < 4 || content.length > 480 || content.includes("[REDACTED")) throw new Error("Invalid or sensitive claim");
 		const id = fingerprint(JSON.stringify([source.scope, item.kind, content]));
 		if (this.get(id) || this.db.prepare("SELECT 1 FROM blocked WHERE scope=? AND hash=?").get(source.scope, fingerprint(content))) return undefined;
 		// Also respect forgotten legacy records whose ids predate content-addressing.
 		if (this.db.prepare("SELECT 1 FROM memories WHERE scope=? AND hash=?").get(source.scope, fingerprint(content))) return undefined;
 		return { id, kind: item.kind, content, scope: source.scope, sourceEntryId: source.id,
-			createdAt: source.createdAt, updatedAt: source.createdAt, revision: 1, layer: "durable", status: "provisional" };
+			createdAt: source.createdAt, updatedAt: source.createdAt, revision: 1, layer: "durable", status: "provisional",
+			...(item.searchTerms ? { searchTerms: [...new Set(item.searchTerms)] } : {}) };
 	}
 	/** Persist raw evidence + bounded local claims once, atomically. Raw sources are never recalled. */
 	capture(input: Source): boolean {
@@ -191,7 +200,8 @@ export class MemoryStore {
 			const row = this.db.prepare("SELECT data,attempt FROM sources WHERE id=?").get(id)!;
 			const source = parseSource(row.data);
 			if (source.id !== id) throw new Error("Invalid source identity");
-			const memories = this.readMemories(source.scope).filter((m) => m.scope === source.scope && active(m))
+			const memories = this.readMemories(source.scope).filter((m) => m.scope === source.scope && active(m)
+				&& (source.kind !== "progress" || (m.kind === "project_state" && source.targets!.includes(m.id))))
 				.sort((a,b) => Date.parse(b.updatedAt)-Date.parse(a.updatedAt)).slice(0, 32);
 			return { source, attempt: Number(row.attempt), generation: this.generation(source.scope), memories };
 		});
@@ -205,12 +215,28 @@ export class MemoryStore {
 			const stage = (memory: DurableMemory) => {
 				if (![...after.values()].some((m) => active(m) && fingerprint(m.content) === fingerprint(memory.content))) after.set(memory.id, memory);
 			};
+			const annotate = (memory: DurableMemory | undefined, claim: Claim) => {
+				if (!memory || !claim.searchTerms || memory.layer === "pinned") return;
+				const current = after.get(memory.id) ?? memory;
+				const searchTerms = [...new Set(claim.searchTerms)];
+				if (active(current) && JSON.stringify(current.searchTerms) !== JSON.stringify(searchTerms))
+					after.set(memory.id, { ...current, searchTerms, revision: memory.revision + 1 });
+			};
 			for (const claim of claims) {
+				if (!validSearchTerms(claim.searchTerms)) throw new Error("Invalid search terms");
+				if (run.source.kind === "progress" && (claim.kind !== "project_state" || !claim.replaces || !run.source.targets!.includes(claim.replaces)))
+					throw new Error("Progress observations may only update nominated project-state records");
 				if (claim.replaces) {
 					const old = run.memories.find((m) => m.id === claim.replaces);
-					if (!old || old.scope !== run.source.scope || targets.has(old.id) || old.layer === "pinned" || Date.parse(old.updatedAt) > Date.parse(run.source.createdAt)) throw new Error("Invalid replacement target");
+					if (!old || old.scope !== run.source.scope || targets.has(old.id) || old.layer === "pinned"
+						|| (run.source.kind === "progress" && old.kind !== "project_state")
+						|| Date.parse(old.updatedAt) > Date.parse(run.source.createdAt)) throw new Error("Invalid replacement target");
 					targets.add(old.id);
-					if (fingerprint(old.content) === fingerprint(claim.content)) continue;
+					if (fingerprint(old.content) === fingerprint(claim.content)) {
+						if (run.source.kind === "progress") after.set(old.id, { ...old, sourceEntryId: run.source.id,
+							updatedAt: run.source.createdAt, status: "provisional", revision: old.revision + 1 });
+						annotate(old, claim); continue;
+					}
 					const next = this.claim(run.source, claim);
 					// Local extraction may already have added the replacement from this source.
 					const existing = run.memories.find((m) => m.id !== old.id && m.kind === claim.kind && fingerprint(m.content) === fingerprint(claim.content));
@@ -218,10 +244,11 @@ export class MemoryStore {
 					if (existing && claims.some((c) => c.replaces === existing.id)) throw new Error("Cyclic memory replacement");
 					this.block(old, run.source.id);
 					after.set(old.id, { ...old, status: "forgotten", updatedAt: run.source.createdAt, revision: old.revision + 1 });
-					if (next) stage(next);
+					if (next) stage(next); else annotate(existing, claim);
 				} else {
 					const next = this.claim(run.source, claim);
 					if (next) stage(next);
+					else annotate(run.memories.find((m) => m.kind === claim.kind && fingerprint(m.content) === fingerprint(claim.content)), claim);
 				}
 			}
 			const event = this.record("model", `${model}: ${run.source.id}`, [...after.values()], run.source.scope);
@@ -251,7 +278,7 @@ export class MemoryStore {
 				case "correct": {
 					const content = redact(value ?? "").trim();
 					if (content.length < 4 || content.length > 480 || content.includes("[REDACTED")) throw new Error("Correction must be 4–480 characters without credentials");
-					next = { ...next, content, status: "confirmed" }; break;
+					next = { ...next, content, status: "confirmed", searchTerms: undefined }; break;
 				}
 				case "forget": next.status = "forgotten"; break;
 				case "pin": if (!active(old)) throw new Error("Resolve/correct the memory first"); next.layer = "pinned"; break;
@@ -292,6 +319,7 @@ export class MemoryStore {
 		});
 	}
 	status(): string {
+		if (this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get()?.value !== "3") throw new Error("Invalid memory schema marker");
 		const health = this.db.prepare("PRAGMA quick_check").get();
 		if (health?.quick_check !== "ok") throw new Error("Memory database integrity check failed");
 		for (const row of this.db.prepare("SELECT id,data,state,attempt,lease FROM sources").iterate()) {
@@ -301,7 +329,7 @@ export class MemoryStore {
 		}
 		for (const row of this.db.prepare("SELECT id,scope,data FROM events").iterate()) parseEvent(row.data, row.id, row.scope);
 		const jobs = this.db.prepare("SELECT state,COUNT(*) AS n FROM sources GROUP BY state").all();
-		return `${this.readMemories().length} memories; ${jobs.map((j) => `${j.state}=${j.n}`).join(", ") || "no sources"}; SQLite ok`;
+		return `${this.readMemories().length} memories; ${jobs.map((j) => `${j.state}=${j.n}`).join(", ") || "no sources"}; SQLite ok (schema 3)`;
 	}
 }
 
@@ -309,7 +337,9 @@ function isSource(value: unknown): value is Source {
 	if (!value || typeof value !== "object") return false;
 	const s = value as Source;
 	return typeof s.id === "string" && !!s.id.trim() && typeof s.scope === "string" && !!s.scope.trim()
-		&& ["summary", "user"].includes(s.kind) && typeof s.content === "string"
+		&& ["summary", "user", "progress"].includes(s.kind) && typeof s.content === "string"
+		&& (s.kind === "progress" ? (Array.isArray(s.targets) && s.targets.length > 0 && s.targets.length <= 8
+			&& s.targets.every((id) => typeof id === "string" && !!id.trim()) && new Set(s.targets).size === s.targets.length) : s.targets === undefined)
 		&& typeof s.createdAt === "string" && Number.isFinite(Date.parse(s.createdAt));
 }
 function parseSource(data: unknown): Source {
@@ -334,6 +364,7 @@ function isMemory(value: unknown): value is DurableMemory {
 	const m = value as DurableMemory;
 	return typeof m.id === "string" && !!m.id && MEMORY_KINDS.has(m.kind) && typeof m.content === "string" && !!m.content.trim()
 		&& typeof m.scope === "string" && !!m.scope && typeof m.sourceEntryId === "string" && !!m.sourceEntryId
+		&& validSearchTerms(m.searchTerms)
 		&& (m.suppressedHashes === undefined || (Array.isArray(m.suppressedHashes) && m.suppressedHashes.every((h) => typeof h === "string" && /^[a-f0-9]{24}$/u.test(h))))
 		&& typeof m.createdAt === "string" && typeof m.updatedAt === "string"
 		&& Number.isFinite(Date.parse(m.createdAt)) && Number.isFinite(Date.parse(m.updatedAt))
