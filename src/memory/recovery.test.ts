@@ -92,7 +92,7 @@ test('schema 3 migration adds recovery fields atomically, preserves data and dis
   assert.equal(job(db).failures, 1); assert.equal(job(db).attempt, 1);
   assert.equal(job(db).failed_at, 0); assert.equal(job(db).last_error, 'unknown');
   assert.deepEqual(migrated.readMemories(), records); assert.deepEqual(migrated.history(), history);
-  assert.match(migrated.status(), /schema 4/); assert.match(migrated.status(), /unknown \(legacy\)/);
+  assert.match(migrated.status(), /schema 5/); assert.match(migrated.status(), /unknown \(legacy\)/);
  } finally { migrated.close(); }
 }));
 

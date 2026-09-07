@@ -8,6 +8,10 @@ Development is on `main`; this version has not yet been tagged or published to n
 
 ### Changed
 
+- Evidence-aware self-ranking after lexical gates, with separate host-assigned source weights, type-specific gradual freshness decay and non-cumulative explicit feedback
+- Schema 2/3/4 → 5 transactionally adds feedback receipts without rewriting old memories/history or inventing evidence
+- Withhold weaker proposed replacements and quarantine new conflicting variants instead of overwriting stronger user/tool evidence; fresh tool progress can still supersede prior manually corrected states
+- Short named-attribute queries cannot substitute another subject/attribute after the right answer is suppressed; query-only Chinese `多少` cleanup and numeric-value handling
 - General conversational query planning: separate asking/remembering phrases from the subject, retain current focus across multi-hop user follow-ups, and stop inheritance on explicit/unknown/reset topics
 - Evidence-based IDF for unseen terms, mandatory literal resource constraints, focused-context gates, bounded length normalization, and reduced weight for quoted questions rather than their answers
 - Track redundant facets per origin and evidence kind so a project-state replay note cannot hide a preference/fact answering the same question
@@ -23,6 +27,10 @@ Development is on `main`; this version has not yet been tagged or published to n
 
 ### Added
 
+- Host-assigned evidence basis/method/source/date, bounded evidence and aging labels in injection, separate quality factors in show/explain, lifecycle exclusion diagnostics
+- `/memory feedback <id> useful|unhelpful|accurate|incorrect` and narrow exact-ID user feedback statements, without paid learning calls; replay/late-event protection, quarantine/undo, unchanged evidence clock
+- Read-only `memory_recall` tool for a second explicit-topic lookup during a task, bounded to 3 claims / 2048 bytes with no query persistence in the memory database
+- Core-quality regressions and real Pi tool/feedback/provider-payload round trips with a loopback fake model
 - `/memory explain [query]`: bounded transient recall diagnostics, normalized focus/context, candidate rejection reasons and last automatic injection counts; no query/body history persisted
 - Multi-domain Chinese/English natural-question regressions, learned-alias paraphrases, multi-hop attribute refinement, unknown-topic barriers, quoted-question distractors and real-Pi provider-payload validation
 - Automatic startup and 15-second timer recovery across origins, with persisted 1m/5m/15m/1h backoff and a five-failure per-source cap plus pause warning

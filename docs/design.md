@@ -78,7 +78,11 @@ Named context subject features must match; a concept-only contextual subject nee
 weighted subject coverage. Generic attributes are not subject anchors. Evidence gets mild
 length normalization `0.8 + 0.2 * min(1, 12 / max(1, bodyFeatureCount))`. This cannot bypass
 the subject/coverage gates. Scores below 75% of the best eligible result are rejected.
-Pin/date/ID only break relevance ties. Facet redundancy is tracked per origin **and kind**,
+After these relevance gates, scores are multiplied by separate evidence/freshness/feedback
+factors; pin/date/ID break remaining ties. These are policy weights, not truth probabilities.
+Short queries with one nonnumeric named subject and explicit attributes require both, with
+generic status/progress excluded from the mandatory-attribute check. Explicit origin names
+can still help a named-origin query; attributes require body/alias evidence. Facet redundancy is tracked per origin **and kind**,
 so a project-state mention cannot suppress a factual/preference answer. Exact same-content
 same-origin duplicates are still removed, and distinct origins remain separate.
 There is **no arbitrary recency fallback** or minimum result count.
@@ -99,15 +103,22 @@ languages, short/ambiguous queries and unannotated old records may still be miss
 The digest contains at most 3 claims within 2,048 UTF-8 bytes, with historical-data trust
 guidance reserved first and an explicit warning that selected matches are not the complete
 inventory. Each JSON row includes ID, kind, status, origin, source ID,
-stored update date and a matching excerpt of up to 400 bytes. Oversized metadata labels
+stored update date, evidence basis/method, aging warning, optional explicit accuracy
+assessment and a matching excerpt of up to 400 bytes. The source label uses the current
+evidence source when known (including manual corrections), otherwise the original source ID. Oversized metadata labels
 are clipped with an ellipsis/hash suffix. Origins are provenance hints, not evidence
 that another project's fact applies here. Identical content is deduplicated only within
 one origin: equal port/path text from different contexts can mean different facts.
 
 Forgotten/conflicted claims never recall. Unpinned project-state claims expire from recall
-after 7 days; facts/preferences/decisions have no automatic age deletion. Pin/unpin and
-legacy annotation preserve the evidence date, and undo restores the prior date. Event
-history separately records when an operation occurred.
+after 7 days; facts/preferences/decisions have no automatic age deletion. All kinds have
+bounded gradual freshness decay, with separate half-lives/floors and pin exemption.
+Pin/unpin, legacy annotation, explicit feedback and conflict resolution preserve the evidence
+date, and undo restores the prior date. Event history separately records when an operation occurred.
+
+See [core-quality.md](core-quality.md) for the evidence contract, exact ranking policy,
+weaker-replacement guard, replay-safe feedback and read-only mid-task `memory_recall` tool.
+Neither automatic injection nor tool lookup is counted as evidence/usefulness feedback.
 
 ## Completed-work observations
 
@@ -159,7 +170,12 @@ can gain aliases without changing its provenance/evidence date; correction clear
 aliases and undo restores the actual prior metadata. Unknown, cross-origin, pinned,
 stale, duplicate-target and cyclic replacements are rejected transactionally. Only normal
 `stop` completion is accepted, never truncated/tool/error output. Model paths are not
-used for file operations, and model claims remain `provisional`, not awaiting approval.
+used for file operations, and model claims remain `provisional`, not awaiting approval. Host-assigned evidence types
+cannot be supplied by model output. A weaker proposed replacement is withheld; only that
+source's new variant is quarantined and recorded, never an unrelated existing stronger claim.
+A fresh explicit user statement or linked project-state tool observation can still supersede
+older evidence. Unsupported semantic contradictions without a model `replaces` link are
+not detected globally.
 
 Each attempt uses at most one model call, no tools, an 8,192-output-token cap (clamped
 against a smaller model limit), a fresh request session ID and `cacheRetention: "none"`.
@@ -181,12 +197,16 @@ One SQLite database, WAL + FULL synchronous mode and private file permissions.
 `sqlite.ts` selects built-in Bun or Node SQLite, with no external database dependency.
 
 - `memories`: claims, optional search aliases, revision/status/layer, source ID, capture origin (`scope`) and hash;
-  optional `suppressedHashes` carries correction history through legacy annotation.
+  optional `suppressedHashes` carries correction history through legacy annotation;
+  optional host-assigned `evidence` and last explicit utility/accuracy `feedback` describe
+  provenance and user assessments, never model-generated confidence.
 - `sources`: sanitized evidence and durable job state/lease/attempt, consecutive failure
   count, next retry timestamp, last failure timestamp and a fixed error category;
   `progress` evidence additionally carries a bounded, unique target-ID list.
 - `blocked`: origin-qualified exact-content hashes for forgotten/superseded claims.
 - `events`: actual before/after states, actor, operation timestamp and source/model reason.
+- `feedback_receipts`: exact source-ID/memory-ID idempotency keys, verdict and numeric
+  timestamp, including redundant/late feedback receipts; undo never reopens them.
 - `metadata`: schema/import marker.
 
 The `scope` field records canonical cwd, not an inferred repository/branch/subject identity
@@ -231,8 +251,9 @@ Memory reads validate indexed identity/origin/hash against JSON. Undo validates 
 unique before/after IDs and only succeeds when the current records still equal the event's
 after state. New records become tombstones rather than being physically erased. Status
 also validates source jobs/history and the schema marker. Unsupported schema versions
-are rejected before DDL. Schemas 2/3 upgrade transactionally to 4 without rewriting
-claims/history or resetting evidence timestamps; missing retry columns/indexes are added.
+are rejected before DDL. Schemas 2/3/4 upgrade transactionally to 5 without rewriting
+claims/history or resetting evidence timestamps; missing retry columns/indexes and the
+feedback receipt table are added. Old evidence metadata stays absent/unknown.
 Old failures below the cap are due immediately, with unknown cause/time explicitly labeled.
 The source/alias/retry contract is validated on read.
 These detect structural corruption, not all well-formed edits by an owner of the database.
@@ -242,7 +263,7 @@ Undo does not clear suppression hashes or reopen jobs. Forget/undo is not secure
 
 Earlier 0.2 SQLite records, IDs, histories and origin labels stay intact and become
 eligible for global relevance-based recall, including existing `legacy` claims. The
-schema-2/3-to-4 upgrade requires no data copying, JSONL re-import or manual reset.
+schema-2/3/4-to-5 upgrade requires no data copying, JSONL re-import or manual reset.
 Stop/back up before upgrading, reload all processes sharing the DB, and restore a matching
 backup for rollback; older code must not be pointed at a manually downgraded marker.
 

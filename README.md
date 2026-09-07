@@ -17,7 +17,7 @@ no tools and cannot edit project files, system configuration, skills or its own 
 
 - Pi **0.85+** for semantic evolution via `ctx.modelRegistry.complete(ctx.model, ...)`.
 - Pi's standalone Bun binary, or Node **22.19+** for npm Pi/development (Pi 0.85's minimum).
-- No third-party runtime dependencies: SQLite is built into both runtimes.
+- No separately bundled runtime dependencies: Pi supplies TypeBox; SQLite is built into both runtimes.
 
 `main` is the default development branch. Package version **0.2.0 is unreleased**:
 there is no 0.2.0 release tag or npm publication yet. The old `v0.1.0` tag is historical.
@@ -118,12 +118,15 @@ from 0.1; see [Migration](#migration-from-01) and [Recovery](#recovery-and-troub
   no longer receive the highest rarity weight. Exact paths must match, and a quoted
   question in a replay/incident note is weaker than evidence answering it. Redundancy
   filtering cannot let a project-state note hide a preference of the same origin.
-  Source IDs/cwd have no authority bonus; pinning/dates only break relevance ties.
+  Source IDs/cwd have no authority bonus. After relevance gates, host-assigned evidence,
+  type-specific freshness and explicit feedback order eligible matches; pin/date break remaining ties.
   Common words such as `没有` or `现在` cannot trigger recall.
   At most three claims fit within **2048 UTF-8 bytes**, with origin/source labels and
   non-truncatable trust guidance. Fewer matches means fewer claims, not padding with recent
   records. Identical content from different origins retains separate provenance.
-  Unpinned project-state claims age out after seven days; pinned claims do not.
+  Unpinned project-state claims still age out after seven days; pinning exempts age, not truth checks.
+  Short named-attribute queries require the subject and attribute, rather than substituting
+  another subject/attribute when the correct memory is missing or suppressed.
 - Common Chinese/English concepts are normalized locally for existing records. Evolution
   can add up to 8 validated bilingual `searchTerms` per claim, extending matching without
   changing its factual text or adding a recall-time translation call. Aliases alone do
@@ -137,6 +140,50 @@ no progress call. Automatic retries may add up to four calls per source after th
 failure; every attempt uses the session's then-current model/authentication. Model mistakes
 remain possible; tool observations and model-generated aliases are not proof of truth. Use
 history, correction, pinning and undo rather than treating generated claims as verified facts.
+
+## Evidence, decay and self-ranking
+
+- New claims carry **host-assigned** evidence: `summary`, `user_statement`,
+  `tool_observation` or `manual_correction`, plus extraction method, source ID and date.
+  Model output cannot supply confidence/verification/feedback fields. Old records without
+  this metadata remain `unknown`; migration does not guess their source or certify them.
+- Source appropriateness matters: a user's stated preference is stronger evidence of that
+  preference than a summary; a linked tool observation supports a project state, not a
+  user preference or independent proof of success. A weaker model-proposed replacement
+  is withheld and its new variant quarantined, with history. Current user corrections
+  and new tool-backed project progress can still update automatically; pins remain protected.
+- Freshness decreases smoothly by type: project state fastest, then facts, decisions,
+  preferences. Stable kinds retain a nonzero floor and do not expire. Project states keep
+  the seven-day safety cap; no upgrade revives old states. Read/search/injection, pinning,
+  alias enrichment, feedback and conflict resolution do not reset the evidence clock.
+- Ranking keeps **relevance, evidence, freshness and feedback separate**. Quality cannot
+  rescue an unrelated/weak lexical match. `useful` is not `accurate`; neither is independent
+  verification. Repeated retrieval or repeated positive feedback earns no cumulative boost.
+  `/memory show` and `/memory explain` expose the factors. Injected claims include evidence
+  labels and an aging warning, not a fictitious probability of truth.
+
+Optional `/memory feedback <id> useful|unhelpful|accurate|incorrect` records a precise user
+verdict without a model call. `unhelpful` modestly lowers utility, not factual credibility.
+`incorrect` quarantines the claim and same-origin exact duplicates, retires known pending
+repeats, and is undoable. Use `correct` for new content or `resolve` to restore a disputed
+claim; conflict/resolution does not rejuvenate old evidence. Feedback with a timestamp
+older than the current content's evidence date is ignored. Receipts prevent replay after restart/undo; identical repeated verdicts do not
+accumulate weight. Feedback receipts, like history, are not securely erased by forget.
+Whole user messages `记忆 <24-hex-id> 有用。` / `memory <24-hex-id> incorrect` also work;
+quotes, questions, assistant/tool text and vague “wrong” do not identify a feedback target.
+Ordinary natural-language corrections continue through automatic model evolution.
+
+The model also gets a **read-only `memory_recall` tool** for missing background discovered
+mid-task. It takes an explicit topic and returns up to three relevant claims / 2048 UTF-8
+bytes, using the same lifecycle and quality gates. It does not modify memory, persist a
+query in the memory DB, or make an additional retrieval-model call (normal agent tool
+turns still incur normal usage and appear in the Pi transcript). Automatic per-user-turn
+injection remains the default; the model chooses whether a second lookup is needed.
+Explicit tool allowlists must include `memory_recall`; the extension never overrides them.
+
+These are bounded evidence policies, not learned semantic verification, independent-source
+corroboration, or a universally accurate self-evolving ranker. See
+[core quality design and validation](docs/core-quality.md) for formulas and remaining gaps.
 
 ## Local storage and provenance
 
@@ -197,6 +244,7 @@ These are optional direct controls, **not approval gates**:
 /memory history                      # last 10 events across all origins
 /memory evolve                       # optional one-off retry, overriding delay/failure limit
 /memory undo <event-id>               # reverse actual changes, if not modified since
+/memory feedback <id> <verdict>       # useful | unhelpful | accurate | incorrect
 /memory correct <id> <replacement>    # literal replacement, 4–480 characters
 /memory forget <id>
 /memory pin <id>
@@ -223,7 +271,7 @@ It retains at most 8,000 bytes (+ truncation marker) in memory, not a database/s
 no memory bodies or provider errors are included. It resets on reload and is not proof
 of what the model subsequently understood. Empty/no-match turns replace the old snapshot. Pin protects against automatic replacement/age expiry,
 not manual edits, and does not force an unrelated record into every prompt. Pin/unpin
-and adoption preserve the stored evidence date; undo restores the prior date. These
+and adoption, feedback and conflict resolution preserve the stored evidence date; undo restores the prior date. These
 bookkeeping actions do not restart the seven-day project-state recall window. Alias-only
 model enrichment also preserves that date. A new, explicitly incorporated progress
 observation can refresh it, even if the observed state is still unchanged/pending.
@@ -253,12 +301,13 @@ preserve unchanged children of corrected summaries and carry superseded-content 
 when corrected legacy claims are adopted into a project.
 
 **Upgrading from earlier 0.2 development builds:** stop Pi and back up the state directory
-first, then update/reload all Pi processes sharing it. Schema markers **2 and 3 upgrade
-transactionally to 4**, adding durable retry diagnostics/scheduling alongside the observation/
-alias contract; existing records, IDs, histories and evidence dates remain unchanged.
+first, then update/reload all Pi processes sharing it. Schema markers **2, 3 and 4 upgrade
+transactionally to 5**, adding replay-safe feedback receipts and the optional evidence/feedback
+contract (plus missing retry fields for older schemas). Existing records, IDs, histories and
+evidence dates remain unchanged. Missing evidence stays unknown, with no fabricated backfill.
 Existing failures below the limit become automatically eligible; their old error cause/time
 remain labeled unknown rather than invented. No copying, manual marker reset or JSONL
-re-import is needed. Older builds reject schema 4; rollback requires a matching backup,
+re-import is needed. Older builds reject schema 5; rollback requires a matching backup,
 not editing the marker. Existing records are immediately eligible for global relevance-based recall.
 Legacy claims previously excluded by cwd filtering become eligible too. This shares
 relevant stored claims with the active Pi session/provider, not raw session archives.
@@ -309,7 +358,7 @@ JSONL, not changes made in the new database.
   stopped; do not mix one backup's database with another's WAL/SHM files.
 
 Diagnostics intentionally do not echo provider error bodies, which may contain secrets.
-`SQLite ok (schema 4)` checks database structure/record validity, not the truth of model claims.
+`SQLite ok (schema 5)` checks database structure/record validity, not the truth of model claims.
 
 ## Development
 

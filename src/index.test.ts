@@ -11,12 +11,12 @@ import type { CompleteMemory } from './adapter/pi-api.ts';
 
 async function fixture(fn:(f:any)=>Promise<void>,complete?:CompleteMemory,env:NodeJS.ProcessEnv={},timing:Pick<MemoryEvolutionDependencies,'pollMs'|'timeoutMs'>={}) {
 	const dir=mkdtempSync(join(tmpdir(),'pme-index-v2-'));const stateDir=join(dir,'state');const cwd=join(dir,'project');mkdirSync(cwd);
-	const hooks=new Map<string,any>();let command:any;const notifications:string[]=[];
-	const pi={on:(event:string,handler:any)=>hooks.set(event,handler),registerCommand:(name:string,options:any)=>{assert.equal(name,'memory');command=options.handler;}} as unknown as ExtensionAPI;
+	const hooks=new Map<string,any>();const tools=new Map<string,any>();let command:any;const notifications:string[]=[];
+	const pi={on:(event:string,handler:any)=>hooks.set(event,handler),registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand:(name:string,options:any)=>{assert.equal(name,'memory');command=options.handler;}} as unknown as ExtensionAPI;
 	const ctx={cwd,hasUI:true,sessionManager:{getSessionId:()=> 'session-uuid'},ui:{notify:(text:string)=>notifications.push(text)}} as unknown as ExtensionContext;
 	await memoryEvolution(pi,{stateDir,env,complete:complete??(async()=>({model:'test/active',text:'{"memories":[]}'})),timeoutMs:30,...timing});
 	const call=async(name:string,event:any={})=>{const result=await hooks.get(name)?.(event,ctx);await new Promise((r)=>setImmediate(r));return result;};
-	try{await fn({dir,stateDir,cwd,hooks,ctx,notifications,command:(args:string)=>command(args,ctx),call});}
+	try{await fn({dir,stateDir,cwd,hooks,tools,ctx,notifications,command:(args:string)=>command(args,ctx),call});}
 	finally{await hooks.get('session_shutdown')?.({},ctx);rmSync(dir,{recursive:true,force:true});}
 }
 const compact=()=>({compactionEntry:{id:'entry1',timestamp:new Date().toISOString(),summary:'## Critical Context\n- Database port is 5432.'}});
@@ -39,7 +39,7 @@ test('compaction automatically persists and recall follows the topic across dire
 	assert.equal(existsSync(join(stateDir,'proposal_queue.yaml')),false);
 }));
 test('followup uses active user context, never an injected memory or assistant/tool suggestion',()=>fixture(async({call,ctx})=>{
-	await call('session_compact',compact());
+	await call('session_compact',{compactionEntry:{...compact().compactionEntry,summary:'## Critical Context\n- SQLite database port is 5432.'}});
 	ctx.sessionManager.buildContextEntries=()=>[{type:'message',message:{role:'user',content:'Discuss SQLite database port.'}}];
 	assert.match((await call('before_agent_start',{prompt:'继续',systemPrompt:'Base'})).systemPrompt,/5432/);
 	ctx.sessionManager.buildContextEntries=()=>[{type:'message',message:{role:'user',content:'Bluetooth audio'}},{type:'message',message:{role:'assistant',content:'Database port'}},{type:'custom_message',content:'Database port'}];
@@ -298,4 +298,42 @@ test('reload/resume processes a persisted job from another directory without a n
 		const s=new MemoryStore(stateDir);s.capture({id:'persisted',scope:'/older-origin',kind:'summary',content:'## Critical Context\n- Database uses SQLite.',createdAt:new Date().toISOString()});s.close();
 		await call('session_start');assert.equal(calls,1);
 	},async(_ctx,_prompt,input)=>{calls++;assert.equal(JSON.parse(input).source.scope,'/older-origin');return {model:'active',text:'{"memories":[]}'};});
+});
+
+test('exact user feedback changes automatic ranking without a paid learning call, never from tool/assistant text',()=>{
+	let calls=0;return fixture(async({call,stateDir,command,notifications})=>{
+		await call('session_compact',compact());const s=new MemoryStore(stateDir);
+		try {
+			const id=s.readMemories()[0].id;const before=s.readMemories()[0];const initialCalls=calls;
+			await call('agent_end',{messages:[{role:'assistant',content:[{type:'text',text:`memory ${id} incorrect`}]}]});
+			await call('agent_end',{messages:[{role:'toolResult',content:[{type:'text',text:`memory ${id} incorrect`}]}]});
+			assert.deepEqual(s.readMemories()[0],before);
+			const event={messages:[{role:'user',timestamp:Date.now(),content:`记忆 ${id} 有用。`}]};
+			await call('agent_end',event);await call('agent_end',event);
+			assert.equal(calls,initialCalls);assert.equal(s.readMemories()[0].feedback?.utility?.verdict,'useful');
+			assert.equal(s.readMemories()[0].updatedAt,before.updatedAt);
+			await call('before_agent_start',{prompt:'Database port',systemPrompt:'Base'});
+			await command('explain');assert.match(notifications.at(-1),/"utility": 1.05/);assert.match(notifications.at(-1),/rankScore/);
+			await command(`feedback ${id} incorrect`);
+			assert.equal(await call('before_agent_start',{prompt:'Database port',systemPrompt:'Base'}),undefined);
+			await command(`correct ${id} Database port is 9999.`);
+			await command(`show ${id}`);assert.match(notifications.at(-1),/manual_correction/);assert.match(notifications.at(-1),/quality/);
+		} finally {s.close();}
+	},async()=>{calls++;return {model:'fake/model',text:'{"memories":[]}'};});
+});
+
+test('memory_recall is a bounded read-only cross-origin lookup, not implicit feedback or a fallback',()=>{
+	let calls=0;return fixture(async({call,tools,stateDir,ctx})=>{
+		await call('session_compact',compact());ctx.cwd='/different-origin';
+		const s=new MemoryStore(stateDir);try {
+			const before=s.readMemories(),history=s.history(),initialCalls=calls;
+			const tool=tools.get('memory_recall');assert.ok(tool);assert.equal(tool.parameters.properties.query.maxLength,512);
+			const result=await tool.execute('lookup',{query:'Database port'},undefined,undefined,ctx);
+			assert.match(result.content[0].text,/5432/);assert.match(result.content[0].text,/summary\/local/);
+			assert.ok(Buffer.byteLength(result.content[0].text)<=2048);
+			const empty=await tool.execute('lookup',{query:'continue'},undefined,undefined,ctx);assert.match(empty.content[0].text,/No matching/);
+			assert.equal(calls,initialCalls);assert.deepEqual(s.readMemories(),before);assert.deepEqual(s.history(),history);
+			await assert.rejects(()=>tool.execute('lookup',{query:'Database'},AbortSignal.abort(),undefined,ctx),/cancelled/);
+		} finally {s.close();}
+	},async()=>{calls++;return {model:'fake/model',text:'{"memories":[]}'};});
 });

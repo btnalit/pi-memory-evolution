@@ -1,6 +1,7 @@
 import type { DurableMemory } from "./memory-store.ts";
 import { clipBytes, fingerprint, redact } from "./privacy.ts";
 import { features, featureOffset } from "./search.ts";
+import { memoryQuality } from "./quality.ts";
 import { FACETS, queryFeatures, resolveRecallQuery, type RecallInput } from "./query.ts";
 export { recallQuery, resolveRecallQuery } from "./query.ts";
 
@@ -12,7 +13,7 @@ function overlap(text: string, query: Set<string>): number {
 /** Relevance scores are NOT confidence/truth scores. No authority bonus for cwd,
  * legacy labels, source IDs or dates. Metadata can only help an explicit origin query. */
 type RecallOptions = { includeExpiredProjectState?: boolean };
-type RankedMemory = { memory: DurableMemory; score: number; coverage: number; matches: string[]; reason?: string };
+type RankedMemory = { memory: DurableMemory; score: number; rankScore: number; quality: ReturnType<typeof memoryQuality>; coverage: number; matches: string[]; reason?: string };
 export interface RecallDiagnostics {
 	mode: string;
 	query: string[];
@@ -21,7 +22,8 @@ export interface RecallDiagnostics {
 	excluded: number;
 	matched: number;
 	selected: string[];
-	candidates: { id: string; score: number; coverage: number; matches: string[]; reason: string }[];
+	candidates: { id: string; score: number; rankScore: number; quality: ReturnType<typeof memoryQuality>; coverage: number; matches: string[]; reason: string }[];
+	exclusions?: { id: string; reason: string }[];
 }
 
 function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: number, options: RecallOptions) {
@@ -29,10 +31,14 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 	const query = queryFeatures(plan.query);
 	const context = queryFeatures(plan.context ?? '');
 	for (const word of query) context.delete(word);
-	const active = memories.filter((m) => !["forgotten", "conflicted"].includes(m.status)
-		&& (options.includeExpiredProjectState || m.kind !== "project_state" || m.layer === "pinned" || now - Date.parse(m.updatedAt) <= 7 * 86400_000));
+	const qualities = new Map(memories.map(m => [m.id, memoryQuality(m, now)]));
+	const excludedReason = (m: DurableMemory) => ["forgotten", "conflicted"].includes(m.status) ? m.status
+		: m.feedback?.accuracy?.verdict === "incorrect" ? "disputed"
+		: !options.includeExpiredProjectState && qualities.get(m.id)!.expired ? "expired-project-state" : undefined;
+	const active = memories.filter(m => !excludedReason(m));
 	const diagnostics: RecallDiagnostics = { mode: plan.mode, query: [...query].slice(0, 32), context: [...context].slice(0, 32),
-		eligible: active.length, excluded: memories.length - active.length, matched: 0, selected: [], candidates: [] };
+		eligible: active.length, excluded: memories.length - active.length, matched: 0, selected: [], candidates: [],
+		exclusions: memories.filter(m => excludedReason(m)).slice(0, 10).map(m => ({ id: clipBytes(redact(m.id), 120), reason: excludedReason(m)! })) };
 	if (!query.size) return { ranked: [] as RankedMemory[], diagnostics };
 	// Repeated origins/aliases (and duplicate legacy text) need segmentation only once
 	// per query. No persistent cache of user queries or credential-bearing input.
@@ -62,6 +68,12 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 	const subjects = [...context].filter(word => !FACETS.has(word));
 	const subjectWeight = subjects.reduce((sum, word) => sum + weights.get(word)!, 0);
 	const namedSubjects = subjects.filter(word => !word.startsWith('concept:'));
+	// A short named-subject attribute query must not substitute another subject or
+	// another attribute when its best answer has been forgotten/quarantined.
+	// Generic status/progress words describe the request, not a required answer token.
+	const directNames = [...query].filter(word => !word.startsWith('concept:') && !word.startsWith('literal:') && !/^\d/u.test(word) && !FACETS.has(word));
+	const directFacets = [...query].filter(word => FACETS.has(word) && !['concept:status', 'concept:progress', 'error', '错误'].includes(word));
+	const focusedDirect = !context.size && query.size <= 4 && directNames.length === 1 && directFacets.length > 0;
 	const evaluated: RankedMemory[] = documents.map(({ memory, body, mentions, aliases, origin }) => {
 		let score = 0, covered = 0, focusMatches = 0, evidenceMatches = 0;
 		const matches: string[] = [];
@@ -83,21 +95,26 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 		const reason = literals.some(word => !matches.includes(word)) ? 'resource-mismatch'
 			: !focusMatches ? 'no-focus-match'
 			: !evidenceMatches ? 'question-only'
+			: focusedDirect && (directNames.some(word => !body.has(word) && !aliases.has(word) && !origin.has(word))
+				|| directFacets.some(word => !body.has(word) && !aliases.has(word))) ? 'subject-attribute-mismatch'
 			: (namedSubjects.length ? namedSubjects.some(word => !matches.includes(word))
 				: subjects.length && subjects.filter(word => matches.includes(word)).reduce((sum, word) => sum + weights.get(word)!, 0) / subjectWeight < 0.6) ? 'context-mismatch'
 			: coverage < 0.45 ? 'low-coverage'
 			: (query.size >= 3 && focusMatches < 2) || (focusMatches === 1 && [...query].some(word => unknown.has(word) && !FACETS.has(word))) ? 'thin-match'
 			: undefined;
-		return { memory, score, coverage, matches, reason };
+		const quality = qualities.get(memory.id)!;
+		return { memory, score, rankScore: score * quality.factor, quality, coverage, matches, reason };
 	});
-	evaluated.sort((a,b) => b.score-a.score || Number(b.memory.layer === "pinned")-Number(a.memory.layer === "pinned")
-		|| Date.parse(b.memory.updatedAt)-Date.parse(a.memory.updatedAt) || a.memory.id.localeCompare(b.memory.id));
-	const best = evaluated.find(r => !r.reason)?.score ?? Infinity;
+	const best = evaluated.reduce((best, r) => !r.reason ? Math.max(best, r.score) : best, 0);
+	// Quality only orders already-relevant evidence. It cannot rescue weak matches.
 	for (const item of evaluated) if (!item.reason && item.score < best * 0.75) item.reason = 'relative-cutoff';
+	evaluated.sort((a,b) => b.rankScore-a.rankScore || Number(b.memory.layer === "pinned")-Number(a.memory.layer === "pinned")
+		|| Date.parse(b.memory.updatedAt)-Date.parse(a.memory.updatedAt) || a.memory.id.localeCompare(b.memory.id));
 	const ranked = evaluated.filter(r => !r.reason);
 	diagnostics.matched = ranked.length;
 	diagnostics.candidates = evaluated.filter(r => r.score > 0).slice(0, 10).map(r => ({ id: clipBytes(redact(r.memory.id), 120),
-		score: Number(r.score.toFixed(3)), coverage: Number(r.coverage.toFixed(3)), matches: r.matches.slice(0, 16), reason: r.reason ?? 'eligible' }));
+		score: Number(r.score.toFixed(3)), rankScore: Number(r.rankScore.toFixed(3)), quality: r.quality,
+		coverage: Number(r.coverage.toFixed(3)), matches: r.matches.slice(0, 16), reason: r.reason ?? 'eligible' }));
 	return { ranked, diagnostics };
 }
 

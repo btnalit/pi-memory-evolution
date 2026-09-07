@@ -44,12 +44,15 @@ const server = createServer(async (req, res) => {
 				const port = data.source.content.includes('7777') ? '7777' : '9999';
 				answer = JSON.stringify({ memories: [{ kind: 'fact', content: `Database port is ${port}.`, ...(data.existing[0] ? { replaces: data.existing[0].id } : {}), searchTerms: ['database', 'port', '数据库', '端口', 'service endpoint'] }] });
 			}
+		} else if (input.messages.at(-1).role === 'user' && text(input.messages.at(-1).content).includes('Use the recall tool fixture.')) {
+			assert.ok(input.tools.some(t => t.function?.name === 'memory_recall'), 'read-only recall tool must load in the real host');
+			toolCall = { index: 0, id: 'fixture-recall', type: 'function', function: { name: 'memory_recall', arguments: JSON.stringify({ query: 'SQLite 数据库认证' }) } };
 		} else if (input.messages.at(-1).role === 'user' && text(input.messages.at(-1).content).includes('Commit fixture changes and push them.')) {
 			const git = 'git -c core.hooksPath=/dev/null -c commit.gpgsign=false -c user.name=Fixture -c user.email=fixture@example.invalid';
 			toolCall = { index: 0, id: 'fixture-commit', type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command: `${git} add fixture.txt && ${git} commit -m fixture-checkpoint && ${git} push`, timeout: 15 }) } };
 		} else if (input.messages.at(-1).role === 'tool') answer = 'A local commit was created, but push failed; it is still pending.';
 		const digest = system.includes('# Pi Memory\n') ? system.slice(system.lastIndexOf('# Pi Memory\n')) : '';
-		requests.push({ semantic, digest });
+		requests.push({ semantic, digest, toolResult: input.messages.at(-1).role === 'tool' ? text(input.messages.at(-1).content) : undefined });
 		res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
 		const chunk = (delta, finish_reason, usage) => `data: ${JSON.stringify({ id: 'test', object: 'chat.completion.chunk', created: 1, model: 'memory-test', choices: [{ index: 0, delta, finish_reason }], ...(usage ? { usage } : {}) })}\n\n`;
 		res.end(chunk(toolCall ? { role: 'assistant', tool_calls: [toolCall] } : { role: 'assistant', content: answer }, null) + chunk({}, toolCall ? 'tool_calls' : 'stop', { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 }) + 'data: [DONE]\n\n');
@@ -82,7 +85,7 @@ async function stopChild() {
 }
 async function startChild(cwd) {
 	output = ''; errors = ''; childClosed = false; processError = undefined;
-	child = spawn(process.env.PI_TEST_BINARY ?? 'pi', ['--mode', 'rpc', '--no-session', '--no-extensions', '--tools', 'bash', '-e', fileURLToPath(new URL('../src/index.ts', import.meta.url))], {
+	child = spawn(process.env.PI_TEST_BINARY ?? 'pi', ['--mode', 'rpc', '--no-session', '--no-extensions', '--tools', 'bash,memory_recall', '-e', fileURLToPath(new URL('../src/index.ts', import.meta.url))], {
 		cwd, env: { ...fixtureEnv, HOME: dir, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1', PI_SUBAGENT_AGENT_ID: '' }, stdio: ['pipe', 'pipe', 'pipe'],
 	});
 	child.on('error', (error) => { processError = error; });
@@ -94,9 +97,12 @@ async function startChild(cwd) {
 	await waitFor(() => output.includes('"name":"memory"'));
 }
 async function ask(message) {
-	const count = (output.match(/"type":"agent_end"/g) ?? []).length;
+	const offset = output.length;
+	const count = (output.match(/"type":"agent_settled"/g) ?? []).length;
 	send({ type: 'prompt', message });
-	await waitFor(() => (output.match(/"type":"agent_end"/g) ?? []).length > count);
+	await waitFor(() => (output.match(/"type":"agent_settled"/g) ?? []).length > count);
+	assert.ok(!output.slice(offset).includes('"stopReason":"error"'), 'foreground model errors are not successful fixture turns');
+	assert.ok(output.slice(offset).includes('"stopReason":"stop"'), 'fixture must finish with a normal assistant response');
 	assert.equal(output.includes('extension_error'), false);
 	assert.equal(output.includes('"method":"confirm"'), false);
 	assert.equal(errors, '');
@@ -174,6 +180,25 @@ try {
 	assert.match(timeoutDigest, /10 秒/); assert.ok(!timeoutDigest.includes('凭据'));
 	assert.match(await ask('继续'), /10 秒/);
 	assert.equal(requests.filter((r) => r.semantic).length, 3, 'ordinary recall questions must not spend a learning call');
+	// New evidence labels, explicit feedback, and a real mid-task recall tool round trip.
+	assert.match(progressDigest, /tool_observation\/model/);
+	const beforeLookup = store.readMemories(); const beforeHistory = store.history();
+	await ask('Use the recall tool fixture.');
+	const lookup = requests.at(-1).toolResult;
+	assert.equal(typeof lookup, 'string', `Recall tool round trip missing: ${output.slice(-6000)}`);
+	assert.match(lookup, /本地凭据/); assert.match(lookup, /summary\/local/); assert.ok(Buffer.byteLength(lookup) <= 2048);
+	assert.deepEqual(store.readMemories(), beforeLookup); assert.deepEqual(store.history(), beforeHistory);
+	assert.equal(requests.filter(r => r.semantic).length, 3, 'read-only tool must not trigger paid evolution');
+	const authMemory = store.readMemories().find(m => m.content.includes('SQLite 数据库认证'));
+	send({ type: 'prompt', message: `/memory feedback ${authMemory.id} useful` });
+	await waitFor(() => store.readMemories().find(m => m.id === authMemory.id).feedback?.utility?.verdict === 'useful');
+	assert.equal(store.readMemories().find(m => m.id === authMemory.id).updatedAt, authMemory.updatedAt);
+	await ask(`记忆 ${authMemory.id} 错误。`);
+	await waitFor(() => store.readMemories().find(m => m.id === authMemory.id).status === 'conflicted');
+	assert.equal(await ask('SQLite 数据库认证'), '');
+	assert.equal(requests.filter(r => r.semantic).length, 3, 'exact-ID feedback is local, not another model call');
+	assert.match(store.status(), /schema 5/);
+
 	// A persisted failure is picked up on startup, then a malformed response retries
 	// on the real recurring timer with no user prompt or /memory evolve command.
 	await stopChild();
@@ -187,7 +212,7 @@ try {
 	await waitFor(() => recoveryCalls === 2 && !store.status().includes('failed='), 25_000);
 	assert.match(store.status(), /retrying=0, paused=0/);
 	assert.equal(output.includes('extension_error'), false);
-	console.log('PASS: real Pi model/auth, cross-session recall, natural-language questions, multi-hop focus/subject matching, unknown-topic barriers, explain diagnostics, no recall-time learning calls, topic switch, provenance, forget, tool-backed progress update, failed push not called success, automatic startup/timer recovery, no approval.');
+	console.log('PASS: evidence labels, feedback/quarantine without paid learning, read-only memory_recall round trip, real Pi model/auth, cross-session recall, natural-language questions, multi-hop focus/subject matching, unknown-topic barriers, explain diagnostics, no recall-time learning calls, topic switch, provenance, forget, tool-backed progress update, failed push not called success, automatic startup/timer recovery, no approval.');
 } finally {
 	store?.close();
 	await stopChild();

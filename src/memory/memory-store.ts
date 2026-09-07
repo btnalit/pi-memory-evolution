@@ -6,6 +6,7 @@ import { extractStructuredMemories, type Claim } from "./extractor.ts";
 import { loadLegacyMemories } from "./legacy.ts";
 import { clipBytes, fingerprint, redact } from "./privacy.ts";
 import { validSearchTerms } from "./search.ts";
+import { sourceEvidence, validEvidence, validFeedback, mayReplace, FEEDBACK_VERDICTS, type Evidence, type MemoryFeedback, type FeedbackVerdict } from "./quality.ts";
 import { EVOLUTION_TIMEOUT_MS, LEASE_GRACE_MS, MAX_FAILURES, FAILURE_CODES, EvolutionError, retryAt, type FailureCode } from "./recovery.ts";
 
 export type RetryMode = boolean | "auto";
@@ -28,6 +29,9 @@ export interface DurableMemory {
 	/** Exact superseded content, carried across explicit legacy adoption. */
 	suppressedHashes?: string[];
 	searchTerms?: string[];
+	/** Host-assigned provenance; missing on old records means unknown, never verified. */
+	evidence?: Evidence;
+	feedback?: MemoryFeedback;
 }
 export interface Source {
 	id: string;
@@ -75,7 +79,7 @@ export class MemoryStore {
 			this.db.exec("PRAGMA busy_timeout=5000");
 			if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").get()) {
 				const schema = this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get();
-				if (schema && !["2", "3", "4"].includes(String(schema.value))) throw new Error("Unsupported memory database version");
+				if (schema && !["2", "3", "4", "5"].includes(String(schema.value))) throw new Error("Unsupported memory database version");
 			}
 			this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
 				CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -88,8 +92,8 @@ export class MemoryStore {
 				CREATE TABLE IF NOT EXISTS blocked (scope TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(scope,hash));`);
 			this.transaction(() => {
 				const schema = this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get();
-				if (schema && !["2", "3", "4"].includes(String(schema.value))) throw new Error("Unsupported memory database version");
-				if (schema?.value !== "4") {
+				if (schema && !["2", "3", "4", "5"].includes(String(schema.value))) throw new Error("Unsupported memory database version");
+				if (!["4", "5"].includes(String(schema?.value))) {
 					const columns = new Set(this.db.prepare("PRAGMA table_info(sources)").all().map((r) => r.name));
 					for (const [name, type] of [["failures", "INTEGER NOT NULL DEFAULT 0"], ["retry_at", "INTEGER NOT NULL DEFAULT 0"],
 						["failed_at", "INTEGER NOT NULL DEFAULT 0"], ["last_error", "TEXT NOT NULL DEFAULT ''"]]) {
@@ -99,12 +103,13 @@ export class MemoryStore {
 					this.db.exec("UPDATE sources SET failures=MIN(MAX(attempt,1),5),last_error='unknown' WHERE state='failed' AND failures=0");
 				}
 				this.db.exec("CREATE INDEX IF NOT EXISTS sources_recovery ON sources(state,retry_at); CREATE INDEX IF NOT EXISTS sources_running_lease ON sources(lease) WHERE state='running'");
+				this.db.exec("CREATE TABLE IF NOT EXISTS feedback_receipts (source_id TEXT NOT NULL, memory_id TEXT NOT NULL, verdict TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(source_id,memory_id)); CREATE INDEX IF NOT EXISTS feedback_recent ON feedback_receipts(memory_id,verdict,at)");
 				if (!schema) {
 					const legacy = loadLegacyMemories(stateDir);
 					if (legacy.length) this.record("migration", "Import legacy JSONL; originals unchanged", legacy, "legacy");
-					this.db.prepare("INSERT INTO metadata VALUES ('schema','4')").run();
-				} else if (schema.value !== "4") {
-					this.db.prepare("UPDATE metadata SET value='4' WHERE key='schema'").run();
+					this.db.prepare("INSERT INTO metadata VALUES ('schema','5')").run();
+				} else if (schema.value !== "5") {
+					this.db.prepare("UPDATE metadata SET value='5' WHERE key='schema'").run();
 				}
 			});
 		} catch (error) { this.db.close(); throw error; }
@@ -130,8 +135,7 @@ export class MemoryStore {
 			cached = { version, memories };
 			this.cache.set(key, cached);
 		}
-		return cached.memories.map((m) => ({ ...m, ...(m.suppressedHashes ? { suppressedHashes: [...m.suppressedHashes] } : {}),
-			...(m.searchTerms ? { searchTerms: [...m.searchTerms] } : {}) }));
+		return cached.memories.map((m) => structuredClone(m));
 	}
 	private get(id: string): DurableMemory | undefined {
 		const row = this.db.prepare("SELECT scope,hash,data FROM memories WHERE id=?").get(id);
@@ -173,7 +177,7 @@ export class MemoryStore {
 				this.db.prepare("UPDATE sources SET state='done',lease=0 WHERE id=?").run(source.id);
 		}
 	}
-	private claim(source: Source, item: Claim): DurableMemory | undefined {
+	private claim(source: Source, item: Claim, method: "local" | "model" = "local"): DurableMemory | undefined {
 		const content = redact(item.content).trim();
 		if (!validSearchTerms(item.searchTerms) || !MEMORY_KINDS.has(item.kind) || content.length < 4 || content.length > 480 || content.includes("[REDACTED")) throw new Error("Invalid or sensitive claim");
 		const id = fingerprint(JSON.stringify([source.scope, item.kind, content]));
@@ -182,6 +186,7 @@ export class MemoryStore {
 		if (this.db.prepare("SELECT 1 FROM memories WHERE scope=? AND hash=?").get(source.scope, fingerprint(content))) return undefined;
 		return { id, kind: item.kind, content, scope: source.scope, sourceEntryId: source.id,
 			createdAt: source.createdAt, updatedAt: source.createdAt, revision: 1, layer: "durable", status: "provisional",
+			evidence: sourceEvidence(source, method),
 			...(item.searchTerms ? { searchTerms: [...new Set(item.searchTerms)] } : {}) };
 	}
 	/** Persist raw evidence + bounded local claims once, atomically. Raw sources are never recalled. */
@@ -229,6 +234,8 @@ export class MemoryStore {
 			if (job?.state !== "running" || job.attempt !== run.attempt || this.generation(run.source.scope) !== run.generation) throw new EvolutionError("stale");
 			const after = new Map<string, DurableMemory>();
 			const targets = new Set<string>();
+			let weakerConflicts = 0;
+			const incoming = sourceEvidence(run.source, "model");
 			const stage = (memory: DurableMemory) => {
 				if (![...after.values()].some((m) => active(m) && fingerprint(m.content) === fingerprint(memory.content))) after.set(memory.id, memory);
 			};
@@ -249,26 +256,44 @@ export class MemoryStore {
 						|| (run.source.kind === "progress" && old.kind !== "project_state")
 						|| Date.parse(old.updatedAt) > Date.parse(run.source.createdAt)) throw new Error("Invalid replacement target");
 					targets.add(old.id);
+					if (claim.kind !== old.kind) throw new Error("Replacement cannot change evidence kind");
 					if (fingerprint(old.content) === fingerprint(claim.content)) {
-						if (run.source.kind === "progress") after.set(old.id, { ...old, sourceEntryId: run.source.id,
-							updatedAt: run.source.createdAt, status: "provisional", revision: old.revision + 1 });
+						if (run.source.kind !== "summary" && mayReplace(old, incoming)) after.set(old.id, { ...old, sourceEntryId: run.source.id,
+							updatedAt: run.source.createdAt, evidence: incoming, status: "provisional", revision: old.revision + 1 });
 						annotate(old, claim); continue;
 					}
-					const next = this.claim(run.source, claim);
+					const next = this.claim(run.source, claim, "model");
 					// Local extraction may already have added the replacement from this source.
 					const existing = run.memories.find((m) => m.id !== old.id && m.kind === claim.kind && fingerprint(m.content) === fingerprint(claim.content));
-					if (!next && !existing) continue;
+					if ((!next && !existing) || (existing && !active(after.get(existing.id) ?? existing))) continue;
 					if (existing && claims.some((c) => c.replaces === existing.id)) throw new Error("Cyclic memory replacement");
+					if (!mayReplace(old, incoming)) {
+						// Quarantine only this source's weaker variant; preserve stronger evidence.
+						const weaker = next ?? (existing?.sourceEntryId === run.source.id ? existing : undefined);
+						if (weaker) {
+							this.block(weaker, run.source.id);
+							after.set(weaker.id, { ...weaker, status: "conflicted", revision: weaker.revision + (next ? 0 : 1) });
+							for (const staged of after.values()) if (fingerprint(staged.content) === fingerprint(weaker.content))
+								after.set(staged.id, { ...staged, status: "conflicted" });
+						}
+						weakerConflicts++; continue;
+					}
 					this.block(old, run.source.id);
 					after.set(old.id, { ...old, status: "forgotten", updatedAt: run.source.createdAt, revision: old.revision + 1 });
-					if (next) stage(next); else annotate(existing, claim);
+					if (next) stage(next);
+					else if (existing && existing.layer !== "pinned" && mayReplace(existing, incoming)
+						&& Date.parse(existing.updatedAt) <= Date.parse(run.source.createdAt)) {
+						after.set(existing.id, { ...existing, sourceEntryId: run.source.id, updatedAt: run.source.createdAt,
+							evidence: incoming, feedback: undefined, status: "provisional", revision: existing.revision + 1 });
+						annotate(existing, claim);
+					} else annotate(existing, claim);
 				} else {
-					const next = this.claim(run.source, claim);
+					const next = this.claim(run.source, claim, "model");
 					if (next) stage(next);
 					else annotate(run.memories.find((m) => m.kind === claim.kind && fingerprint(m.content) === fingerprint(claim.content)), claim);
 				}
 			}
-			const event = this.record("model", `${model}: ${run.source.id}`, [...after.values()], run.source.scope);
+			const event = this.record("model", `${model}: ${run.source.id}${weakerConflicts ? `; weaker replacements withheld=${weakerConflicts}` : ""}`, [...after.values()], run.source.scope);
 			this.db.prepare("UPDATE sources SET state='done',lease=0,failures=0,retry_at=0,failed_at=0,last_error='' WHERE id=?").run(run.source.id);
 			return event;
 		});
@@ -313,12 +338,42 @@ export class MemoryStore {
 		return [`Automatic recovery: retrying=${count - paused}, paused=${paused} (failure limit ${MAX_FAILURES})`, ...details,
 			...(count > 5 ? [`${count - 5} more failed sources.`] : [])].join("\n");
 	}
+	/** Explicit exact-ID user feedback only. No inferred usage or self-reinforcement.
+	 * Receipts survive undo/restart so replay cannot reapply an old verdict. */
+	feedback(id: string, verdict: FeedbackVerdict, sourceId = `manual:${randomUUID()}`, at = new Date().toISOString()): string | undefined {
+		if (!FEEDBACK_VERDICTS.has(verdict)) throw new Error("Invalid feedback verdict");
+		const signal = { verdict, sourceId, at };
+		const key = verdict === "useful" || verdict === "unhelpful" ? "utility" : "accuracy";
+		if (!validFeedback({ [key]: signal })) throw new Error("Invalid feedback source");
+		return this.transaction(() => {
+			const old = this.get(id);
+			if (!old) throw new Error("Unknown memory id");
+			if (this.db.prepare("SELECT 1 FROM feedback_receipts WHERE source_id=? AND memory_id=?").get(sourceId, id)) return undefined;
+			if (!active(old)) throw new Error("Resolve/correct the memory first");
+			const last = this.db.prepare(`SELECT MAX(at) AS at FROM feedback_receipts WHERE memory_id=? AND verdict IN (${key === "utility" ? "'useful','unhelpful'" : "'accurate','incorrect'"})`).get(id);
+			this.db.prepare("INSERT INTO feedback_receipts VALUES (?,?,?,?)").run(sourceId, id, verdict, Date.parse(at));
+			const previous = old.feedback?.[key];
+			if (Date.parse(at) < Date.parse(old.updatedAt) || (last?.at != null && Number(last.at) > Date.parse(at))
+				|| (previous && (Date.parse(previous.at) > Date.parse(at) || previous.verdict === verdict))) return undefined;
+			const next: DurableMemory = { ...old, feedback: { ...old.feedback, [key]: signal }, revision: old.revision + 1 };
+			const changes = [next];
+			if (verdict === "incorrect") {
+				this.block(old); next.status = "conflicted";
+				for (const duplicate of this.readMemories(old.scope)) if (duplicate.id !== id && active(duplicate)
+					&& fingerprint(duplicate.content) === fingerprint(old.content)) {
+					this.block(duplicate);
+					changes.push({ ...duplicate, status: "conflicted", feedback: { ...duplicate.feedback, accuracy: signal }, revision: duplicate.revision + 1 });
+				}
+			}
+			return this.record("manual", `Feedback ${verdict}: ${sourceId}`, changes, old.scope);
+		});
+	}
 	act(id: string, type: MemoryAction, value?: string): string {
 		return this.transaction(() => {
 			const old = this.get(id);
 			if (!old) throw new Error("Unknown memory id");
 			const at = new Date().toISOString();
-			let next = { ...old, updatedAt: ["pin", "unpin", "adopt"].includes(type) ? old.updatedAt : at, revision: old.revision + 1 };
+			let next = { ...old, updatedAt: ["pin", "unpin", "adopt", "conflict", "resolve"].includes(type) ? old.updatedAt : at, revision: old.revision + 1 };
 			const changes: DurableMemory[] = [];
 			if (type === "forget" || type === "correct") {
 				this.block(old);
@@ -332,18 +387,22 @@ export class MemoryStore {
 				case "correct": {
 					const content = redact(value ?? "").trim();
 					if (content.length < 4 || content.length > 480 || content.includes("[REDACTED")) throw new Error("Correction must be 4–480 characters without credentials");
-					next = { ...next, content, status: "confirmed", searchTerms: undefined }; break;
+					next = { ...next, content, status: "confirmed", searchTerms: undefined, feedback: undefined,
+						evidence: { basis: "manual_correction", method: "manual", sourceId: `manual:${randomUUID()}`, at } }; break;
 				}
 				case "forget": next.status = "forgotten"; break;
 				case "pin": if (!active(old)) throw new Error("Resolve/correct the memory first"); next.layer = "pinned"; break;
 				case "unpin": next.layer = "durable"; break;
-				case "resolve": if (old.status !== "conflicted") throw new Error("Memory is not conflicted"); next.status = "confirmed"; break;
+				case "resolve":
+					if (old.status !== "conflicted") throw new Error("Memory is not conflicted");
+					next.status = "confirmed"; next.updatedAt = old.updatedAt;
+					next.feedback = { ...old.feedback, accuracy: { verdict: "accurate", at, sourceId: `manual:${randomUUID()}` } }; break;
 				case "conflict": {
 					const other = this.get(value ?? "");
 					if (!other || other.id === id || other.scope !== old.scope || !active(other) || !active(old)) throw new Error("Conflict needs two active memories in the same scope");
 					this.block(old); this.block(other);
 					next.status = "conflicted";
-					changes.push({ ...other, status: "conflicted", updatedAt: at, revision: other.revision + 1 }); break;
+					changes.push({ ...other, status: "conflicted", revision: other.revision + 1 }); break;
 				}
 				case "adopt":
 					if (old.scope !== "legacy" || !value) throw new Error("Only unscoped legacy memories can be adopted");
@@ -373,7 +432,7 @@ export class MemoryStore {
 		});
 	}
 	status(): string {
-		if (this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get()?.value !== "4") throw new Error("Invalid memory schema marker");
+		if (this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get()?.value !== "5") throw new Error("Invalid memory schema marker");
 		const health = this.db.prepare("PRAGMA quick_check").get();
 		if (health?.quick_check !== "ok") throw new Error("Memory database integrity check failed");
 		for (const row of this.db.prepare("SELECT id,data,state,attempt,lease,failures,retry_at,failed_at,last_error FROM sources").iterate()) {
@@ -383,8 +442,12 @@ export class MemoryStore {
 				|| (row.last_error !== "" && !FAILURE_CODES.includes(row.last_error as FailureCode))) throw new Error("Invalid source job");
 		}
 		for (const row of this.db.prepare("SELECT id,scope,data FROM events").iterate()) parseEvent(row.data, row.id, row.scope);
+		for (const row of this.db.prepare("SELECT source_id,memory_id,verdict,at FROM feedback_receipts").iterate()) {
+			if (typeof row.source_id !== "string" || !row.source_id || typeof row.memory_id !== "string" || !row.memory_id
+				|| !FEEDBACK_VERDICTS.has(row.verdict as FeedbackVerdict) || !Number.isSafeInteger(row.at)) throw new Error("Invalid feedback receipt");
+		}
 		const jobs = this.db.prepare("SELECT state,COUNT(*) AS n FROM sources GROUP BY state").all();
-		return `${this.readMemories().length} memories; ${jobs.map((j) => `${j.state}=${j.n}`).join(", ") || "no sources"}; SQLite ok (schema 4)\n${this.recoveryStatus()}`;
+		return `${this.readMemories().length} memories; ${jobs.map((j) => `${j.state}=${j.n}`).join(", ") || "no sources"}; SQLite ok (schema 5)\n${this.recoveryStatus()}`;
 	}
 }
 
@@ -419,7 +482,8 @@ function isMemory(value: unknown): value is DurableMemory {
 	const m = value as DurableMemory;
 	return typeof m.id === "string" && !!m.id && MEMORY_KINDS.has(m.kind) && typeof m.content === "string" && !!m.content.trim()
 		&& typeof m.scope === "string" && !!m.scope && typeof m.sourceEntryId === "string" && !!m.sourceEntryId
-		&& validSearchTerms(m.searchTerms)
+		&& validSearchTerms(m.searchTerms) && validEvidence(m.evidence) && validFeedback(m.feedback)
+		&& (m.evidence?.basis !== "tool_observation" || m.kind === "project_state")
 		&& (m.suppressedHashes === undefined || (Array.isArray(m.suppressedHashes) && m.suppressedHashes.every((h) => typeof h === "string" && /^[a-f0-9]{24}$/u.test(h))))
 		&& typeof m.createdAt === "string" && typeof m.updatedAt === "string"
 		&& Number.isFinite(Date.parse(m.createdAt)) && Number.isFinite(Date.parse(m.updatedAt))
