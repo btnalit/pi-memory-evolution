@@ -2,6 +2,19 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
+## [0.2.2](https://github.com/btnalit/pi-memory-evolution/compare/v0.2.1...v0.2.2) (2026-09-08)
+
+
+### Bug Fixes
+
+* support npm 12 pack output and gate CLI compatibility ([#7](https://github.com/btnalit/pi-memory-evolution/issues/7)) ([4fde298](https://github.com/btnalit/pi-memory-evolution/commit/4fde29844b6d2c9e9497a656f75d8655e812d4c6))
+
+
+### Maintenance
+
+* **deps-dev:** bump the development-minor-patch group across 1 directory with 3 updates ([#9](https://github.com/btnalit/pi-memory-evolution/issues/9)) ([03ef2be](https://github.com/btnalit/pi-memory-evolution/commit/03ef2beed637cfaa5c9dae22b26060c6f330d754))
+* **deps-dev:** bump typescript from 5.9.3 to 7.0.2 ([#5](https://github.com/btnalit/pi-memory-evolution/issues/5)) ([dc97e2c](https://github.com/btnalit/pi-memory-evolution/commit/dc97e2c3306a0c1b07c34675d1eebaa7c73aaa8d))
+
 ## [0.2.1](https://github.com/btnalit/pi-memory-evolution/compare/v0.2.0...v0.2.1) (2026-09-08)
 
 
