@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vX.Y.Z release to retry (blank maintains the release PR)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: github.repository == 'btnalit/pi-memory-evolution' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      actions: write
+    outputs:
+      tag: ${{ steps.target.outputs.tag }}
+      sha: ${{ steps.target.outputs.sha }}
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        if: ${{ !inputs.tag }}
+        with:
+          token: ${{ github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      - name: Run CI for bot-created release PRs
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          RELEASE_PRS: ${{ steps.release.outputs.prs || '[]' }}
+        with:
+          script: |
+            // GITHUB_TOKEN events cannot trigger another push/PR workflow. Explicit
+            // workflow_dispatch can, without storing a personal GitHub token.
+            for (const pr of JSON.parse(process.env.RELEASE_PRS)) {
+              if (!Number.isSafeInteger(pr.number)) throw new Error('Invalid release PR');
+              const {data} = await github.rest.pulls.get({...context.repo, pull_number: pr.number});
+              if (data.state !== 'open' || data.base.ref !== 'main' ||
+                  data.head.repo.full_name !== `${context.repo.owner}/${context.repo.repo}` ||
+                  data.user.login !== 'github-actions[bot]' || !data.head.ref.startsWith('release-please--')) {
+                throw new Error('Unexpected release PR origin');
+              }
+              await github.rest.actions.createWorkflowDispatch({...context.repo, workflow_id: 'ci.yml', ref: data.head.ref});
+            }
+      - name: Resolve and validate the release commit
+        id: target
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+          CREATED_TAG: ${{ steps.release.outputs.tag_name }}
+          RELEASE_CREATED: ${{ steps.release.outputs.release_created }}
+        with:
+          script: |
+            const tag = process.env.REQUESTED_TAG || (process.env.RELEASE_CREATED === 'true' ? process.env.CREATED_TAG : '');
+            if (!tag) return;
+            if (!/^v\d+\.\d+\.\d+$/.test(tag)) throw new Error('Only stable vX.Y.Z releases are publishable');
+            const {data: release} = await github.rest.repos.getReleaseByTag({...context.repo, tag});
+            if (release.draft || release.prerelease) throw new Error('Release must be public and stable');
+            let {data: ref} = await github.rest.git.getRef({...context.repo, ref: `tags/${tag}`});
+            let object = ref.object;
+            while (object.type === 'tag') {
+              const {data} = await github.rest.git.getTag({...context.repo, tag_sha: object.sha});
+              object = data.object;
+            }
+            if (object.type !== 'commit' || !/^[a-f0-9]{40}$/.test(object.sha)) throw new Error('Invalid release commit');
+            const {data: comparison} = await github.rest.repos.compareCommitsWithBasehead({...context.repo, basehead: `${object.sha}...main`});
+            if (!['ahead', 'identical'].includes(comparison.status)) throw new Error('Release is outside main history');
+            core.setOutput('tag', tag);
+            core.setOutput('sha', object.sha);
+
+  verify:
+    needs: plan
+    if: needs.plan.outputs.tag != ''
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+    permissions:
+      contents: read
+
+  publish:
+    needs: [plan, verify]
+    if: needs.plan.outputs.tag != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: npm
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+      RELEASE_SHA: ${{ needs.plan.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The publishing tools come from this trusted main workflow, not an artifact.
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.verify.outputs.artifact }}
+          path: dist
+      - name: Publish verified archive with provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ vars.NPM_AUTH_MODE == 'token' && secrets.NPM_TOKEN || '' }}
+        run: node scripts/publish-package.mjs
+      - name: Attach immutable release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-assets.mjs

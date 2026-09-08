@@ -322,7 +322,8 @@ grows until deliberately managed; no automatic purge or physical secret erasure 
 Background model usage is not added to Pi's normal session token accounting.
 
 Node/npm development requires 22.19+ to match Pi 0.85's engine; the standalone Bun host is
-also tested. There is no installed GitHub Actions workflow: `npm run check` and
-`npm run test:pi` run locally. Fake-provider validation is not live-provider accuracy or a
+also tested. GitHub CI runs the regression/package checks and isolated install/host
+scripts; [release automation](releasing.md) reuses those gates before publishing.
+Fake-provider validation is not live-provider accuracy or a
 multi-day TUI trial. See [README.md](../README.md) for commands/recovery, and the historical
 [follow-up review](review-0.2.md) for previously reproduced defects and validation limits.

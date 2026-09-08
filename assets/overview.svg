@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#101a2b"/><stop offset="1" stop-color="#152a30"/></linearGradient></defs>
+  <rect width="1280" height="640" rx="24" fill="url(#bg)"/>
+  <g font-family="DejaVu Sans, sans-serif">
+    <text x="64" y="80" fill="#77e3bb" font-size="20" letter-spacing="3">PI PACKAGE / MEMORY</text>
+    <text x="64" y="150" fill="#f5f8fb" font-size="48" font-weight="bold">pi-memory-evolution</text>
+    <text x="64" y="194" fill="#b5c5d5" font-size="24">Useful context, across sessions and directories.</text>
+    <rect x="64" y="246" width="352" height="226" rx="16" fill="#1e3044" stroke="#36546b"/>
+    <rect x="464" y="246" width="352" height="226" rx="16" fill="#1e3044" stroke="#36546b"/>
+    <rect x="864" y="246" width="352" height="226" rx="16" fill="#1e3044" stroke="#36546b"/>
+    <g fill="#77e3bb" font-size="20"><text x="92" y="288">01</text><text x="492" y="288">02</text><text x="892" y="288">03</text></g>
+    <g fill="#f5f8fb" font-size="29" font-weight="bold"><text x="92" y="339">Learn &amp; update</text><text x="492" y="339">Relevant context</text><text x="892" y="339">Recall anywhere</text></g>
+    <g fill="#b5c5d5" font-size="20">
+      <text x="92" y="381">Requirements and work</text><text x="92" y="414">Evidence and history</text>
+      <text x="492" y="381">Topic-based selection</text><text x="492" y="414">No unrelated filler</text>
+      <text x="892" y="381">Fresh sessions</text><text x="892" y="414">Read-only mid-task lookup</text>
+    </g>
+    <g fill="#77e3bb" font-size="32"><text x="425" y="369">&#x2192;</text><text x="825" y="369">&#x2192;</text></g>
+    <text x="64" y="538" fill="#77e3bb" font-size="22">Local SQLite  ·  Your active Pi model  ·  No extra API key</text>
+    <text x="64" y="590" fill="#839aaa" font-size="17">Architecture overview · Stored memories remain historical evidence, not verified facts.</text>
+  </g>
+</svg>

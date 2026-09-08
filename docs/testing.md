@@ -9,8 +9,8 @@ Tests use synthetic data and temporary directories, not production memories.
 npm run check
 ```
 
-This runs strict TypeScript checking, the `src/**/*.test.ts` regression suite and
-`check:package`. Package checking asserts that the Pi manifest points to the current
+This runs strict TypeScript checking, the `src/**/*.test.ts` regression suite,
+`scripts/*.test.mjs` release-policy tests, `check:package` and `check:automation`. Package checking asserts that the Pi manifest points to the current
 entry, host APIs remain peer dependencies, all production TypeScript sources are
 packed, and local documentation links resolve to packaged files. Test sources,
 helper scripts and memory state must not ship in the package.
@@ -98,5 +98,8 @@ product acceptance. Historical design/review documents describe their own tested
 revisions; see [progress pipeline](progress-pipeline.md), [core quality](core-quality.md)
 and [quality validation](quality-validation.md) for context.
 
-No GitHub Actions workflow is configured. Run the local checks before submitting
-changes; the Pi-dependent scripts are explicit commands, not part of `npm run check`.
+GitHub Actions runs these checks and the Pi-dependent scripts before the required
+Quality gate passes. The install/host scripts remain separate local commands, not
+part of `npm run check`. Release verification uses the same CI workflow on the exact
+tagged commit. See [CI and releases](releasing.md) for branch protection, dependency
+updates, publication credentials and retry behavior.
