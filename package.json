@@ -3,6 +3,10 @@
 	"version": "0.2.0",
 	"description": "Automatic cross-session memory using Pi's active model, transactional local storage, and topic-based recall across directories.",
 	"license": "MIT",
+	"publishConfig": {
+		"access": "public",
+		"registry": "https://registry.npmjs.org/"
+	},
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/btnalit/pi-memory-evolution.git"
@@ -44,8 +48,9 @@
 		"test": "node --test \"src/**/*.test.ts\"",
 		"typecheck": "tsc --noEmit",
 		"test:pi": "node scripts/test-pi.mjs",
+		"test:install": "node scripts/test-install.mjs",
 		"check": "npm run typecheck && npm test && npm run check:package",
-		"check:package": "npm pack --dry-run --json"
+		"check:package": "node scripts/check-package.mjs"
 	},
 	"devDependencies": {
 		"@earendil-works/pi-coding-agent": "0.85.0",

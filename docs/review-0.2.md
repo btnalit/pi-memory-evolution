@@ -56,11 +56,13 @@ migration, cleanup or reset was performed as part of the validation.
 
 Main regression files (links refer to a Git checkout; tests/scripts are not shipped in
 an npm tarball):
-- [State/privacy/parser regressions](../src/memory/review-regressions.test.ts)
-- [Pi lifecycle and command tests](../src/index.test.ts)
-- [Adapter tests](../src/adapter/pi-api.test.ts)
-- [Retriever tests](../src/memory/retriever.test.ts)
-- [Real-Pi smoke script](../scripts/test-pi.mjs)
+Tests and maintenance scripts live in the Git checkout, not the runtime tarball:
+
+- [State/privacy/parser regressions](https://github.com/btnalit/pi-memory-evolution/blob/main/src/memory/review-regressions.test.ts)
+- [Pi lifecycle and command tests](https://github.com/btnalit/pi-memory-evolution/blob/main/src/index.test.ts)
+- [Adapter tests](https://github.com/btnalit/pi-memory-evolution/blob/main/src/adapter/pi-api.test.ts)
+- [Retriever tests](https://github.com/btnalit/pi-memory-evolution/blob/main/src/memory/retriever.test.ts)
+- [Real-Pi smoke script](https://github.com/btnalit/pi-memory-evolution/blob/main/scripts/test-pi.mjs)
 
 ## Remaining boundaries
 

@@ -2,12 +2,13 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
-## [0.2.0] - Unreleased
-
-Development is on `main`; this version has not yet been tagged or published to npm.
+## [0.2.0] - 2026-09-08
 
 ### Changed
 
+- Rewrite the README as a concise Chinese project introduction and installation guide; move detailed operation/migration behavior to `docs/usage.md`
+- Declare public npm distribution alongside native Pi Git/local installation
+- Replace print-only package inspection with runtime-source, peer-dependency and documentation-link assertions
 - Separate operation/project-based progress nomination from answer retrieval; pending states naming a bare repository remain eligible without per-path top-2 or answer deduplication
 - Preserve important commit/push/test observations ahead of late inspection; retain completed operations before error/aborted responses without claiming whole-task completion
 - Expand bounded active-user context scanning to 4096 entries/messages and collapse repeated topic-less continuations while preserving reset/unknown-topic barriers
@@ -32,6 +33,8 @@ Development is on `main`; this version has not yet been tagged or published to n
 
 ### Added
 
+- Isolated real-Pi installation smoke tests for packed artifacts, Git install/update/old-pin transitions, and native npm install through a loopback registry; verify idempotent registration and memory/history preservation on removal
+- `docs/testing.md` describing installation, fake-model integration and live-provider validation boundaries
 - `/memory learning` capture/nomination diagnostics and persistent changed-record outcomes in status, distinguishing processed jobs from actual learning
 - Long-task, interruption/cancel-recovery, operation-resource, natural-intent and mixed-authority regressions; real-Pi commit/failed-push followed by 12 diagnostics, plus read-only historical replay
 - Host-assigned evidence basis/method/source/date, bounded evidence and aging labels in injection, separate quality factors in show/explain, lifecycle exclusion diagnostics
