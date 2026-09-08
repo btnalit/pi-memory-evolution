@@ -120,4 +120,4 @@ jobs:
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
-          node --input-type=module -e 'for (const [name, job] of Object.entries(JSON.parse(process.env.RESULTS))) if (job.result !== "success") throw new Error(`${name}: ${job.result}`);'
+          node --input-type=module -e 'for (const [name, job] of Object.entries(JSON.parse(process.env.RESULTS))) if (job.result !== "success") throw new Error(name + ": " + job.result);'
