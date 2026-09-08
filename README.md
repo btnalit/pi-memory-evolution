@@ -1,106 +1,126 @@
 # pi-memory-evolution
 
-为 [Pi](https://pi.dev) 提供持久记忆，让项目背景、个人偏好和工作进展能够跨会话延续。
+[![CI](https://github.com/btnalit/pi-memory-evolution/actions/workflows/ci.yml/badge.svg)](https://github.com/btnalit/pi-memory-evolution/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/pi-memory-evolution)](https://www.npmjs.com/package/pi-memory-evolution)
+[![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-扩展自动学习值得保留的信息，在后续对话中按主题注入相关内容，也支持跨目录召回。不需要反复说“记住”，不需要维护审批队列。
+English · [简体中文](README.cn.md)
 
-## 功能
+Persistent, evidence-aware memory for [Pi](https://pi.dev). Keep useful preferences,
+project context and work progress across sessions—without repeatedly asking the
+assistant to remember them.
 
-- **自动学习与更新**：从对话摘要、需求和纠正中提取记忆，根据实际工具结果更新已有项目状态；保留来源和变更历史，支持衰退、排序与撤销。
-- **相关内容注入**：结合当前问题和近期用户上下文选择记忆，过滤弱匹配和失效状态；没有匹配就不填充无关内容。
-- **跨会话召回**：在共享记忆库的不同会话、目录中查找背景；提供只读 `memory_recall` 工具，供助手在任务中途补查。
+![Memory learning, context injection and cross-session recall](assets/overview.png)
 
-学习使用 Pi 当前模型和已有认证，无需另配 API Key、向量数据库或嵌入服务。
+## Features
 
-## 安装
+- **Learn and update automatically.** Capture requirements, corrections and compaction
+  summaries. Update tracked project states from tool observations, with provenance,
+  history, gradual decay and evidence-aware ranking.
+- **Inject relevant context.** Select memories by the current topic and recent user
+  context. Filter weak or stale matches; no relevant match means no unrelated filler.
+- **Recall across sessions.** Find background from another session or directory.
+  A read-only `memory_recall` tool lets the assistant look up missing context mid-task.
 
-需要 **Pi 0.85+**，并已配置可用模型。使用 npm 版 Pi 时需要 **Node.js 22.19+**。
+Learning uses Pi's active model and existing authentication. No separate API key,
+embedding service or vector database is required.
 
-### npm
+## Install
+
+Requires **Pi 0.85+** with a working model. npm-based Pi requires **Node.js 22.19+**.
 
 ```bash
 pi install npm:pi-memory-evolution
 ```
 
-### Git
-
-也可以直接安装 Git 默认分支，需要本机有 Git 和 npm：
+Or install the Git default branch, with Git and npm available locally:
 
 ```bash
 pi install https://github.com/btnalit/pi-memory-evolution
 ```
 
-**两种方式选一种**，不要重复安装。然后在 Pi 中执行：
+Choose **one** source, then run these commands inside Pi:
 
 ```text
 /reload
 /memory status
 ```
 
-出现 `SQLite ok (schema 5)` 表示存储初始化成功。后续正常使用 Pi 即可，学习和召回会自动运行。
+`SQLite ok (schema 5)` confirms storage initialization. Continue using Pi normally;
+learning and recall run automatically.
 
-## 使用
+## Use
 
-在对话中说明需求，例如：
-
-```text
-atlas-service 的核心需求是自动备份和故障恢复。
-```
-
-之后可以在新会话中继续询问：
+Describe your requirements in a conversation:
 
 ```text
-你还记得 atlas-service 的核心需求吗？
+Our priorities for atlas-service are automatic backups and reliable recovery.
 ```
 
-学习在后台完成，并非每句话都会保存。可用以下命令查看和维护记忆：
+Later, in a fresh session sharing the same memory store:
 
-| 命令 | 用途 |
+```text
+What do you remember about atlas-service's priorities?
+```
+
+Learning is asynchronous and selective—not every message becomes a memory.
+
+| Command | Purpose |
 | --- | --- |
-| `/memory list` | 浏览记忆 |
-| `/memory search <主题>` | 搜索相关内容 |
-| `/memory show <id>` | 查看内容和来源 |
-| `/memory learning` | 查看采集、更新及实际变更结果 |
-| `/memory explain` | 查看上一次自动注入的选择原因 |
-| `/memory correct <id> <内容>` | 纠正记忆 |
-| `/memory forget <id>` | 停止召回该记忆 |
+| `/memory list` | Browse memories |
+| `/memory search <topic>` | Search relevant claims |
+| `/memory show <id>` | Inspect content and evidence |
+| `/memory learning` | Inspect capture and actual update results |
+| `/memory explain` | Explain the last automatic injection |
+| `/memory correct <id> <text>` | Correct a record |
+| `/memory forget <id>` | Suppress a record from recall |
 
-完整命令、安装迁移和排错方法见[使用指南](docs/usage.md)。
+See the [usage guide](docs/usage.md) for all commands, migration and troubleshooting.
 
-## 更新与卸载
+## Update or uninstall
 
-npm 安装：
+For the npm installation:
 
 ```bash
 pi update npm:pi-memory-evolution
 pi remove npm:pi-memory-evolution
 ```
 
-Git 安装请把上面的包来源替换为安装时使用的仓库 URL。操作后执行 `/reload` 或重启 Pi。卸载扩展不会删除记忆库；升级数据库结构前请先退出共用该库的 Pi 进程并备份。
+For Git, substitute the repository URL used during installation. Reload or restart
+Pi afterward. Uninstalling does not delete memory data. Before a schema-changing
+upgrade, stop Pi processes sharing the database and back up the state directory.
 
-## 数据与边界
+## Data and limits
 
-数据默认保存在 `~/.pi/agent/agent-suite/memory-evolution/`，使用本地 SQLite。`PI_CODING_AGENT_DIR` 可改变存储前缀；不同工作目录默认共享记忆库。
+Local SQLite state lives in `~/.pi/agent/agent-suite/memory-evolution/`.
+`PI_CODING_AGENT_DIR` changes that prefix; different working directories share the
+same store by default.
 
-学习会将经过过滤的来源内容发送给当前模型，并消耗相应额度。记忆不是经过独立验证的事实，匹配和敏感信息过滤也并非万无一失；重要内容仍需核实。详见[存储与隐私](docs/usage.md#local-storage-and-provenance)。
+Learning sends filtered source content to the active model and consumes its quota.
+Memories are historical evidence, not independently verified facts. Matching and
+secret filtering are imperfect; verify important claims. See [privacy and storage](docs/usage.md#local-storage-and-provenance).
 
-## 开发
-
-在源码仓库中运行：
+## Development
 
 ```bash
 npm ci --ignore-scripts
 npm run check
 npm run test:install
 npm run test:pi
+npm run build
 ```
 
-安装测试使用隔离环境，集成测试使用真实 Pi 和模拟模型，不产生付费模型调用。环境要求和测试范围见[测试说明](docs/testing.md)。
+CI checks types, regressions, package contents, installation and fake-model host
+integration. Builds produce an installable npm archive and checksums, not a separate
+compiled runtime. Release PRs automate versions and changelogs; merging a verified
+release PR triggers npm publication. Dependency updates arrive as gated PRs.
 
-## 文档
+See [testing](docs/testing.md) and [release automation](docs/releasing.md).
 
-[使用指南](docs/usage.md) · [架构设计](docs/design.md) · [记忆质量](docs/core-quality.md) · [更新记录](CHANGELOG.md)
+## Documentation
 
-## 许可证
+[Usage](docs/usage.md) · [Architecture](docs/design.md) · [Memory quality](docs/core-quality.md) · [Changelog](CHANGELOG.md)
+
+## License
 
 [MIT](LICENSE)

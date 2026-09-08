@@ -11,6 +11,8 @@ const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta
 assert.equal(lock.version, manifest.version, 'lockfile package version drift');
 assert.deepEqual(lock.packages[''].peerDependencies, manifest.peerDependencies, 'lockfile peer declaration drift');
 assert.deepEqual(manifest.pi.extensions, ['./src/index.ts'], 'Pi must discover the current entry point');
+assert.ok(manifest.keywords.includes('pi-package'), 'Pi Gallery discovery requires the pi-package keyword');
+assert.equal(manifest.pi.image, 'https://raw.githubusercontent.com/btnalit/pi-memory-evolution/main/assets/overview.png');
 assert.deepEqual(manifest.publishConfig, { access: 'public', registry: 'https://registry.npmjs.org/' }, 'publication must target the public npm registry');
 for (const name of ['@earendil-works/pi-coding-agent', 'typebox']) {
 	assert.equal(manifest.peerDependencies[name], '*', `${name} must be supplied by the Pi host`);
@@ -24,7 +26,7 @@ for (const path of readdirSync(new URL('../src/', import.meta.url), { recursive:
 		assert.ok(files.has(`src/${normalized}`), `runtime source missing from package: ${normalized}`);
 	}
 }
-for (const required of ['package.json', 'README.md', 'CHANGELOG.md', 'LICENSE', 'docs/usage.md', 'docs/testing.md']) {
+for (const required of ['package.json', 'README.md', 'README.cn.md', 'assets/overview.png', 'CHANGELOG.md', 'LICENSE', 'docs/usage.md', 'docs/testing.md', 'docs/releasing.md']) {
 	assert.ok(files.has(required), `missing distribution file: ${required}`);
 }
 for (const path of files) {
