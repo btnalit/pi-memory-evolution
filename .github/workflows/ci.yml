@@ -66,6 +66,36 @@ jobs:
       - run: npm run check
       - run: npm audit --audit-level=high
 
+  checks_npm_latest:
+    name: Node 24 / npm ${{ matrix.npm }} checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        npm: ['10', '12']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Select and verify the npm major explicitly
+        env:
+          NPM_VERSION: ${{ matrix.npm }}
+        run: |
+          npm install --global --ignore-scripts "npm@$NPM_VERSION"
+          node --version
+          npm --version
+          node --input-type=module -e 'import {execFileSync} from "node:child_process"; import assert from "node:assert/strict"; assert.equal(execFileSync("npm", ["--version"], {encoding:"utf8"}).trim().split(".")[0], process.env.NPM_VERSION);'
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm run test:install
+      - run: npm run build
+
   integration:
     name: Pi installation and integration
     runs-on: ubuntu-24.04
@@ -112,7 +142,7 @@ jobs:
   gate:
     name: Quality gate
     if: always()
-    needs: [policy, checks, integration, build]
+    needs: [policy, checks, checks_npm_latest, integration, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:

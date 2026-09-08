@@ -17,6 +17,41 @@ helper scripts and memory state must not ship in the package.
 
 `check:package` inspects `npm pack --dry-run --json`; it does not publish to npm.
 
+## npm CLI compatibility
+
+All consumers of `npm pack --json` share `scripts/lib/npm-pack.mjs`. npm 10/11
+return an array; npm 12 returns a package-name map. The helper accepts both and
+rejects invalid, empty, multi-package or mismatched results rather than picking an
+arbitrary package. It is development tooling, not part of the runtime tarball.
+
+CI explicitly installs and verifies npm majors **10 and 12** on Node 24, and runs
+checks, installation and packaging in both lanes. The ordinary Node 22/24 jobs
+also exercise their bundled npm. Node version alone does not define coverage of an
+npm major. The pinned setup-node action has no `npm-version` input, so selecting
+npm uses an explicit `npm install --global --ignore-scripts` step instead.
+
+For local reproduction without changing the global npm installation:
+
+```bash
+npx --yes npm@12 run check
+npx --yes npm@12 run test:install
+npx --yes npm@10 run check
+npx --yes npm@10 run test:install
+```
+
+For an older checkout whose pack parser still fails under npm 12, the npm 10
+commands are a temporary workaround until you update. `npm run` retains the npx
+npm shim on PATH, so nested `execFileSync('npm', ...)` calls use the selected CLI;
+the installation test prints the actual Node/Pi/npm versions. Declaring npm in
+`engines` can document a requirement, but does not replace compatible parsing or
+explicit version testing.
+
+npm 12 also gates dependency lifecycle scripts through its script-allow policy.
+This repository installs with `--ignore-scripts`; do not turn on all scripts merely
+to make an installation pass. If a future dependency requires postinstall compilation,
+review that dependency and update the isolated tests/policy explicitly. Pi's bundled
+runtime and currently tested dependencies work with scripts disabled.
+
 ## Installation smoke test
 
 ```bash
@@ -44,6 +79,10 @@ host explicitly. The script prints the tested host version. The test:
 6. Serves the actual tarball through a loopback npm registry, with a fresh cache,
    then checks native `pi install npm:pi-memory-evolution`, repeat installation,
    normal loading and removal. No host peer packages are served or installed.
+7. Intentionally installs local and npm copies together, reproduces the host's
+   duplicate `memory_recall` failure, removes the unwanted source through the CLI,
+   and verifies startup and unchanged memory/history. This is configuration recovery,
+   not silently choosing which installed version should win.
 
 The test whitelists child environment variables, gives Pi a fresh agent directory
 and HOME, disables startup network operations, and uses private npm caches/config with

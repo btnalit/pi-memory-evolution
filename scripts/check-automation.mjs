@@ -33,7 +33,12 @@ const ci = parse(read('.github/workflows/ci.yml'));
 for (const event of ['pull_request', 'push', 'workflow_dispatch', 'workflow_call']) assert.ok(event in ci.on);
 assert.equal(ci.jobs.gate.name, 'Quality gate');
 assert.equal(ci.jobs.gate.if, 'always()');
-assert.deepEqual([...ci.jobs.gate.needs].sort(), ['build', 'checks', 'integration', 'policy']);
+assert.deepEqual([...ci.jobs.gate.needs].sort(), ['build', 'checks', 'checks_npm_latest', 'integration', 'policy']);
+assert.deepEqual(ci.jobs.checks_npm_latest.strategy.matrix.npm, ['10', '12']);
+for (const command of ['npm run check', 'npm run test:install', 'npm run build']) {
+	assert.ok(ci.jobs.checks_npm_latest.steps.some(step => step.run === command), `Explicit npm lanes must run ${command}`);
+}
+assert.ok(ci.jobs.checks_npm_latest.steps.some(step => step.run?.includes('npm install --global --ignore-scripts "npm@$NPM_VERSION"')), 'npm major selection must actually run, not use an unsupported action input');
 assert.ok(!ci.on.pull_request.paths && !ci.on.pull_request['paths-ignore'], 'Required checks cannot be skipped by path filters');
 const release = parse(read('.github/workflows/release.yml'));
 assert.equal(release.jobs.publish.environment, 'npm');
