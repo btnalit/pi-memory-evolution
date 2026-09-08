@@ -2,6 +2,13 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
+## [0.2.1](https://github.com/btnalit/pi-memory-evolution/compare/v0.2.0...v0.2.1) (2026-09-08)
+
+
+### Automation
+
+* gate changes and automate verified npm releases ([#2](https://github.com/btnalit/pi-memory-evolution/issues/2)) ([87f9245](https://github.com/btnalit/pi-memory-evolution/commit/87f9245ef799870723ef1f6478eb623d2a37a958))
+
 ## [0.2.0] - 2026-09-08
 
 ### Changed

@@ -1,6 +1,6 @@
 {
 	"name": "pi-memory-evolution",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "Automatic cross-session memory using Pi's active model, transactional local storage, and topic-based recall across directories.",
 	"license": "MIT",
 	"publishConfig": {
