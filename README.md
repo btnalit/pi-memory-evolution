@@ -57,16 +57,25 @@ from 0.1; see [Migration](#migration-from-01) and [Recovery](#recovery-and-troub
   facts, preferences, decisions or project-state claims using recognizable headings.
 - Explicit user statements containing cues such as `remember`, `prefer`, `记住`,
   `偏好`, `纠正`, `不对`, `以后`, or `不要` also trigger learning, without waiting for
-  another compaction. Assistant/tool text never becomes a user memory instruction.
-- A completed, non-cue work turn (commit/push/fix/test/review, etc.) can update existing
-  related project-state memories without waiting for compaction. It needs linked tool
-  calls/results and a normal final assistant response. The extension saves bounded,
-  sanitized observations, including failure flags, and nominates at most 8 existing
-  unpinned project-state IDs from that capture origin, including states aged out of recall.
-  Forgotten/conflicted states stay excluded. The model can only update those
-  states, not create preferences or unrelated facts from tool output. Mere requests or
-  assistant-only success claims do not trigger this path. Mixed explicit-cue/work turns
-  retain the existing cue path, without a second progress call.
+  another compaction. Natural declarations such as `我比较在意的三大功能…`,
+  `我们的核心需求是…` or `Our priorities are…` also trigger learning, even if followed
+  by a question asking for feedback. This is bounded intent recognition, not universal
+  understanding. Quotes, ordinary recall questions and one-off commands are not requirements.
+  Assistant/tool text never becomes a user memory instruction.
+- Work requests (commit/push/fix/test/review, etc.) can update existing project states
+  from linked tool results. Important commit/push/test results are retained ahead of
+  late routine inspection, not simply the last 8 tools. Normal completion and interrupted
+  assistant responses are distinguished: a completed tool operation is usable evidence
+  even if the final reply failed, but it does **not** prove the entire task completed.
+  Internal `memory_recall` results and observations referencing this extension's own
+  state directory are excluded from this evidence path.
+- Update nomination is separate from answering a query: explicit operation resources and
+  project names nominate up to 8 active, unpinned states in the same capture origin,
+  prioritizing pending states without a per-path top-2 or answer-deduplication gate.
+  Expired states can receive new evidence; forgotten/conflicted states cannot. The model
+  can only replace nominated project states, never create preferences from tool results.
+  A mixed requirement/work turn can create **two separate serialized sources/calls**,
+  preserving statement versus tool authority instead of silently discarding the work.
 - Each processing attempt makes at most one background model call, using up to 32
   recently updated active memories from that source's capture origin. This is a
   conservative automatic-replacement safeguard, **not a recall restriction**.
@@ -111,6 +120,9 @@ from 0.1; see [Migration](#migration-from-01) and [Recovery](#recovery-and-troub
   认证呢？ → 继续` retain the subject and require the current attribute; prior-topic-only
   matches cannot satisfy the new question. Explicit new, unknown and reset topics stop
   old-topic inheritance. Assistant/tool/injected text never supplies the topic.
+  The active-context scan covers up to 4096 entries/messages, returning at most six
+  user texts; repeated topic-less continuations share a slot so long tool-heavy work
+  does not immediately lose its subject. Bounds and compaction still limit recall.
   A fresh session saying only `继续` injects nothing; naming a topic enables cross-session
   recall regardless of its original directory.
 - Query coverage, evidence-based document frequency, field weights, mild length
@@ -136,7 +148,9 @@ A model call may incur the usual charges of your active provider. These backgrou
 calls are not assistant turns and their usage is not added to Pi's session token totals.
 There is no additional call on ordinary recall. Eligible work turns may now incur one
 additional background call each; no related tracked state or no tool observation means
-no progress call. Automatic retries may add up to four calls per source after the initial
+no progress call. A mixed statement/work turn may additionally incur a separate learning
+call; interrupted turns with usable observations may also learn through automatic recovery.
+Automatic retries may add up to four calls per source after the initial
 failure; every attempt uses the session's then-current model/authentication. Model mistakes
 remain possible; tool observations and model-generated aliases are not proof of truth. Use
 history, correction, pinning and undo rather than treating generated claims as verified facts.
@@ -240,7 +254,8 @@ These are optional direct controls, **not approval gates**:
 /memory search <query>                # up to 10 recallable matches across all origins
 /memory explain                       # last automatic recall snapshot, including injection count
 /memory explain <query>               # preview retrieval reasons for an explicit query (3-claim cap)
-/memory status                       # integrity + retry/paused diagnostics + recall mode
+/memory learning                     # last capture/nomination reasons + recent transaction outcomes
+/memory status                       # integrity + retries + processed-versus-changed outcomes
 /memory history                      # last 10 events across all origins
 /memory evolve                       # optional one-off retry, overriding delay/failure limit
 /memory undo <event-id>               # reverse actual changes, if not modified since
@@ -334,7 +349,11 @@ JSONL, not changes made in the new database.
   are not recalled. Matching remains lexical, not a guarantee of semantic or cross-language
   equivalence; vague references and languages/terms outside the concept map or learned
   aliases can still be missed.
-- **Old progress still shown:** age/weight does not prove a task finished. A new eligible
+- **Old progress still shown:** `/memory learning` distinguishes no work observation,
+  no update targets, already captured and newly captured sources, with retained/omitted
+  observation counts and nomination reasons. `/memory status` shows actual changed-record
+  counts from recent model transactions: `done` means processed/retired, **not learned**.
+  Age/weight does not prove a task finished. A new eligible
   work observation or compaction can update tracked progress; upgrading alone does not
   invent completion or replay old tool transcripts. Inspect `/memory show <id>` and
   history, or correct the record explicitly when you know the current state.
@@ -386,3 +405,5 @@ for the previous architecture and the 0.2 simplification. The follow-up
 The later [quality validation](docs/quality-validation.md) covers relevance, bilingual
 recall and completed-work progress updates. [Conversation recall](docs/conversation-recall.md)
 documents natural-question handling, multi-hop matching, diagnostics and validation limits.
+[Progress pipeline](docs/progress-pipeline.md) documents the long-task/interruption fixes,
+operation-based update nomination, natural requirement capture and real-data replay limits.

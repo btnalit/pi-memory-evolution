@@ -431,6 +431,16 @@ export class MemoryStore {
 			return this.record("manual", `Undo ${id}`, restored, event.scope);
 		});
 	}
+	/** Persistent transaction outcomes, not a claim that every completed job learned something. */
+	processingStatus(): string {
+		const rows = this.db.prepare("SELECT id,scope,data FROM events WHERE json_extract(data,'$.actor')='model' ORDER BY rowid DESC LIMIT 5").all();
+		const outcomes = rows.map(row => {
+			const event = parseEvent(row.data, row.id, row.scope);
+			return `${clipBytes(redact(event.reason), 200)}: changedRecords=${event.after.length}${event.after.length ? '' : ' (no memory changes)'}`;
+		});
+		return ['Processing outcomes: done means processed/retired, not necessarily learned.', ...outcomes,
+			...(rows.length ? [] : ['No model transactions yet.']), 'Use /memory learning for the last capture/nomination decision.'].join('\n');
+	}
 	status(): string {
 		if (this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get()?.value !== "5") throw new Error("Invalid memory schema marker");
 		const health = this.db.prepare("PRAGMA quick_check").get();
@@ -447,7 +457,7 @@ export class MemoryStore {
 				|| !FEEDBACK_VERDICTS.has(row.verdict as FeedbackVerdict) || !Number.isSafeInteger(row.at)) throw new Error("Invalid feedback receipt");
 		}
 		const jobs = this.db.prepare("SELECT state,COUNT(*) AS n FROM sources GROUP BY state").all();
-		return `${this.readMemories().length} memories; ${jobs.map((j) => `${j.state}=${j.n}`).join(", ") || "no sources"}; SQLite ok (schema 5)\n${this.recoveryStatus()}`;
+		return `${this.readMemories().length} memories; ${jobs.map((j) => `${j.state}=${j.n}`).join(", ") || "no sources"}; SQLite ok (schema 5)\n${this.recoveryStatus()}\n${this.processingStatus()}`;
 	}
 }
 

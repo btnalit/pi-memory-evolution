@@ -7,10 +7,10 @@ import { join, resolve } from "node:path";
 import { isSubagentProcess } from "./child-process.ts";
 import { MemoryStore, type MemoryAction, type RetryMode } from "./memory/memory-store.ts";
 import { recallQuery, resolveRecallQuery, retrieveMemories, selectRelevantMemories } from "./memory/retriever.ts";
-import { isRecallQuestion, type RecallInput } from "./memory/query.ts";
-import { features } from "./memory/search.ts";
+import { learningIntent } from "./memory/learning.ts";
+import { nominateProgress } from "./memory/progress-targets.ts";
 import { recentUserMessages } from "./adapter/session-context.ts";
-import { progressObservation } from "./adapter/progress-observation.ts";
+import { inspectProgress } from "./adapter/progress-observation.ts";
 import { buildRuntimeDigest } from "./injector/digest.ts";
 import { evolve } from "./memory/evolution.ts";
 import { clipBytes, fingerprint, redact } from "./memory/privacy.ts";
@@ -24,11 +24,6 @@ export interface MemoryEvolutionDependencies {
 	/** Test-only timing overrides; production uses the bounded recovery policy. */
 	timeoutMs?: number;
 	pollMs?: number;
-}
-const MEMORY_CUE = /记住|偏好|更正|纠正|应该改成|改为|不对|以后|不要|\b(?:remember|prefer|correction|instead)\b/iu;
-function learningCue(text: string): boolean {
-	return MEMORY_CUE.test(text) && (!isRecallQuestion(text)
-		|| /记住|更正|纠正|以后|不要|(?:^|[.!?]\s*)(?:please\s+)?remember\b/iu.test(text));
 }
 
 /** Capture → automatic memory update → topic-based recall across sessions/directories. */
@@ -46,6 +41,7 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 	let lastError = "";
 	// Bounded, sanitized diagnostics for the last automatic turn; no database/session log.
 	let lastRecall = "No automatic recall attempt in this extension instance.";
+	let lastLearning = "No learning capture attempt in this extension instance.";
 	let warned = false;
 	const notify = (ctx: ExtensionContext, text: string, type: "info" | "warning") => {
 		try { ctx.ui.notify(redact(text), type); } catch { /* UI failure does not undo a committed update. */ }
@@ -118,6 +114,8 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 		if (getStore().capture({ id, scope: scopeOf(ctx), kind: "summary", content: entry.summary, createdAt: entry.timestamp })) void enqueue(id, ctx);
 	}));
 	pi.on("agent_end", guard((event, ctx) => {
+		let capturedStatements = 0;
+		const intents: string[] = [];
 		for (const message of event.messages) {
 			if (message.role !== "user" || !Number.isFinite(message.timestamp)) continue;
 			const content = typeof message.content === "string" ? message.content : message.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
@@ -127,26 +125,27 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 				getStore().feedback(feedback.id, feedback.verdict, id, new Date(message.timestamp).toISOString());
 				continue;
 			}
-			if (!learningCue(content)) continue;
-			if (getStore().capture({ id, scope: scopeOf(ctx), kind: "user", content, createdAt: new Date(message.timestamp).toISOString() })) void enqueue(id, ctx);
+			const intent = learningIntent(content); intents.push(intent.reason);
+			if (!intent.learn) continue;
+			if (getStore().capture({ id, scope: scopeOf(ctx), kind: "user", content, createdAt: new Date(message.timestamp).toISOString() })) {
+				capturedStatements++; void enqueue(id, ctx);
+			}
 		}
-		const observed = progressObservation(event.messages, ctx.sessionManager.getSessionId());
-		// Explicit memory cues keep their existing path; don't spend a second call or
-		// race two sources over the same targets for a mixed cue/work turn.
-		if (!observed || learningCue(observed.userText)) return;
+		const inspected = inspectProgress(event.messages, ctx.sessionManager.getSessionId(), { cwd: ctx.cwd, stateDir });
+		const observed = inspected.observation;
+		const capture = { capturedStatements, intents: intents.slice(-6), observations: inspected.diagnostics };
+		lastLearning = diagnosticText({ ...capture, stage: observed ? 'nominating' : 'skipped-progress' });
+		if (!observed) return;
 		const scope = scopeOf(ctx);
 		const query = resolveRecallQuery(observed.userText, recentUserMessages(ctx));
-		const candidates = getStore().readMemories(scope).filter((m) => m.kind === "project_state" && m.layer !== "pinned");
-		const paths = [...features(observed.queryHints)].filter((word) => word.startsWith("literal:") && word.includes("/"));
-		// Shell flags/code are not conversational query terms. Qualified operation
-		// paths form a separate nomination lane rather than diluting query coverage.
-		// Fresh evidence may update a state that has aged out of ordinary recall.
-		const nominate = (text: RecallInput, limit: number) => selectRelevantMemories(candidates, text, limit, Date.now(), { includeExpiredProjectState: true });
-		const targets = [...new Set([...paths.slice(-8).flatMap((path) => nominate(path.slice(8), 2)),
-			...nominate(query, 8)].map((m) => m.id))].slice(0, 8);
-		if (!targets.length) return;
-		const { userText: _request, queryHints: _hints, ...source } = observed;
-		if (getStore().capture({ ...source, scope, targets })) void enqueue(source.id, ctx);
+		const nomination = nominateProgress(getStore().readMemories(scope), { scope, query, resources: observed.resources });
+		if (!nomination.targets.length) {
+			lastLearning = diagnosticText({ ...capture, stage: 'no-update-targets', nomination: nomination.diagnostics }); return;
+		}
+		const { id, kind, content, createdAt } = observed;
+		const captured = getStore().capture({ id, kind, content, createdAt, scope, targets: nomination.targets });
+		lastLearning = diagnosticText({ ...capture, stage: captured ? 'progress-captured' : 'already-captured', source: id, nomination: nomination.diagnostics });
+		if (captured) void enqueue(id, ctx);
 	}));
 	pi.on("before_agent_start", guard((event, ctx) => {
 		lastRecall = 'Last automatic recall failed before completing; see /memory status.';
@@ -184,7 +183,7 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 	});
 
 	pi.registerCommand("memory", {
-		description: "Automatic memory: list, show, search, explain, status, history, evolve, undo, feedback, correct, forget, pin, conflict, resolve, adopt",
+		description: "Automatic memory: list, show, search, explain, learning, status, history, evolve, undo, feedback, correct, forget, pin, conflict, resolve, adopt",
 		handler: async (args, ctx) => {
 			if (lifetime.signal.aborted) return;
 			try {
@@ -193,6 +192,7 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 				const scope = scopeOf(ctx);
 				let text: string;
 				if (operation === "status") text = `${current.status()}\nCapture origin: ${scope}\nRecall: all origins, topic-based\nRecovery polling: every ${(dependencies.pollMs ?? RECOVERY_POLL_MS) / 1000}s while Pi is running\n${lastError || "Automatic updates enabled; no approval needed."}`;
+				else if (operation === "learning") text = `Last learning capture (transient, not proof of updates):\n${lastLearning}\n${current.processingStatus()}`;
 				else if (operation === "explain") {
 					text = id ? diagnosticText(retrieveMemories(current.readMemories(), [id, value].filter(Boolean).join(' ')).diagnostics)
 						: `Last automatic recall snapshot (not a live query):\n${lastRecall}`;
@@ -238,7 +238,7 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 				} else if (["correct", "forget", "pin", "unpin", "conflict", "resolve", "adopt"].includes(operation)) {
 					if (!id) throw new Error("A memory id is required");
 					text = `Update recorded: ${current.act(id, operation as MemoryAction, operation === "adopt" ? scope : value)}`;
-				} else throw new Error("Unknown operation. Use /memory list|show|search|explain|status|history|evolve|undo|feedback|correct|forget|pin|unpin|conflict|resolve|adopt");
+				} else throw new Error("Unknown operation. Use /memory list|show|search|explain|learning|status|history|evolve|undo|feedback|correct|forget|pin|unpin|conflict|resolve|adopt");
 				notify(ctx, text, "info");
 			} catch { report(ctx); notify(ctx, "Memory command failed. Check the operation/id and /memory status; no partial update was committed.", "warning"); }
 		},

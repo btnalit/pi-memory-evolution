@@ -8,6 +8,11 @@ Development is on `main`; this version has not yet been tagged or published to n
 
 ### Changed
 
+- Separate operation/project-based progress nomination from answer retrieval; pending states naming a bare repository remain eligible without per-path top-2 or answer deduplication
+- Preserve important commit/push/test observations ahead of late inspection; retain completed operations before error/aborted responses without claiming whole-task completion
+- Expand bounded active-user context scanning to 4096 entries/messages and collapse repeated topic-less continuations while preserving reset/unknown-topic barriers
+- Capture natural requirement/preference/priority declarations without requiring a remember keyword; mixed statement/work sources are serialized separately instead of discarding progress
+- Exclude internal memory lookups/owned-state observations from progress evidence; include operation-resource hints and explicit observation omissions
 - Evidence-aware self-ranking after lexical gates, with separate host-assigned source weights, type-specific gradual freshness decay and non-cumulative explicit feedback
 - Schema 2/3/4 → 5 transactionally adds feedback receipts without rewriting old memories/history or inventing evidence
 - Withhold weaker proposed replacements and quarantine new conflicting variants instead of overwriting stronger user/tool evidence; fresh tool progress can still supersede prior manually corrected states
@@ -27,6 +32,8 @@ Development is on `main`; this version has not yet been tagged or published to n
 
 ### Added
 
+- `/memory learning` capture/nomination diagnostics and persistent changed-record outcomes in status, distinguishing processed jobs from actual learning
+- Long-task, interruption/cancel-recovery, operation-resource, natural-intent and mixed-authority regressions; real-Pi commit/failed-push followed by 12 diagnostics, plus read-only historical replay
 - Host-assigned evidence basis/method/source/date, bounded evidence and aging labels in injection, separate quality factors in show/explain, lifecycle exclusion diagnostics
 - `/memory feedback <id> useful|unhelpful|accurate|incorrect` and narrow exact-ID user feedback statements, without paid learning calls; replay/late-event protection, quarantine/undo, unchanged evidence clock
 - Read-only `memory_recall` tool for a second explicit-topic lookup during a task, bounded to 3 claims / 2048 bytes with no query persistence in the memory database

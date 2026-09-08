@@ -14,11 +14,12 @@ or automatic changes to project files, system configuration, skills or extension
    after the previous check/call ends).
 2. `session_compact`: atomically capture a sanitized session-qualified source and bounded
    local claims; enqueue semantic consolidation.
-3. `agent_end`: capture explicit user memory/correction cues, distinguishing recall
-   questions (`What do you remember ...?`) from new learning instructions. For a non-cue completed
-   work request with linked tool results, optionally capture a bounded `progress`
-   observation targeting existing related project states. Assistant/tool text is never
-   a user memory instruction; assistant-only replies cannot trigger this path.
+3. `agent_end`: capture explicit cues and natural user requirements/preferences,
+   distinguishing recall questions from new statements. For work with linked operation
+   results, capture a bounded `progress` source, including operations completed before an
+   interrupted final response. Mixed statements/work use separate serialized sources;
+   assistant/tool text never becomes a user preference. Pure memory lookup/inspection
+   without a recognized work operation cannot trigger progress learning.
 4. `before_agent_start`: resolve the current topic, search the whole memory database and
    append a bounded, source-labeled digest to this turn's system prompt. No model call.
 5. `session_shutdown`: stop polling, abort work, return cancelled jobs to pending without
@@ -34,9 +35,10 @@ attempt; no stale model snapshot or foreground turn cancellation controls recove
 ## Conversation-aware recall
 
 `adapter/session-context.ts` uses the public `buildContextEntries()` facade, not session
-files or `getEntries()` across branches. It examines up to 64 trailing active entries
-(and up to 64 retained-tail messages per compaction), selecting at most 6 user texts of
-2,048 UTF-8 bytes each. Retained user tails survive compaction. Assistant/tool/custom and
+files or `getEntries()` across branches. It examines at most 4096 trailing active entries
+and at most 4096 messages in total (including retained tails), selecting at most 6 user
+texts of 2,048 UTF-8 bytes each. Consecutive topic-less continuations share a slot; reset
+and unknown-topic barriers remain. Retained user tails survive compaction. Assistant/tool/custom and
 injected messages are excluded, as are raw compaction summaries. Context is transient:
 it is never re-captured as a source. Missing/invalidated context leaves direct-query
 recall available rather than poisoning the hook.
@@ -124,17 +126,24 @@ Neither automatic injection nor tool lookup is counted as evidence/usefulness fe
 
 The old cue/compaction-only input loop could retain “not committed” even when a normal
 work turn later committed/pushed: that turn was never an evolution source.
-`progress-observation.ts` now requires a work-request keyword, linked call/result IDs,
-and a normal final assistant stop. It keeps at most 8 recent observations (from the last
-64 turn messages), each operation path/command <=1024 bytes and output <=2048 bytes,
-plus a bounded request/report; serialized evidence <=28,000 bytes. Head/tail previews
-preserve failure endings and sanitize credentials before storage.
+`progress-observation.ts` requires a work request, linked call/result IDs, and at least
+one recognized work operation. It scans up to 4096 current-turn messages, retains at most
+8 observations by operation importance, and preserves chronological order. Commit/push
+and test/process results outrank late routine inspection. Each stored operation <=1024
+bytes, output <=2048 bytes; serialized evidence including request/report, bounded resource
+hints and omitted-count/completion flags stays <=28,000 bytes. Head/tail previews preserve
+failure endings. Internal memory tools and observations referencing the owned state directory
+are excluded. An error/aborted final response uses `completion=interrupted` and no assistant
+report: observed operations are evidence, not proof the entire task finished.
 
-User topic and explicit operation paths nominate at most 8 active, unpinned
-`project_state` targets in the capture origin. Qualified operation paths have priority
-before the target cap; shell flags do not dilute the topic query. States expired from
-ordinary recall may still be nominated for a new observation, without reviving forgotten
-or conflicted records. Tool output cannot nominate targets. No tracked related state means no call. `progress` sources are not parsed as local
+`memory/progress-targets.ts` separately nominates at most 8 active, unpinned project
+states using user topics and explicit operation resources. It does not use answer-recall
+literal gates, per-path top-2, relative cutoffs or facet deduplication. Explicit cd/git -C
+and real checkout roots from file operations can match qualified paths or explicit bare
+project names; capture origin alone supplies no evidence. Pending states receive nomination
+priority. Conflicting absolute paths of the same basename cannot qualify through a topic
+fallback. States expired from ordinary recall may receive new evidence, without reviving
+forgotten/conflicted records. Tool output cannot nominate targets. No tracked related state means no call. `progress` sources are not parsed as local
 summary claims: the model must return `project_state` plus `replaces` naming an eligible
 host-nominated ID. Store guards enforce these restrictions even for a malformed model
 batch. No new preference/fact, unrelated target or cross-origin overwrite is allowed.
@@ -142,8 +151,14 @@ The prompt requires evidence for each outcome and warns that commit/test success
 push success, assistant reports are not proof, and failures/unfinished clauses must
 remain. Outputs stay **provisional**: this is not independent success verification.
 
-One qualified turn may add one normal background call. Mixed explicit-cue/work turns use
-only the cue path; no assistant-only/ordinary-chat polling or startup transcript replay.
+One qualified work source may add one background call. A mixed statement/work turn can
+add a separate user-source call, serialized with progress to retain their distinct authority.
+There is no assistant-only/ordinary-chat polling or startup transcript replay. Interrupted
+work that was durably captured can recover with the existing retry mechanism. Hard kills
+before agent_end, unknown commands and sources outside the scan/selection budgets remain
+limits; there is no new disk-backed per-tool work journal. `/memory learning` reports
+capture/nomination decisions, while status/history expose processed-versus-changed outcomes.
+See [progress-pipeline.md](progress-pipeline.md) for policy details and validation.
 Existing stale records are not guessed complete on upgrade. New observations/compactions
 can retire them; exact-ID correction remains available. An incorporated new observation
 may refresh an unchanged pending state's evidence date. Alias-only enrichment cannot.

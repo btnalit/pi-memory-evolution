@@ -322,6 +322,88 @@ test('exact user feedback changes automatic ranking without a paid learning call
 	},async()=>{calls++;return {model:'fake/model',text:'{"memories":[]}'};});
 });
 
+test('long continuation updates a bare-project state using early test/commit evidence, not late diagnostic files',()=>{
+	let wanted='';let calls=0;return fixture(async({call,stateDir,cwd,ctx})=>{
+		const s=new MemoryStore(stateDir);try {
+			s.capture({id:'old-long',scope:cwd,kind:'summary',content:'## Progress\n- atlas-memory-engine recall tests and commit are pending; full acceptance remains open.',createdAt:'2020-01-01T00:00:00Z'});
+			wanted=s.readMemories()[0].id;
+			const event=completedWork(join(cwd,'atlas-memory-engine'));event.messages[0].content='请接着继续';
+			for(let i=0;i<90;i++)event.messages.splice(event.messages.length-1,0,
+				{role:'assistant',timestamp:Date.now(),stopReason:'toolUse',content:[{type:'toolCall',id:`read${i}`,name:'read',arguments:{path:`/tmp/diagnostic-${i}.log`}}]} as any,
+				{role:'toolResult',timestamp:Date.now(),toolCallId:`read${i}`,toolName:'read',isError:false,content:[{type:'text',text:'Read-only diagnostic'}]} as any);
+			ctx.sessionManager.buildContextEntries=()=>[{type:'message',message:{role:'user',content:'Continue implementing atlas-memory-engine recall quality.'}},...event.messages.map(message=>({type:'message',message}))];
+			await call('agent_end',event);assert.equal(calls,1);
+			assert.equal(s.readMemories().find(m=>m.id===wanted)!.status,'forgotten');
+			const digest=await call('before_agent_start',{prompt:'atlas-memory-engine',systemPrompt:'Base'});
+			assert.match(digest.systemPrompt,/commit created/);assert.match(digest.systemPrompt,/acceptance remains open/);
+			await call('agent_end',event);assert.equal(calls,1);
+		}finally{s.close();}
+	},async(_ctx,_prompt,input)=>{
+		calls++;const data=JSON.parse(input);assert.ok(data.source.targets.includes(wanted));
+		assert.ok(JSON.parse(data.source.content).observations.some((o:any)=>o.output.includes('push completed')));
+		return {model:'mock',text:JSON.stringify({memories:[{kind:'project_state',content:'atlas-memory-engine commit created and pushed; full acceptance remains open.',replaces:wanted}]})};
+	});
+});
+
+test('executed work before a failed final response is captured as interrupted, not falsely completed',()=>{
+	let calls=0;return fixture(async({call,stateDir,cwd})=>{
+		const s=new MemoryStore(stateDir);try{
+			s.capture({id:'old-interrupted',scope:cwd,kind:'summary',content:'## Progress\n- Fixture commit and push pending.',createdAt:'2020-01-01T00:00:00Z'});
+			const event=completedWork(cwd,true);event.messages.at(-1)!.stopReason='error';
+			await call('agent_end',event);assert.equal(calls,1);
+			assert.ok(s.readMemories().some(m=>m.status==='provisional'&&m.content.includes('push still pending')));
+		}finally{s.close();}
+	},async(_ctx,_prompt,input)=>{
+		calls++;const data=JSON.parse(input),body=JSON.parse(data.source.content);
+		assert.equal(body.completion,'interrupted');assert.equal(body.assistantReport,'');assert.equal(body.observations[0].isError,true);
+		return {model:'mock',text:JSON.stringify({memories:[{kind:'project_state',content:'Fixture local commit created; push still pending.',replaces:data.existing[0].id}]})};
+	});
+});
+
+test('cancelled foreground preserves partial work for automatic recovery without consuming failure budget',()=>{
+	let calls=0;return fixture(async({call,stateDir,cwd,ctx})=>{
+		const s=new MemoryStore(stateDir);try{
+			s.capture({id:'cancel-seed',scope:cwd,kind:'summary',content:'## Progress\n- Fixture commit and push pending.',createdAt:'2020-01-01T00:00:00Z'});
+			s.finishEvolution(s.beginEvolution('cancel-seed')!,[],'seed');
+			const event=completedWork(cwd,true);event.messages.at(-1)!.stopReason='aborted';
+			ctx.signal=AbortSignal.abort();await call('agent_end',event);assert.equal(calls,0);
+			assert.match(s.pending(cwd)!,/^progress:/);assert.equal(s.pausedJobs(),0);
+			ctx.signal=undefined;await call('session_start');await waitUntil(()=>calls===1);
+			assert.ok(s.readMemories().some(m=>m.status==='provisional'&&m.content.includes('commit created')));
+		}finally{s.close();}
+	},async(_ctx,_prompt,input)=>{calls++;const data=JSON.parse(input);return {model:'mock',text:JSON.stringify({memories:[{kind:'project_state',content:'Fixture commit created; push pending.',replaces:data.existing[0].id}]})};});
+});
+
+test('natural core requirements are captured once as user statements without compaction',()=>{
+	let calls=0;return fixture(async({call,stateDir})=>{
+		const event={messages:[{role:'user',timestamp:Date.now(),content:'我比较在意的三大功能，自进化（自动更新，衰退，自排序，来源区分可信度等），相关注入，自动召回。这些你觉得做得怎么样？'}]};
+		await call('agent_end',event);await call('agent_end',event);assert.equal(calls,1);
+		const s=new MemoryStore(stateDir);try{assert.equal(s.readMemories()[0].kind,'preference');assert.equal(s.readMemories()[0].evidence?.basis,'user_statement');}finally{s.close();}
+	},async(_ctx,_prompt,input)=>{calls++;assert.equal(JSON.parse(input).source.kind,'user');return {model:'mock',text:'{"memories":[{"kind":"preference","content":"用户在意记忆自进化、相关注入和自动召回。"}]}'};});
+});
+
+test('mixed preference and work turns keep separate authority and serialize both updates',()=>{
+	let calls=0;return fixture(async({call,stateDir,cwd})=>{
+		const s=new MemoryStore(stateDir);try{
+			s.capture({id:'old-mixed',scope:cwd,kind:'summary',content:'## Progress\n- Fixture commit and push pending.',createdAt:'2020-01-01T00:00:00Z'});
+			const event=completedWork(cwd);event.messages[0].content='Remember I prefer concise replies. Commit fixture changes and push them.';
+			await call('agent_end',event);await waitUntil(()=>calls===2);
+			assert.ok(s.readMemories().some(m=>m.kind==='preference'));assert.ok(s.readMemories().some(m=>m.kind==='project_state'&&m.status==='provisional'&&m.content.includes('completed')));
+		}finally{s.close();}
+	},async(_ctx,_prompt,input)=>{calls++;const data=JSON.parse(input);return {model:'mock',text:JSON.stringify({memories:data.source.kind==='user'?[{kind:'preference',content:'User prefers concise replies.'}]:[{kind:'project_state',content:'Fixture commit and push completed.',replaces:data.existing[0].id}]})};});
+});
+
+test('learning diagnostics distinguish no observations, no candidates and zero-change processing',()=>fixture(async({call,command,notifications,stateDir,cwd})=>{
+	await call('agent_end',{messages:[{role:'user',timestamp:Date.now(),content:'继续'},{role:'assistant',timestamp:Date.now(),stopReason:'stop',content:[]}]});
+	await command('learning');assert.match(notifications.at(-1),/no-work-observation/);
+	await call('agent_end',completedWork(cwd));await command('learning');assert.match(notifications.at(-1),/no-update-targets/);
+	const s=new MemoryStore(stateDir);try{
+		s.capture({id:'old-diagnostic',scope:cwd,kind:'summary',content:'## Progress\n- Fixture commit and push pending.',createdAt:'2020-01-01T00:00:00Z'});
+		await call('agent_end',completedWork(cwd));await command('learning');assert.match(notifications.at(-1),/progress-captured/);
+		assert.match(notifications.at(-1),/changedRecords=0/);assert.match(notifications.at(-1),/not necessarily learned/);
+	}finally{s.close();}
+}));
+
 test('memory_recall is a bounded read-only cross-origin lookup, not implicit feedback or a fallback',()=>{
 	let calls=0;return fixture(async({call,tools,stateDir,ctx})=>{
 		await call('session_compact',compact());ctx.cwd='/different-origin';

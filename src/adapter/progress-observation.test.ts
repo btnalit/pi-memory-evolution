@@ -18,14 +18,14 @@ test('assistant-only, unmatched tool output, unfinished turns and old-turn tools
  for(const modify of [
   (m:any[])=>m.slice(1),
   (m:any[])=>{m[0].content='Hello.';return m;},
-  (m:any[])=>{m[3].stopReason='aborted';return m;},
+  (m:any[])=>{m[3].stopReason='toolUse';return m;},
   (m:any[])=>{m[2].toolName='unmatched';return m;},
   (m:any[])=>[m[0],m[3]],
   (m:any[])=>[...m,{role:'user',timestamp:2000,content:'Now commit another task.'},m[3]],
  ])assert.equal(progressObservation(modify(turn()),'session'),undefined);
 });
 test('observation payload is bounded and sanitized, with no image/code payload copied from arguments',()=>{
- const m=turn();m[1].content[0].arguments={path:'/fixture/readme.md',content:'private file contents never needed'};
+ const m=turn();m[1].content[0].name='write';m[2].toolName='write';m[1].content[0].arguments={path:'/fixture/readme.md',content:'private file contents never needed'};
  m[2].content=[{type:'image',data:'image-data'},{type:'text',text:'token=synthetic-secret\n'+'🙂 prefix '.repeat(6000)+'\nPush failed at the end.'}];
  const observation=progressObservation(m,'session')!;
  assert.ok(Buffer.byteLength(observation.content)<=28000);

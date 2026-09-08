@@ -204,7 +204,9 @@ backup. Development tests use temporary directories, not the production database
 
 ## Validation
 
-- `npm run check`: strict typecheck, **194 passing tests**, package dry-run inspection.
+- This step passed 194 tests, strict typecheck and package dry-run inspection. The later
+  [progress-pipeline follow-up](progress-pipeline.md) records the current validation and
+  the fixes for long tasks, natural requirement capture and interrupted work.
 - New tests cover source/method labels, model metadata forgery rejection, weaker
   replacement quarantine, same-batch duplicate/replacement bypasses, conflict-clock preservation, fresh progress after manual
   correction, reused replacements, alias-only stability, aging floors/expiry/pins,

@@ -14,6 +14,7 @@ const agentDir = join(dir, 'agent');
 const stateDir = join(agentDir, 'agent-suite', 'memory-evolution');
 const requests = [];
 let recoveryCalls = 0;
+let longWorkCwd = '';
 // The synthetic Git work must not inherit hooks, repo paths, signing or user config.
 const fixtureEnv = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
 	GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_GLOBAL: '/dev/null' };
@@ -29,12 +30,23 @@ const server = createServer(async (req, res) => {
 		assert.equal(req.headers.authorization, 'Bearer synthetic-local-key');
 		let answer = 'Noted.';
 		let toolCall;
+		let toolCalls;
 		if (semantic) {
 			assert.ok(!input.tools?.length, 'memory model must not receive tools');
 			const data = JSON.parse(text(input.messages.at(-1).content));
 			if (data.source.id === 'recovery-fixture') {
 				assert.equal(input.max_tokens ?? input.max_completion_tokens, 4096, 'cap must respect the model limit');
 				answer = ++recoveryCalls === 1 ? 'deliberately invalid JSON' : '{"memories":[]}';
+			} else if (data.source.kind === 'user' && data.source.content.startsWith('Our priorities are')) {
+				answer = JSON.stringify({ memories: [{ kind: 'preference', content: 'The user prioritizes automatic evolution, relevant injection and automatic recall.' }] });
+			} else if (data.source.kind === 'progress' && JSON.parse(data.source.content).request.includes('long-work-fixture')) {
+				const evidence = JSON.parse(data.source.content);
+				assert.equal(evidence.completion, 'completed');
+				assert.equal(evidence.observations.length, 8);
+				assert.ok(evidence.observations.some(o => o.tool === 'bash' && o.arguments.includes('git') && o.isError && /No configured push destination/i.test(o.output)), 'early commit/push evidence must survive late diagnostics');
+				const target = data.existing.find(m => m.content.includes('project-b long-work-fixture'));
+				assert.ok(target, 'bare project-level pending state must be nominated from actual checkout operations');
+				answer = JSON.stringify({ memories: [{ kind: 'project_state', content: 'project-b long-work-fixture commit created; push pending; full acceptance remains open.', replaces: target.id }] });
 			} else if (data.source.kind === 'progress') {
 				const evidence = JSON.parse(data.source.content);
 				assert.equal(evidence.observations.at(-1).isError, true);
@@ -44,6 +56,10 @@ const server = createServer(async (req, res) => {
 				const port = data.source.content.includes('7777') ? '7777' : '9999';
 				answer = JSON.stringify({ memories: [{ kind: 'fact', content: `Database port is ${port}.`, ...(data.existing[0] ? { replaces: data.existing[0].id } : {}), searchTerms: ['database', 'port', '数据库', '端口', 'service endpoint'] }] });
 			}
+		} else if (input.messages.at(-1).role === 'user' && text(input.messages.at(-1).content).includes('Continue long-work-fixture.')) {
+			const git = 'git -c core.hooksPath=/dev/null -c commit.gpgsign=false -c user.name=Fixture -c user.email=fixture@example.invalid';
+			toolCalls = [{ index: 0, id: 'long-commit', type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command: `cd ${JSON.stringify(longWorkCwd)} && ${git} add long-fixture.txt && ${git} commit -m long-fixture && ${git} push`, timeout: 15 }) } },
+				...Array.from({ length: 12 }, (_,i) => ({ index: i+1, id: `diagnostic-${i}`, type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command: `printf 'Read-only diagnostic ${i}\\n'` }) } }))];
 		} else if (input.messages.at(-1).role === 'user' && text(input.messages.at(-1).content).includes('Use the recall tool fixture.')) {
 			assert.ok(input.tools.some(t => t.function?.name === 'memory_recall'), 'read-only recall tool must load in the real host');
 			toolCall = { index: 0, id: 'fixture-recall', type: 'function', function: { name: 'memory_recall', arguments: JSON.stringify({ query: 'SQLite 数据库认证' }) } };
@@ -55,8 +71,9 @@ const server = createServer(async (req, res) => {
 		requests.push({ semantic, digest, toolResult: input.messages.at(-1).role === 'tool' ? text(input.messages.at(-1).content) : undefined });
 		res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
 		const chunk = (delta, finish_reason, usage) => `data: ${JSON.stringify({ id: 'test', object: 'chat.completion.chunk', created: 1, model: 'memory-test', choices: [{ index: 0, delta, finish_reason }], ...(usage ? { usage } : {}) })}\n\n`;
-		res.end(chunk(toolCall ? { role: 'assistant', tool_calls: [toolCall] } : { role: 'assistant', content: answer }, null) + chunk({}, toolCall ? 'tool_calls' : 'stop', { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 }) + 'data: [DONE]\n\n');
-	} catch (error) { if (!res.destroyed && !res.headersSent) { res.writeHead(500); res.end(String(error)); } }
+		const outgoingTools = toolCalls ?? (toolCall ? [toolCall] : undefined);
+		res.end(chunk(outgoingTools ? { role: 'assistant', tool_calls: outgoingTools } : { role: 'assistant', content: answer }, null) + chunk({}, outgoingTools ? 'tool_calls' : 'stop', { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 }) + 'data: [DONE]\n\n');
+	} catch (error) { console.error('Synthetic provider assertion:', error.message); if (!res.destroyed && !res.headersSent) { res.writeHead(500); res.end(String(error)); } }
 });
 let child;
 let store;
@@ -111,6 +128,7 @@ async function ask(message) {
 try {
 	const projectA = join(dir, 'project-a');
 	const projectB = join(dir, 'project-b');
+	longWorkCwd = projectB;
 	for (const path of [agentDir, projectA, projectB]) mkdirSync(path, { recursive: true });
 	await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
 	const port = server.address().port;
@@ -199,6 +217,22 @@ try {
 	assert.equal(requests.filter(r => r.semantic).length, 3, 'exact-ID feedback is local, not another model call');
 	assert.match(store.status(), /schema 5/);
 
+	const callsBeforePipeline = requests.filter(r => r.semantic).length;
+	await ask('Our priorities are automatic evolution, relevant injection and automatic recall.');
+	await waitFor(() => store.readMemories().some(m => m.kind === 'preference' && m.content.includes('prioritizes automatic evolution')));
+	assert.equal(requests.filter(r => r.semantic).length, callsBeforePipeline+1, 'natural requirements learn without a remember cue');
+	writeFileSync(join(projectB, 'long-fixture.txt'), 'Synthetic long work fixture.\n');
+	store.capture({ id: 'long-state', scope: realpathSync(projectB), kind: 'summary', content: '## Progress\n- project-b long-work-fixture commit and push pending; full acceptance remains open.', createdAt: '2020-01-01T00:00:00Z' });
+	store.finishEvolution(store.beginEvolution('long-state'), [], 'fixture-seed');
+	const longOld = store.readMemories().find(m => m.sourceEntryId === 'long-state');
+	await ask('Continue long-work-fixture.');
+	await waitFor(() => store.readMemories().find(m => m.id === longOld.id).status === 'forgotten');
+	const longDigest = await ask('project-b long-work-fixture');
+	assert.match(longDigest, /commit created; push pending/); assert.match(longDigest, /acceptance remains open/);
+	assert.equal(requests.filter(r => r.semantic).length, callsBeforePipeline+2);
+	send({ type: 'prompt', message: '/memory learning' });
+	await waitFor(() => output.includes('Last learning capture') && output.includes('changedRecords='));
+
 	// A persisted failure is picked up on startup, then a malformed response retries
 	// on the real recurring timer with no user prompt or /memory evolve command.
 	await stopChild();
@@ -212,7 +246,7 @@ try {
 	await waitFor(() => recoveryCalls === 2 && !store.status().includes('failed='), 25_000);
 	assert.match(store.status(), /retrying=0, paused=0/);
 	assert.equal(output.includes('extension_error'), false);
-	console.log('PASS: evidence labels, feedback/quarantine without paid learning, read-only memory_recall round trip, real Pi model/auth, cross-session recall, natural-language questions, multi-hop focus/subject matching, unknown-topic barriers, explain diagnostics, no recall-time learning calls, topic switch, provenance, forget, tool-backed progress update, failed push not called success, automatic startup/timer recovery, no approval.');
+	console.log('PASS: natural requirement capture, early commit/push evidence after 12 diagnostics, project-name update nomination, partial acceptance preserved, learning diagnostics, evidence labels, feedback/quarantine without paid learning, read-only memory_recall round trip, real Pi model/auth, cross-session recall, natural-language questions, multi-hop focus/subject matching, unknown-topic barriers, explain diagnostics, no recall-time learning calls, topic switch, provenance, forget, tool-backed progress update, failed push not called success, automatic startup/timer recovery, no approval.');
 } finally {
 	store?.close();
 	await stopChild();
