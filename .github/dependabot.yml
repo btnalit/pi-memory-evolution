@@ -11,6 +11,10 @@ updates:
     commit-message:
       prefix: chore
       include: scope
+    # Types must track the minimum supported Node runtime, not the newest major.
+    ignore:
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
     groups:
       development-minor-patch:
         dependency-type: development

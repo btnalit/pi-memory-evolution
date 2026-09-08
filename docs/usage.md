@@ -57,6 +57,31 @@ the old source before switching between npm/Git/local forms, which Pi treats as
 different package identities. `pi remove <source>` does not erase memory state.
 Restart or `/reload` all sessions using the extension after changing versions.
 
+### Recovering from duplicate installation sources
+
+Pi treats npm, Git and local paths as different package identities. Installing the
+same source twice is idempotent, but keeping both a dev checkout and an npm copy can
+register `memory_recall` twice and prevent Pi from starting. Updating either copy
+does not remove the other. This is not a failure of a single-source upgrade.
+
+Use terminal commands, not commands inside the broken Pi session:
+
+```bash
+pi list
+# Keep npm; remove the local source shown by pi list:
+pi remove /absolute/path/to/pi-memory-evolution
+# Or keep the checkout; remove npm instead:
+# pi remove npm:pi-memory-evolution
+```
+
+Choose only the removal matching your intended source. If installed project-locally,
+run `pi list --approve` and `pi remove <source> -l --approve` from that trusted project.
+A manually configured `extensions` entry is not a package entry: remove that explicit
+entry from the appropriate settings file as well. Then restart Pi and run
+`/memory status`. Package CLI operations work without loading the conflicting
+extensions, and removal leaves memory data intact. Do not delete the database or
+rename the tool to hide the conflict; an old installation would still run its hooks.
+
 ## What happens automatically
 
 - A successful `session_compact` saves a sanitized source and extracts up to 16

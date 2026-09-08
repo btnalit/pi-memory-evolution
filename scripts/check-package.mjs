@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseNpmPack } from './lib/npm-pack.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -18,7 +19,7 @@ for (const name of ['@earendil-works/pi-coding-agent', 'typebox']) {
 	assert.equal(manifest.peerDependencies[name], '*', `${name} must be supplied by the Pi host`);
 	assert.ok(!manifest.dependencies?.[name], `${name} must not be bundled as a runtime dependency`);
 }
-const [packed] = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: root, encoding: 'utf8', timeout: 60_000 }));
+const packed = parseNpmPack(execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: root, encoding: 'utf8', timeout: 60_000 }));
 const files = new Set(packed.files.map(f => f.path));
 for (const path of readdirSync(new URL('../src/', import.meta.url), { recursive: true })) {
 	const normalized = path.replaceAll('\\', '/');

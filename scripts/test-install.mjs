@@ -10,6 +10,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { MemoryStore } from '../src/memory/memory-store.ts';
 import { Database } from '../src/memory/sqlite.ts';
+import { parseNpmPack } from './lib/npm-pack.mjs';
 
 process.umask(0o077);
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -114,8 +115,8 @@ try {
 	for (const path of [agentDir, cwd]) mkdirSync(path, { recursive: true });
 	for (const name of ['gitconfig', 'npmrc', 'global-npmrc']) writeFileSync(join(dir, name), '');
 	writeFileSync(settingsFile, JSON.stringify({ packages: [], defaultProjectTrust: 'never', enableInstallTelemetry: false }));
-	console.log(`Host: ${run(pi, ['--version']).trim()}`);
-	const [packed] = JSON.parse(run('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', dir], root));
+	console.log(`Host: ${run(pi, ['--version']).trim()}; Node: ${process.version}; npm: ${run('npm', ['--version']).trim()}`);
+	const packed = parseNpmPack(run('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', dir], root));
 	const extracted = join(dir, 'package files'); mkdirSync(extracted);
 	run('tar', ['-xzf', join(dir, packed.filename), '-C', extracted]);
 	const local = join(extracted, 'package');
@@ -123,6 +124,7 @@ try {
 	runPi('install', local); runPi('install', local);
 	assert.equal(packages().length, 1, 'repeat local installation must not duplicate settings');
 	assert.ok(runPi('list').includes('package'));
+	assert.ok(runPi('list', '--approve').includes('package'), 'documented trusted-project listing flag must work');
 	await smoke(join(local, 'src/index.ts'));
 	console.log('PASS: packed artifact installs idempotently and loads through normal Pi discovery without node_modules.');
 
@@ -206,9 +208,16 @@ try {
 	await smoke(npmEntry); assert.equal(stateSnapshot(), snapshot);
 	assert.ok(registryRequests.some(r => r.url === '/fixture.tgz'), 'native npm must fetch the actual archive');
 	assert.ok(registryRequests.every(r => r.method === 'GET' && [ `/${manifest.name}`, '/fixture.tgz' ].includes(r.url)), `unexpected registry dependency/request: ${JSON.stringify(registryRequests)}`);
+	// Different source forms are intentionally distinct Pi packages. Reproduce the
+	// reported fatal collision, then verify CLI removal works without starting Pi.
+	runPi('install', local); assert.equal(packages().length, 2);
+	await assert.rejects(smoke(npmEntry), /memory_recall|duplicate/i, 'mixed sources must expose the real host conflict');
+	runPi('remove', local); assert.equal(packages().length, 1);
+	assert.equal(sourceOf(packages()[0]), npmSource);
+	await smoke(npmEntry); assert.equal(stateSnapshot(), snapshot, 'duplicate-source recovery must retain memory/history');
 	await npmPi('remove', npmSource); assert.equal(packages().length, 0);
 	await smoke(); assert.equal(stateSnapshot(), snapshot);
-	console.log('PASS: native npm install/reinstall/remove using the real archive and a loopback registry; no bundled host peers.');
+	console.log('PASS: native npm install/reinstall/remove and mixed-source conflict recovery; no bundled host peers.');
 	console.log('PASS: installation smoke test; isolated credentials/settings/state, no public network or model requests.');
 } finally {
 	await stop();
