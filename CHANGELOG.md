@@ -2,6 +2,13 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
+## [0.2.7](https://github.com/btnalit/pi-memory-evolution/compare/v0.2.6...v0.2.7) (2026-09-09)
+
+
+### Bug Fixes
+
+* unblock an unenforceable cost ceiling and remove the duplication behind three drift bugs ([#19](https://github.com/btnalit/pi-memory-evolution/issues/19)) ([875cd82](https://github.com/btnalit/pi-memory-evolution/commit/875cd821859d73b02ad9ba9cda2c21ff772b772f))
+
 ## [0.2.6](https://github.com/btnalit/pi-memory-evolution/compare/v0.2.5...v0.2.6) (2026-09-09)
 
 
