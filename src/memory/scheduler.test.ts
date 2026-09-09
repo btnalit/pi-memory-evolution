@@ -78,12 +78,17 @@ test('per-attempt timeout leaves time for a backup, and late primary output cann
   calls.push(c.model!.provider);
   return c.model!.provider === 'primary' ? new Promise<{model: string; text: string}>(resolve => { late = resolve; }) : Promise.resolve(ok(c));
  };
- await assert.rejects(evolveRouted(s, 'source', context(), signal(), complete, false, 15), (e: any) => e.code === 'timeout');
- db.exec('UPDATE sources SET retry_at=0');
- assert.equal(await evolveRouted(s, 'source', context(), signal(), complete, false, 15), true);
- late!({ model: 'primary/model', text: '{"memories":[{"kind":"fact","content":"Invented late result."}]}' });
- await new Promise(resolve => setImmediate(resolve));
- assert.deepEqual(calls, ['primary','primary','backup']); assert.equal(s.readMemories().length, 0);
+ // A stalled provider call holds a socket. This fixture's pending promise holds nothing, and
+ // AbortSignal.timeout is unref'd, so without a real handle the loop drains before the deadline.
+ const stalled = setInterval(() => {}, 50);
+ try {
+  await assert.rejects(evolveRouted(s, 'source', context(), signal(), complete, false, 15), (e: any) => e.code === 'timeout');
+  db.exec('UPDATE sources SET retry_at=0');
+  assert.equal(await evolveRouted(s, 'source', context(), signal(), complete, false, 15), true);
+  late!({ model: 'primary/model', text: '{"memories":[{"kind":"fact","content":"Invented late result."}]}' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, ['primary','primary','backup']); assert.equal(s.readMemories().length, 0);
+ } finally { clearInterval(stalled); }
 }));
 
 test('model waits do not poison source backoff; cancellation does not add failures', () => using(async (s, db) => {
