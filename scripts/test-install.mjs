@@ -103,6 +103,7 @@ async function smoke(expectedEntry) {
 }
 const stateSnapshot = () => {
 	const db = new Database(join(stateDir, 'memory.sqlite'));
+	db.exec('PRAGMA busy_timeout=5000'); // Same wait as the store, so a stray lock cannot fail the snapshot.
 	try {
 		assert.equal(db.prepare("SELECT value FROM metadata WHERE key='schema'").get().value, '7');
 		assert.equal(db.prepare('PRAGMA quick_check').get().quick_check, 'ok');

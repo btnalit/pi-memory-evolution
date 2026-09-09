@@ -244,7 +244,9 @@ try {
 	await waitFor(() => store.status().includes('invalid_output'));
 	assert.equal(recoveryCalls, 1);
 	const db = new Database(join(stateDir, 'memory.sqlite'));
-	try { db.exec("UPDATE sources SET retry_at=0 WHERE id='recovery-fixture'"); } finally { db.close(); }
+	// The extension is running and may hold the write lock. Match the store's own wait instead of
+	// failing the run on SQLITE_BUSY the moment a recovery poll overlaps this fixture write.
+	try { db.exec('PRAGMA busy_timeout=5000'); db.exec("UPDATE sources SET retry_at=0 WHERE id='recovery-fixture'"); } finally { db.close(); }
 	await waitFor(() => recoveryCalls === 2 && !store.status().includes('failed='), 25_000);
 	assert.match(store.status(), /retrying=0, paused=0/);
 	assert.equal(output.includes('extension_error'), false);
