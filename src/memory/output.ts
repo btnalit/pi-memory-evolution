@@ -1,4 +1,4 @@
-import type { Claim } from './extractor.ts';
+import { MAX_CLAIM_CHARS, MIN_CLAIM_CHARS, type Claim } from './extractor.ts';
 import { MEMORY_KINDS } from './memory-store.ts';
 import { EvolutionError } from './recovery.ts';
 import { OUTPUT_PROTOCOL_VERSION, type Diagnostic, type DiagnosticReason } from './diagnostics.ts';
@@ -67,7 +67,7 @@ export function parseMemoryOutput(text: string): { claims: Claim[]; diagnostic: 
   if (!MEMORY_KINDS.has(c.kind as Claim['kind'])) fail('invalid_kind', `${field}.kind`);
   if (typeof c.content !== 'string') fail('content_type', `${field}.content`);
   const content = (c.content as string).trim();
-  if (content.length < 4 || content.length > 480) fail('content_length', `${field}.content`, content.length);
+  if (content.length < MIN_CLAIM_CHARS || content.length > MAX_CLAIM_CHARS) fail('content_length', `${field}.content`, content.length);
   if (c.replaces !== undefined && (typeof c.replaces !== 'string' || !c.replaces.trim())) fail('invalid_replaces', `${field}.replaces`);
   // Aliases are optional recall hints, never authority. Drop, don't repair or echo, invalid values.
   const searchTerms: string[] = [];

@@ -304,7 +304,7 @@ These are optional direct controls, **not approval gates**:
 /memory archive-legacy                # copy inactive legacy plan files to a private unique archive; originals kept
 /memory undo <event-id>               # reverse actual changes, if not modified since
 /memory feedback <id> <verdict>       # useful | unhelpful | accurate | incorrect
-/memory correct <id> <replacement>    # literal replacement, 4–480 characters
+/memory correct <id> <replacement>    # literal replacement, 4–800 characters
 /memory forget <id>
 /memory pin <id>
 /memory unpin <id>

@@ -2,7 +2,7 @@ import { Database } from "./sqlite.ts";
 import { chmodSync, closeSync, lstatSync, mkdirSync, openSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { extractStructuredMemories, type Claim } from "./extractor.ts";
+import { extractStructuredMemories, MAX_CLAIM_CHARS, MIN_CLAIM_CHARS, type Claim } from "./extractor.ts";
 import { loadLegacyImport, emptyLegacyDigest } from './legacy.ts';
 import { legacyFiles } from './legacy-files.ts';
 import { clipBytes, fingerprint, redact } from "./privacy.ts";
@@ -273,7 +273,7 @@ export class MemoryStore {
 	}
 	private claim(source: Source, item: Claim, method: "local" | "model" = "local"): DurableMemory | undefined {
 		const content = redact(item.content).trim();
-		if (!validSearchTerms(item.searchTerms) || !MEMORY_KINDS.has(item.kind) || content.length < 4 || content.length > 480 || content.includes("[REDACTED")) throw new Error("Invalid or sensitive claim");
+		if (!validSearchTerms(item.searchTerms) || !MEMORY_KINDS.has(item.kind) || content.length < MIN_CLAIM_CHARS || content.length > MAX_CLAIM_CHARS || content.includes("[REDACTED")) throw new Error("Invalid or sensitive claim");
 		const id = fingerprint(JSON.stringify([source.scope, item.kind, content]));
 		if (this.get(id) || this.db.prepare("SELECT 1 FROM blocked WHERE scope=? AND hash=?").get(source.scope, fingerprint(content))) return undefined;
 		// Also respect forgotten legacy records whose ids predate content-addressing.
@@ -552,7 +552,7 @@ export class MemoryStore {
 			switch (type) {
 				case "correct": {
 					const content = redact(value ?? "").trim();
-					if (content.length < 4 || content.length > 480 || content.includes("[REDACTED")) throw new Error("Correction must be 4–480 characters without credentials");
+					if (content.length < MIN_CLAIM_CHARS || content.length > MAX_CLAIM_CHARS || content.includes("[REDACTED")) throw new Error(`Correction must be ${MIN_CLAIM_CHARS}–${MAX_CLAIM_CHARS} characters without credentials`);
 					next = { ...next, content, status: "confirmed", searchTerms: undefined, feedback: undefined,
 						evidence: { basis: "manual_correction", method: "manual", sourceId: `manual:${randomUUID()}`, at } }; break;
 				}

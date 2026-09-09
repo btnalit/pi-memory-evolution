@@ -4,6 +4,7 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { completeMemory } from '../adapter/pi-api.ts';
 import { parseClaims } from './evolution.ts';
 import { parseMemoryOutput } from './output.ts';
+import { MAX_CLAIM_CHARS } from './extractor.ts';
 
 const fact = { kind: 'fact', content: 'Atlas uses SQLite.' };
 const json = JSON.stringify({ memories: [fact] });
@@ -57,5 +58,16 @@ test('parse diagnostics expose fixed rule/path and numeric bounds, never raw JSO
  for (const value of ['private-secret is not JSON', JSON.stringify({ memories: [{ ...fact, 'private-secret': 1 }] })]) {
   try { parseClaims(value); assert.fail('must reject'); }
   catch (e: any) { assert.ok(!JSON.stringify(e).includes('private-secret')); assert.ok(!e.message.includes('private-secret')); }
+ }
+});
+
+test('the claim length cap leaves headroom for verbose models and still bounds one claim', () => {
+ const claim = (n: number) => JSON.stringify({ memories: [{ kind: 'fact', content: 'a'.repeat(n) }] });
+ // A 613-character claim from a weaker model used to reject the whole batch and burn a paid retry.
+ assert.equal(parseClaims(claim(613))[0].content.length, 613);
+ assert.equal(parseClaims(claim(MAX_CLAIM_CHARS))[0].content.length, MAX_CLAIM_CHARS);
+ for (const n of [MAX_CLAIM_CHARS + 1, 3]) {
+  try { parseClaims(claim(n)); assert.fail('must reject'); }
+  catch (e: any) { assert.equal(e.diagnostic.reason, 'content_length'); assert.equal(e.diagnostic.actual, n); }
  }
 });

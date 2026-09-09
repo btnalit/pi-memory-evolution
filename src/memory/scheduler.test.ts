@@ -7,7 +7,7 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { MemoryStore } from './memory-store.ts';
 import { Database } from './sqlite.ts';
 import { EvolutionError } from './recovery.ts';
-import { evolveRouted, routeCandidates } from './scheduler.ts';
+import { evolveRouted, modelKey, routeCandidates } from './scheduler.ts';
 import { loadRoutingPolicy } from './routing-policy.ts';
 
 const model = (provider: string, id = 'model') => ({ provider, id, api: 'openai-completions', input: ['text'], reasoning: false,
@@ -98,6 +98,10 @@ test('model waits do not poison source backoff; cancellation does not add failur
  const other = s.beginEvolution('source', 'auto', undefined, Date.now(), 'backup/model');
  assert.ok(other); s.failEvolution(other, 'cancelled');
  assert.equal(db.prepare('SELECT failures FROM sources').get()!.failures, 1);
+ assert.equal(s.routeAvailable('primary/model', 'primary'), false, 'the rate-limited model itself waits');
+ assert.equal(s.routeAvailable('primary/sibling', 'primary'), true, 'a sibling keeps its own tpm/rpm budget');
+ // Credentials and account quota are provider-wide, so those still park every sibling.
+ s.failEvolution(s.beginEvolution('source', true, undefined, Date.now(), 'primary/model')!, 'quota');
  assert.equal(s.routeAvailable('primary/sibling', 'primary'), false);
 }));
 
@@ -143,4 +147,31 @@ test('invalid policy fails closed, with no credentials in errors', () => {
    assert.throws(() => loadRoutingPolicy(dir), /^Error: Invalid recovery.json$/);
   }
  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a same-provider sibling is never chosen automatically', () => using(async s => {
+ // Siblings share the primary's credentials and account quota, so the automatic path stays cross-provider.
+ assert.deepEqual(routeCandidates(context(), s).map(modelKey), ['primary/model', 'backup/model']);
+}));
+
+test('an explicit allowlist reaches a same-provider model, the only redundancy with one provider', () => using(async s => {
+ // Previously this entry validated and was then silently dropped, leaving a single-provider host with no route.
+ assert.deepEqual(routeCandidates(context(), s).map(modelKey), ['primary/model', 'primary/sibling']);
+}, { fallbackModels: ['primary/sibling'] }));
+
+test('a sibling absorbs model-specific limits but is skipped for shared quota and auth', async () => {
+ for (const [code, routes] of [
+  ['rate_limit', ['primary/model', 'primary/sibling']],
+  ['quota', ['primary/model']],
+  ['auth', ['primary/model']],
+ ] as const) await using(async s => {
+  const seen: string[] = [];
+  const run = evolveRouted(s, 'source', context(), signal(), async c => {
+   seen.push(modelKey(c.model!));
+   if (modelKey(c.model!) === 'primary/model') throw new EvolutionError(code, { httpStatus: code === 'auth' ? 403 : 429 });
+   return ok(c);
+  });
+  if (routes.length === 1) await assert.rejects(run); else assert.equal(await run, true);
+  assert.deepEqual(seen, [...routes], `${code} routing`);
+ }, { fallbackModels: ['primary/sibling'] });
 });

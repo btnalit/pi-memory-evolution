@@ -1,6 +1,13 @@
 import type { MemoryKind } from "./memory-store.ts";
 import { redact, fingerprint } from "./privacy.ts";
 
+/** One concise claim. Every claim length rule derives from these, so the round trip cannot drift apart. */
+export const MAX_CLAIM_CHARS = 800;
+export const MIN_CLAIM_CHARS = 4;
+// Worst-case UTF-8 for the character cap: an all-CJK claim must survive being fed back as an
+// existing candidate uncut, or the model would match `replaces` against a truncated fact.
+export const MAX_CLAIM_BYTES = MAX_CLAIM_CHARS * 3;
+
 export interface Claim {
 	kind: MemoryKind;
 	content: string;
@@ -54,7 +61,7 @@ export function extractStructuredMemories(summary: string, limit = 16): Claim[] 
 			const state = bullet[1]?.toLowerCase() === "x" ? "done" : bullet[1] === " " ? "pending" : section.task;
 			if (state) content = `[${state}] ${content}`;
 		}
-		if (content.includes("[REDACTED") || content.length < 4 || content.length > 480) continue;
+		if (content.includes("[REDACTED") || content.length < MIN_CLAIM_CHARS || content.length > MAX_CLAIM_CHARS) continue;
 		const key = fingerprint(`${section.kind}:${content}`);
 		if (!seen.has(key)) { seen.add(key); claims.push({ kind: section.kind, content }); }
 		if (claims.length >= limit) break;
