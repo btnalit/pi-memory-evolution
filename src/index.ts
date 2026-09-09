@@ -15,7 +15,9 @@ import { buildRuntimeDigest } from "./injector/digest.ts";
 import { evolve } from "./memory/evolution.ts";
 import { clipBytes, fingerprint, redact } from "./memory/privacy.ts";
 import { completeMemory, type CompleteMemory } from "./adapter/pi-api.ts";
-import { EVOLUTION_TIMEOUT_MS, RECOVERY_POLL_MS, failureCode } from "./memory/recovery.ts";
+import { EVOLUTION_TIMEOUT_MS, RECOVERY_POLL_MS, EvolutionError, failureCode } from "./memory/recovery.ts";
+import { modelLabel } from './memory/diagnostics.ts';
+import { archiveLegacyFiles } from './memory/legacy-files.ts';
 
 export interface MemoryEvolutionDependencies {
 	stateDir?: string;
@@ -37,21 +39,28 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 	let work = Promise.resolve();
 	let queued = 0;
 	let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
-	let pausedWarning = false;
 	let lastError = "";
+	let lastErrorSource: string | undefined;
 	// Bounded, sanitized diagnostics for the last automatic turn; no database/session log.
 	let lastRecall = "No automatic recall attempt in this extension instance.";
 	let lastLearning = "No learning capture attempt in this extension instance.";
-	let warned = false;
+	let localWarning = false; // Last resort when the store itself is unavailable.
 	const notify = (ctx: ExtensionContext, text: string, type: "info" | "warning") => {
 		try { ctx.ui.notify(redact(text), type); } catch { /* UI failure does not undo a committed update. */ }
 	};
-	const report = (ctx: ExtensionContext, error?: unknown) => {
-		// Do not log exception strings: provider errors can contain credentials or source text.
-		lastError = `Memory operation failed (${failureCode(error)}); local records retained. Automatic recovery retries eligible jobs; /memory status shows retry times or paused jobs.`;
+	const report = (ctx: ExtensionContext, error?: unknown, sourceId?: string) => {
+		// Never expose raw exceptions. Safe rule/path metadata is enough to identify the failed contract.
+		const detail = error instanceof EvolutionError ? error.diagnostic : {};
+		const reason = detail.reason ? `/${detail.reason}${detail.field ? ` at ${detail.field}` : ''}` : '';
+		lastErrorSource = sourceId;
+		lastError = `Memory operation failed (${failureCode(error)}${reason}); local records retained. /memory status shows diagnostics, retry times and paused jobs.`;
 		try {
-			if (!warned && ctx.hasUI) { warned = true; notify(ctx, lastError, "warning"); }
-		} catch { /* Context may have been invalidated during reload. */ }
+			if (!ctx.hasUI) return;
+			const key = sourceId ? getStore().jobNoticeKey(sourceId) : `operation:${failureCode(error)}:${reason}`;
+			if (getStore().takeNotice(key)) notify(ctx, lastError, 'warning');
+		} catch {
+			if (!localWarning) { localWarning = true; notify(ctx, lastError, 'warning'); }
+		}
 	};
 	const guard = <T, R>(fn: (event: T, ctx: ExtensionContext) => R | Promise<R>) => async (event: T, ctx: ExtensionContext): Promise<R | undefined> => {
 		if (lifetime.signal.aborted) return;
@@ -68,11 +77,11 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 				const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(timeoutMs), ...(retry !== "auto" && contextSignal ? [contextSignal] : [])]);
 				const applied = await evolve(getStore(), id, ctx, signal, dependencies.complete ?? completeMemory, retry, timeoutMs);
 				if (!applied) return "skipped";
-				lastError = ""; warned = false;
+				if (lastErrorSource === id) { lastError = ''; lastErrorSource = undefined; }
 				return "completed";
 			} catch (error) {
 				if (lifetime.signal.aborted) return "skipped";
-				report(ctx, error);
+				report(ctx, error, id);
 				return "failed";
 			} finally { queued--; }
 		});
@@ -89,8 +98,8 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 				if (pending) await enqueue(pending, ctx, "auto");
 				if (!lifetime.signal.aborted) {
 					const paused = getStore().pausedJobs();
-					if (paused && !pausedWarning) notify(ctx, `Memory automatic recovery paused for ${paused} source(s) after repeated failures; records retained. /memory status shows diagnostics.`, "warning");
-					pausedWarning = paused > 0;
+					if (paused && ctx.hasUI && getStore().takeNotice(`paused:${getStore().pausedNoticeKey()}`))
+						notify(ctx, `Memory automatic recovery paused for ${paused} source(s); records retained. /memory status shows reasons; /memory evolve <source-id> retries one source.`, 'warning');
 				}
 			}
 		} catch (error) { if (!lifetime.signal.aborted) report(ctx, error); }
@@ -183,7 +192,7 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 	});
 
 	pi.registerCommand("memory", {
-		description: "Automatic memory: list, show, search, explain, learning, status, history, evolve, undo, feedback, correct, forget, pin, conflict, resolve, adopt",
+		description: "Automatic memory: list, show, search, explain, learning, status, history, evolve, import, archive-legacy, undo, feedback, correct, forget, pin, conflict, resolve, adopt",
 		handler: async (args, ctx) => {
 			if (lifetime.signal.aborted) return;
 			try {
@@ -191,16 +200,30 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 				const current = getStore();
 				const scope = scopeOf(ctx);
 				let text: string;
-				if (operation === "status") text = `${current.status()}\nCapture origin: ${scope}\nRecall: all origins, topic-based\nRecovery polling: every ${(dependencies.pollMs ?? RECOVERY_POLL_MS) / 1000}s while Pi is running\n${lastError || "Automatic updates enabled; no approval needed."}`;
+				if (operation === "status") {
+					const model = ctx.model ? modelLabel(`${ctx.model.provider}/${ctx.model.id}`) : 'unavailable';
+					text = `${current.status()}\nCurrent model: ${model}\n${current.budgetStatus(model)}\nCapture origin: ${scope}\nRecall: all origins, topic-based\nRecovery polling: every ${(dependencies.pollMs ?? RECOVERY_POLL_MS) / 1000}s while Pi is running`;
+				}
 				else if (operation === "learning") text = `Last learning capture (transient, not proof of updates):\n${lastLearning}\n${current.processingStatus()}`;
 				else if (operation === "explain") {
 					text = id ? diagnosticText(retrieveMemories(current.readMemories(), [id, value].filter(Boolean).join(' ')).diagnostics)
 						: `Last automatic recall snapshot (not a live query):\n${lastRecall}`;
 				} else if (operation === "evolve") {
-					const pending = current.pending(undefined, true);
+					if (value) throw new Error('Usage: /memory evolve [source-id]');
+					const pending = id ?? current.pending(undefined, true);
 					const result = pending ? await enqueue(pending, ctx, true) : undefined;
 					text = result === "completed" ? "Memory evolution completed." : result === "failed" ? lastError
 						: result === "skipped" ? "Source was already processed, claimed, or cancelled; no update applied here." : "No eligible source.";
+				} else if (operation === "import") {
+					// Explicit, transactional, repeat-safe. A completed import is never replayed over newer edits.
+					const target = [id, value].filter(Boolean).join(" ").trim();
+					const result = current.importLegacy(target ? resolve(target) : undefined);
+					text = `Legacy import: ${result.state}; imported=${result.imported}.\n${current.legacyStatus()}`;
+				} else if (operation === "archive-legacy") {
+					const archive = archiveLegacyFiles(current.stateDir);
+					text = archive.count
+						? `Archived ${archive.count} inactive legacy file(s) to ${redact(archive.directory!)}. Originals unchanged; archived plans are never executed.`
+						: "No inactive legacy files to archive.";
 				} else if (operation === "feedback") {
 					if (!id) throw new Error("Usage: /memory feedback <id> useful|unhelpful|accurate|incorrect");
 					const event = current.feedback(id, value as FeedbackVerdict);

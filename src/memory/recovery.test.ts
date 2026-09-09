@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { MemoryStore, type Source } from './memory-store.ts';
 import { Database } from './sqlite.ts';
-import { EVOLUTION_TIMEOUT_MS, LEASE_GRACE_MS, MAX_FAILURES, retryAt } from './recovery.ts';
+import { EVOLUTION_TIMEOUT_MS, LEASE_GRACE_MS, MAX_FAILURES, MAX_OUTPUT_FAILURES, MAX_WINDOW_FAILURES, retryAt } from './recovery.ts';
 
 const source = (id = 's'): Source => ({ id, kind: 'summary', scope: '/old-origin', content: '## Critical Context\n- Database uses SQLite.', createdAt: '2026-09-01T00:00:00Z' });
 function using(fn: (s: MemoryStore, db: Database, dir: string) => void) {
@@ -92,7 +92,7 @@ test('schema 3 migration adds recovery fields atomically, preserves data and dis
   assert.equal(job(db).failures, 1); assert.equal(job(db).attempt, 1);
   assert.equal(job(db).failed_at, 0); assert.equal(job(db).last_error, 'unknown');
   assert.deepEqual(migrated.readMemories(), records); assert.deepEqual(migrated.history(), history);
-  assert.match(migrated.status(), /schema 5/); assert.match(migrated.status(), /unknown \(legacy\)/);
+  assert.match(migrated.status(), /schema 6/); assert.match(migrated.status(), /unknown \(legacy\)/);
  } finally { migrated.close(); }
 }));
 
@@ -133,3 +133,93 @@ test('retry policy is bounded even after manual failures beyond the automatic ca
  assert.equal(retryAt(1, 100), 60_100); assert.equal(retryAt(4, 100), 3_600_100);
  assert.equal(retryAt(5, 100), 0); assert.equal(retryAt(100, 100), 0);
 });
+
+test('warning dedup is per source, error class and state, surviving reload and unrelated successes', () => using((s, db, dir) => {
+ const now = Date.now();
+ s.capture(source('a')); s.capture(source('b'));
+ s.failEvolution(s.beginEvolution('a')!, 'provider', now, { reason: 'request_failed' });
+ assert.equal(s.takeNotice(s.jobNoticeKey('a'), now), true, 'the first notice for a source/class is shown');
+ // The reproduced defect: an unrelated job succeeding must not re-arm another job's warning.
+ s.finishEvolution(s.beginEvolution('b')!, [], 'mock');
+ s.failEvolution(s.beginEvolution('a', true)!, 'provider', now, { reason: 'request_failed' });
+ assert.equal(s.takeNotice(s.jobNoticeKey('a'), now), false, 'an unchanged repeat failure must not warn again');
+ // A genuinely different error class is a state change worth reporting once.
+ s.failEvolution(s.beginEvolution('a', true)!, 'invalid_output', now, { reason: 'json_syntax' });
+ const changed = s.jobNoticeKey('a');
+ assert.equal(s.takeNotice(changed, now), true);
+ assert.equal(s.takeNotice(changed, now), false);
+ // Reload must not reset the marker: dedup is persisted, not an in-memory flag.
+ const reopened = new MemoryStore(dir);
+ try { assert.equal(reopened.takeNotice(changed, now), false, 'reload must not resurrect a suppressed warning'); }
+ finally { reopened.close(); }
+}));
+
+test('repeated output-protocol failures pause a source before the generic failure cap', () => using((s, db) => {
+ const now = Date.now();
+ s.capture(source());
+ for (let i = 0; i < MAX_OUTPUT_FAILURES; i++) s.failEvolution(s.beginEvolution('s', true)!, 'invalid_output', now, { reason: 'json_syntax' });
+ assert.equal(Number(job(db).output_failures), MAX_OUTPUT_FAILURES);
+ assert.ok(Number(job(db).failures) < MAX_FAILURES, 'pausing must not require burning the full paid budget');
+ assert.equal(s.pausedJobs(), 1);
+ assert.equal(s.pending(undefined, 'auto'), undefined, 'a paused source is not retried automatically');
+ assert.equal(Number(job(db).retry_at), 0);
+ // The single correction attempt carries fixed validation feedback, never the failed output.
+ const run = s.beginEvolution('s', true)!;
+ assert.equal(run.outputFailures, MAX_OUTPUT_FAILURES);
+ assert.equal(run.previousDiagnostic.reason, 'json_syntax');
+ s.finishEvolution(run, [], 'mock');
+ assert.equal(Number(job(db).output_failures), 0); assert.equal(s.pausedJobs(), 0);
+}));
+
+test('a shared failure window stops each new source from burning its own retry budget', () => using((s, db) => {
+ const model = 'provider/model';
+ let now = Date.now();
+ for (let i = 0; i < MAX_WINDOW_FAILURES; i++) {
+  s.capture(source(`s${i}`));
+  const run = s.beginEvolution(`s${i}`, 'auto', undefined, now, model);
+  assert.ok(run, `source ${i} must get its first attempt`);
+  s.failEvolution(run, 'provider', now, {});
+  now += 1000;
+ }
+ s.capture(source('fresh'));
+ assert.equal(s.beginEvolution('fresh', 'auto', undefined, now, model), undefined, 'the shared window is not per source');
+ const fresh = job(db, 'fresh');
+ assert.equal(Number(fresh.attempt), 0, 'a deferred source consumes no attempt');
+ assert.equal(Number(fresh.failures), 0, 'and no failure budget');
+ assert.equal(fresh.state, 'pending');
+ assert.ok(Number(fresh.retry_at) > now, 'it is deferred, not failed');
+ assert.match(s.budgetStatus(model, now), /waiting until/);
+ assert.match(s.budgetStatus('other/model', now), /available/, 'the budget is per model');
+ // A manual override stays a deliberate one-call escape hatch.
+ assert.ok(s.beginEvolution('fresh', true, undefined, now, model));
+}));
+
+test('a cancelled or interrupted attempt preserves the reason a source is paused', () => using((s, db, dir) => {
+ const now = Date.now();
+ const detail = { protocol: 2, model: 'p/m', reason: 'json_syntax' as const, field: 'memories[0].content' };
+ s.capture(source());
+ for (let i = 0; i < MAX_OUTPUT_FAILURES; i++) s.failEvolution(s.beginEvolution('s', true)!, 'invalid_output', now, detail);
+ assert.equal(s.pausedJobs(), 1);
+ assert.match(s.status(), /json_syntax/);
+ // Shutdown/reload during a manual retry must not erase the explanation the user needs to repair it.
+ s.failEvolution(s.beginEvolution('s', true, undefined, now, 'p/m')!, 'cancelled', now);
+ assert.match(s.status(), /json_syntax/); assert.match(s.status(), /memories\[0\]\.content/);
+ assert.equal(s.pausedJobs(), 1, 'a cancelled retry cannot silently unpause the source');
+ // An expired lease recovered as interrupted keeps it too, and it survives reopen.
+ s.beginEvolution('s', true, undefined, now, 'p/m');
+ s.recoverExpired(now + EVOLUTION_TIMEOUT_MS + LEASE_GRACE_MS + 1);
+ assert.match(s.status(), /json_syntax/);
+ const reopened = new MemoryStore(dir);
+ try { assert.match(reopened.status(), /json_syntax/); } finally { reopened.close(); }
+}));
+
+test('a new failure reports one outcome instead of inheriting an older field path', () => using((s) => {
+ const now = Date.now();
+ s.capture(source());
+ s.failEvolution(s.beginEvolution('s', true)!, 'invalid_output', now, { protocol: 2, model: 'p/m', reason: 'content_length', field: 'memories[3].content', actual: 3 });
+ assert.match(s.status(), /memories\[3\]\.content/);
+ s.failEvolution(s.beginEvolution('s', true)!, 'provider', now, { protocol: 2, model: 'p/m', reason: 'request_failed' });
+ assert.match(s.status(), /request_failed/);
+ assert.ok(!s.status().includes('memories[3].content'), 'a transport failure must not inherit a parse field path');
+ assert.ok(!s.status().includes('content_length'));
+}));

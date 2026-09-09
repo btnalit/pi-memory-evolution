@@ -23,7 +23,7 @@ test('automatically applies valid model output, no approval and one call per sou
 test('large valid bilingual output fits the new byte budget while oversized output is rejected',()=>{
 	const text=JSON.stringify({memories:Array.from({length:16},()=>({kind:'fact',content:'中'.repeat(480),searchTerms:Array.from({length:8},(_,i)=>`关键词${i}`+'中'.repeat(20))}))});
 	assert.ok(Buffer.byteLength(text)>24000);assert.equal(parseClaims(text).length,16);
-	assert.throws(()=>parseClaims(' '.repeat(64001)),/too large/);
+	assert.throws(()=>parseClaims(' '.repeat(64001)),(e:any)=>e.code==='invalid_output'&&e.diagnostic.reason==='output_too_large');
 });
 test('provider, parse and transaction failures have distinct persisted categories',()=>using(async(store)=>{
 	for(const [complete,code] of [
@@ -46,4 +46,21 @@ test('abort bounds providers that ignore AbortSignal and prevents late writes',(
 	controller.abort();await assert.rejects(pending);
 	finish!({model:'late',text:'{"memories":[{"kind":"fact","content":"Late invented fact."}]}'});
 	await new Promise((resolve)=>setImmediate(resolve));assert.equal(store.readMemories().length,1);
+}));
+
+test('the output correction note follows the actual previous failure, not a cumulative counter',()=>using(async(store)=>{
+	const prompts:string[]=[];
+	const ok:CompleteMemory=async(_ctx,system)=>{prompts.push(system);return {model:'test',text:'{"memories":[]}'};};
+	const bad=(text:string):CompleteMemory=>async(_ctx,system)=>{prompts.push(system);return {model:'test',text};};
+	const ctx={} as ExtensionContext, signal=()=>AbortSignal.timeout(1000);
+	// A protocol failure earns one correction note carrying the fixed rule that failed, never the failed output.
+	await assert.rejects(evolve(store,'s1',ctx,signal(),bad('{"memories":[{"kind":"fact"}]}'),true));
+	await assert.rejects(evolve(store,'s1',ctx,signal(),bad('still not JSON'),true));
+	assert.match(prompts.at(-1)!,/OUTPUT CORRECTION/);
+	assert.match(prompts.at(-1)!,/content_type|memories\[0\]/);
+	assert.ok(!prompts.at(-1)!.includes('{"memories":[{"kind":"fact"}]}'),'the failed output is never echoed back');
+	// A later transport failure must not keep asserting that the previous attempt failed validation.
+	await assert.rejects(evolve(store,'s1',ctx,signal(),async()=>{throw new Error('offline');},true));
+	await evolve(store,'s1',ctx,signal(),ok,true);
+	assert.ok(!prompts.at(-1)!.includes('OUTPUT CORRECTION'),'a provider error is not an output-validation failure');
 }));

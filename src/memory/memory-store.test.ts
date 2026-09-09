@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { MemoryStore, type Source } from "./memory-store.ts";
 import { Database } from "./sqlite.ts";
 import { selectRelevantMemories } from "./retriever.ts";
+import { archiveLegacyFiles, legacyFiles } from "./legacy-files.ts";
 
 function temp() { return mkdtempSync(join(tmpdir(), "pme-v2-")); }
 const source = (id = "s1", content = "## Critical Context\n- Database port is 5432.", scope = "/project"): Source => ({ id, scope, kind: "summary", content, createdAt: new Date().toISOString() });
@@ -160,10 +161,63 @@ test("legacy import is once-only, preserves files and recalls unknown-origin cla
 	}finally{s.close();rmSync(dir,{recursive:true,force:true});}
 });
 test("damaged or unreadable legacy action ledger stops import, never fails open", () => {
-	for(const broken of ["{broken",JSON.stringify({version:1,type:"correct",memoryId:"parent",createdAt:"2026-09-01",content:123})]) {
-		const dir=temp();try{writeFileSync(join(dir,"memories.jsonl"),JSON.stringify(legacy("parent","old content"))+"\n");writeFileSync(join(dir,"memory-actions.jsonl"),broken);assert.throws(()=>new MemoryStore(dir));}finally{rmSync(dir,{recursive:true,force:true});}
+	// The store still opens so status/repair stay reachable, but nothing imports and learning stays closed.
+	for(const broken of ["{broken",JSON.stringify({version:1,type:"correct",memoryId:"parent",createdAt:"2026-09-01",content:123}),undefined]) {
+		const dir=temp();
+		try{
+			writeFileSync(join(dir,"memories.jsonl"),JSON.stringify(legacy("parent","old content"))+"\n");
+			if(broken===undefined) mkdirSync(join(dir,"memory-actions.jsonl")); else writeFileSync(join(dir,"memory-actions.jsonl"),broken);
+			const s=new MemoryStore(dir);
+			try{
+				assert.equal(s.readMemories().length,0,"no partial import");
+				assert.equal(s.history().length,0);
+				assert.match(s.status(),/Legacy import: failed/);
+				assert.throws(()=>s.capture(source()),(e:any)=>e.code==="unavailable");
+				assert.throws(()=>s.beginEvolution("s1"),(e:any)=>e.code==="unavailable");
+				// An explicit retry re-reads the damaged ledger and stays failed rather than importing partially.
+				assert.throws(()=>s.importLegacy(),/Legacy import failed/);
+				assert.equal(s.readMemories().length,0);
+			}finally{s.close();}
+			// The failure is persisted, not a transient in-memory flag.
+			const reopened=new MemoryStore(dir);
+			try{assert.match(reopened.status(),/Legacy import: failed/);assert.equal(reopened.readMemories().length,0);}finally{reopened.close();}
+		}finally{rmSync(dir,{recursive:true,force:true});}
 	}
-	const dir=temp();try{mkdirSync(join(dir,"memory-actions.jsonl"));assert.throws(()=>new MemoryStore(dir));}finally{rmSync(dir,{recursive:true,force:true});}
+});
+test("a failed legacy import cannot be bypassed by pointing at an empty directory", () => {
+	const dir=temp(), empty=temp();
+	try{
+		writeFileSync(join(dir,"memories.jsonl"),"{broken");
+		const s=new MemoryStore(dir);
+		try{
+			assert.match(s.status(),/Legacy import: failed/);
+			assert.equal(s.importLegacy(empty).state,"failed");
+			assert.throws(()=>s.capture(source()),(e:any)=>e.code==="unavailable");
+		}finally{s.close();}
+	}finally{for(const d of [dir,empty]) rmSync(d,{recursive:true,force:true});}
+});
+test("legacy import state is tracked separately from schema creation, so a later ledger still imports", () => {
+	const dir=temp();
+	try{
+		// R3: a first run with no ledger must not permanently disable import.
+		let s=new MemoryStore(dir);
+		try{assert.match(s.status(),/Legacy import: not_found/);assert.equal(s.readMemories().length,0);}finally{s.close();}
+		writeFileSync(join(dir,"memories.jsonl"),[legacy("parent","Database port is 5432.","fact"),legacy("gone","Obsolete note.","fact")].map(m=>JSON.stringify(m)).join("\n")+"\n");
+		writeFileSync(join(dir,"memory-actions.jsonl"),JSON.stringify({version:1,memoryId:"gone",type:"forget",createdAt:"2026-09-02T00:00:00.000Z"})+"\n");
+		s=new MemoryStore(dir);
+		try{
+			// Opening after the ledger appeared must not silently skip it, and the import is explicit and repeatable.
+			const first=s.importLegacy();
+			assert.equal(first.state,"completed");assert.ok(first.imported>=1);
+			const imported=s.readMemories();
+			assert.ok(imported.some(m=>m.content.includes("5432")));
+			assert.ok(!imported.some(m=>m.content.includes("Obsolete note.")&&m.status!=="forgotten"),"a forgotten record must not be revived");
+			// Repeat-safe: a completed import is never replayed over newer edits.
+			assert.deepEqual(s.importLegacy(),{state:"completed",imported:0});
+			assert.deepEqual(s.readMemories(),imported);
+			assert.match(s.status(),/Legacy import: completed/);
+		}finally{s.close();}
+	}finally{rmSync(dir,{recursive:true,force:true});}
 });
 test("legacy summary correction extracts correct revision, not forgotten new children",()=>{
 	const dir=temp();
@@ -201,5 +255,29 @@ test("multiple processes capture concurrently without lost records",async()=>{
 			const child=spawn(process.execPath,["--input-type=module","-e",code],{stdio:["ignore","ignore","pipe"]});let error="";child.stderr.on("data",(d)=>error+=d);child.on("error",reject);child.on("exit",(code)=>code===0?resolve():reject(new Error(error)));
 		})));
 		const final=new MemoryStore(dir);try{assert.equal(final.readMemories().length,60);}finally{final.close();}
+	}finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test("inactive legacy files are reported and archived by copy, never executed or deleted", () => {
+	const dir=temp();
+	try{
+		// R2: an old planning file is inert data. It must not block learning or become an instruction.
+		writeFileSync(join(dir,"self_agenda.yaml"),"- run: rm -rf /\n");
+		writeFileSync(join(dir,"signals.jsonl"),"{}\n");
+		assert.deepEqual(legacyFiles(dir),["self_agenda.yaml","signals.jsonl"]);
+		const s=new MemoryStore(dir);
+		try{
+			assert.match(s.status(),/Legacy inactive files: .*self_agenda\.yaml/);
+			assert.equal(s.capture(source()),true,"inactive files are not a runtime fault");
+			const archive=archiveLegacyFiles(dir);
+			assert.equal(archive.count,2);
+			assert.equal(readFileSync(join(dir,"self_agenda.yaml"),"utf8"),"- run: rm -rf /\n","originals are retained");
+			assert.equal(readFileSync(join(archive.directory!,"self_agenda.yaml"),"utf8"),"- run: rm -rf /\n");
+			const manifest=JSON.parse(readFileSync(join(archive.directory!,"manifest.json"),"utf8"));
+			assert.equal(manifest.originalsRetained,true); assert.equal(manifest.files.length,2);
+			assert.deepEqual(legacyFiles(dir),["self_agenda.yaml","signals.jsonl"],"archiving never deletes originals");
+			// The archived plan is never imported as memory.
+			assert.ok(!s.readMemories().some(m=>m.content.includes("rm -rf")));
+		}finally{s.close();}
 	}finally{rmSync(dir,{recursive:true,force:true});}
 });

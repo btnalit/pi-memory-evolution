@@ -265,7 +265,7 @@ test("schema 4 migration preserves byte-for-byte records/history and leaves miss
 			assert.equal(migrated.history().length, 1);
 			assert.equal(migrated.readMemories()[0].evidence, undefined);
 			assert.equal(memoryQuality(migrated.readMemories()[0], now).basis, "unknown");
-			assert.match(migrated.status(), /schema 5/);
+			assert.match(migrated.status(), /schema 6/);
 		} finally { migrated.close(); }
 	} finally { db.close(); }
 }));
