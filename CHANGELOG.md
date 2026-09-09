@@ -2,6 +2,13 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
+## [0.2.5](https://github.com/btnalit/pi-memory-evolution/compare/v0.2.4...v0.2.5) (2026-09-09)
+
+
+### Bug Fixes
+
+* recover memory jobs with bounded cross-provider fallback ([#14](https://github.com/btnalit/pi-memory-evolution/issues/14)) ([76cfa6f](https://github.com/btnalit/pi-memory-evolution/commit/76cfa6fcd257866d6ed98a5b6a9fd14cc1b914a7))
+
 ## [0.2.4](https://github.com/btnalit/pi-memory-evolution/compare/v0.2.3...v0.2.4) (2026-09-09)
 
 
