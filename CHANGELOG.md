@@ -2,6 +2,13 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
+## [0.2.6](https://github.com/btnalit/pi-memory-evolution/compare/v0.2.5...v0.2.6) (2026-09-09)
+
+
+### Bug Fixes
+
+* reach an allowlisted sibling model and give claims real headroom ([#16](https://github.com/btnalit/pi-memory-evolution/issues/16)) ([ffc47d1](https://github.com/btnalit/pi-memory-evolution/commit/ffc47d148355d5cbf2d77bb5edd1d0111947b7e1))
+
 ## [0.2.5](https://github.com/btnalit/pi-memory-evolution/compare/v0.2.4...v0.2.5) (2026-09-09)
 
 
