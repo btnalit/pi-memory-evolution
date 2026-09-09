@@ -3,15 +3,18 @@ import { chmodSync, closeSync, lstatSync, mkdirSync, openSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { extractStructuredMemories, type Claim } from "./extractor.ts";
-import { loadLegacyMemories } from "./legacy.ts";
+import { loadLegacyImport } from './legacy.ts';
+import { legacyFiles } from './legacy-files.ts';
 import { clipBytes, fingerprint, redact } from "./privacy.ts";
 import { validSearchTerms } from "./search.ts";
 import { sourceEvidence, validEvidence, validFeedback, mayReplace, FEEDBACK_VERDICTS, type Evidence, type MemoryFeedback, type FeedbackVerdict } from "./quality.ts";
-import { EVOLUTION_TIMEOUT_MS, LEASE_GRACE_MS, MAX_FAILURES, FAILURE_CODES, EvolutionError, retryAt, type FailureCode } from "./recovery.ts";
+import { EVOLUTION_TIMEOUT_MS, LEASE_GRACE_MS, MAX_FAILURES, MAX_OUTPUT_FAILURES, PAUSED_SQL, FAILURE_CODES, EvolutionError, retryAt, type FailureCode } from "./recovery.ts";
+import { modelLabel, OUTPUT_PROTOCOL_VERSION, parseDiagnostic, validDiagnostic, type Diagnostic } from './diagnostics.ts';
+import { budgetUntil, reserveCall, finishCall, takeNotice } from './processing-state.ts';
 
 export type RetryMode = boolean | "auto";
 // Rechecked atomically when claiming: selection alone never grants model-call authority.
-const automaticEligibility = "((state='pending' AND retry_at<=?) OR (state='failed' AND failures<" + MAX_FAILURES + " AND retry_at<=?))";
+const automaticEligibility = `((state='pending' AND retry_at<=?) OR (state='failed' AND NOT ${PAUSED_SQL} AND retry_at<=?))`;
 
 export type MemoryKind = "fact" | "preference" | "decision" | "project_state";
 export interface DurableMemory {
@@ -47,6 +50,9 @@ export interface EvolutionRun {
 	attempt: number;
 	generation: number;
 	memories: DurableMemory[];
+	outputFailures: number;
+	previousError: FailureCode | '';
+	previousDiagnostic: Diagnostic;
 }
 interface Event {
 	id: string;
@@ -79,7 +85,7 @@ export class MemoryStore {
 			this.db.exec("PRAGMA busy_timeout=5000");
 			if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").get()) {
 				const schema = this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get();
-				if (schema && !["2", "3", "4", "5"].includes(String(schema.value))) throw new Error("Unsupported memory database version");
+				if (schema && !["2", "3", "4", "5", "6"].includes(String(schema.value))) throw new Error("Unsupported memory database version");
 			}
 			this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
 				CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -92,8 +98,8 @@ export class MemoryStore {
 				CREATE TABLE IF NOT EXISTS blocked (scope TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(scope,hash));`);
 			this.transaction(() => {
 				const schema = this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get();
-				if (schema && !["2", "3", "4", "5"].includes(String(schema.value))) throw new Error("Unsupported memory database version");
-				if (!["4", "5"].includes(String(schema?.value))) {
+				if (schema && !["2", "3", "4", "5", "6"].includes(String(schema.value))) throw new Error("Unsupported memory database version");
+				if (!["4", "5", "6"].includes(String(schema?.value))) {
 					const columns = new Set(this.db.prepare("PRAGMA table_info(sources)").all().map((r) => r.name));
 					for (const [name, type] of [["failures", "INTEGER NOT NULL DEFAULT 0"], ["retry_at", "INTEGER NOT NULL DEFAULT 0"],
 						["failed_at", "INTEGER NOT NULL DEFAULT 0"], ["last_error", "TEXT NOT NULL DEFAULT ''"]]) {
@@ -102,19 +108,79 @@ export class MemoryStore {
 					// Old errors have no known cause/time. Make them eligible without inventing either.
 					this.db.exec("UPDATE sources SET failures=MIN(MAX(attempt,1),5),last_error='unknown' WHERE state='failed' AND failures=0");
 				}
+				const columns = new Set(this.db.prepare('PRAGMA table_info(sources)').all().map(r => r.name));
+				for (const [name, type] of [['output_failures', 'INTEGER NOT NULL DEFAULT 0'], ['diagnostic', "TEXT NOT NULL DEFAULT '{}'"]]) {
+					if (!columns.has(name)) this.db.exec(`ALTER TABLE sources ADD COLUMN ${name} ${type}`);
+				}
+				// Historical attempts have no detailed response history. Preserve their budgets, don't invent counts.
+				this.db.exec(`CREATE TABLE IF NOT EXISTS model_calls (source_id TEXT NOT NULL, attempt INTEGER NOT NULL, model TEXT NOT NULL, at INTEGER NOT NULL,
+					outcome TEXT NOT NULL DEFAULT 'running', finished_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(source_id,attempt));
+					CREATE INDEX IF NOT EXISTS model_calls_window ON model_calls(model,at);
+					CREATE INDEX IF NOT EXISTS model_failures_window ON model_calls(model,finished_at) WHERE outcome='failed';
+					CREATE TABLE IF NOT EXISTS recovery_notices (id TEXT PRIMARY KEY, at INTEGER NOT NULL);`);
 				this.db.exec("CREATE INDEX IF NOT EXISTS sources_recovery ON sources(state,retry_at); CREATE INDEX IF NOT EXISTS sources_running_lease ON sources(lease) WHERE state='running'");
 				this.db.exec("CREATE TABLE IF NOT EXISTS feedback_receipts (source_id TEXT NOT NULL, memory_id TEXT NOT NULL, verdict TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(source_id,memory_id)); CREATE INDEX IF NOT EXISTS feedback_recent ON feedback_receipts(memory_id,verdict,at)");
-				if (!schema) {
-					const legacy = loadLegacyMemories(stateDir);
-					if (legacy.length) this.record("migration", "Import legacy JSONL; originals unchanged", legacy, "legacy");
-					this.db.prepare("INSERT INTO metadata VALUES ('schema','5')").run();
-				} else if (schema.value !== "5") {
-					this.db.prepare("UPDATE metadata SET value='5' WHERE key='schema'").run();
+				if (!this.db.prepare("SELECT 1 FROM metadata WHERE key='legacy_import'").get()) {
+					const imported = this.db.prepare("SELECT 1 FROM events WHERE json_extract(data,'$.actor')='migration' LIMIT 1").get();
+					const legacy = this.db.prepare("SELECT 1 FROM memories WHERE scope='legacy' LIMIT 1").get();
+					this.setImportState({ state: !schema ? 'pending' : imported ? 'completed' : legacy ? 'unknown' : 'not_found' });
 				}
+				this.db.prepare("INSERT INTO metadata VALUES ('schema','6') ON CONFLICT(key) DO UPDATE SET value='6'").run();
 			});
+			if (this.importState().state === 'pending') {
+				try { this.importLegacy(); } catch { /* Persisted failure blocks learning but leaves status/repair commands available. */ }
+			}
 		} catch (error) { this.db.close(); throw error; }
 	}
 	close(): void { this.db.close(); }
+	private importState(): { state: 'pending' | 'not_found' | 'completed' | 'failed' | 'unknown'; count?: number; digest?: string } {
+		const value = JSON.parse(String(this.db.prepare("SELECT value FROM metadata WHERE key='legacy_import'").get()?.value));
+		if (!value || !['pending', 'not_found', 'completed', 'failed', 'unknown'].includes(value.state)
+			|| Object.keys(value).some(k => !['state', 'count', 'digest'].includes(k))
+			|| (value.count !== undefined && (!Number.isSafeInteger(value.count) || value.count < 0))
+			|| (value.digest !== undefined && (typeof value.digest !== 'string' || !/^[a-f0-9]{64}$/u.test(value.digest)))) throw new Error('Invalid legacy import metadata');
+		return value;
+	}
+	private setImportState(value: ReturnType<MemoryStore['importState']>): void {
+		this.db.prepare("INSERT INTO metadata VALUES ('legacy_import',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(value));
+	}
+	private assertLearningReady(): void {
+		if (['pending', 'failed'].includes(this.importState().state)) throw new EvolutionError('unavailable', { reason: 'legacy_import_failed' });
+	}
+	/** One ledger set per database; completed/unknown old imports are never replayed over newer edits. */
+	importLegacy(directory = this.stateDir): { state: string; imported: number } {
+		const state = this.importState().state;
+		if (state === 'completed' || state === 'unknown') return { state, imported: 0 };
+		try {
+			const snapshot = loadLegacyImport(resolve(directory));
+			return this.transaction(() => {
+				const current = this.importState().state;
+				if (current === 'completed' || current === 'unknown') return { state: current, imported: 0 };
+				if (!snapshot.found) {
+					// A failed import cannot be bypassed by pointing at an empty directory.
+					if (current !== 'failed') this.setImportState({ state: 'not_found' });
+					return { state: current === 'failed' ? 'failed' : 'not_found', imported: 0 };
+				}
+				const memories = snapshot.memories.filter(memory => {
+					if (this.get(memory.id)) throw new Error('Legacy memory ID collision; no existing record overwritten');
+					return !active(memory) || !this.db.prepare('SELECT 1 FROM blocked WHERE scope=? AND hash=?').get(memory.scope, fingerprint(memory.content));
+				});
+				if (memories.length) this.record('migration', 'Import legacy JSONL; originals unchanged', memories, 'legacy');
+				this.setImportState({ state: 'completed', count: memories.length, digest: snapshot.digest });
+				return { state: 'completed', imported: memories.length };
+			});
+		} catch {
+			this.transaction(() => {
+				if (!['completed', 'unknown'].includes(this.importState().state)) this.setImportState({ state: 'failed' });
+			});
+			throw new Error('Legacy import failed; inspect both ledgers, originals and database memories unchanged');
+		}
+	}
+	legacyStatus(): string {
+		const state = this.importState();
+		const obsolete = legacyFiles(this.stateDir);
+		return `Legacy import: ${state.state}${state.count === undefined ? '' : `; imported=${state.count}`}. ${state.state === 'failed' ? 'Learning blocked until repaired; ' : ''}/memory import [directory] imports one ledger set, never replays a completed import.\nLegacy inactive files: ${obsolete.join(', ') || 'none'}; never executed/imported. /memory archive-legacy creates a copy-only backup.`;
+	}
 	private transaction<T>(fn: () => T): T {
 		this.db.exec("BEGIN IMMEDIATE");
 		try { const value = fn(); this.db.exec("COMMIT"); this.cache.clear(); return value; }
@@ -191,6 +257,7 @@ export class MemoryStore {
 	}
 	/** Persist raw evidence + bounded local claims once, atomically. Raw sources are never recalled. */
 	capture(input: Source): boolean {
+		this.assertLearningReady();
 		if (!isSource(input)) throw new Error("Invalid memory source");
 		const source = { ...input, createdAt: new Date(input.createdAt).toISOString(), content: clipBytes(redact(input.content), 32_000) };
 		return this.transaction(() => {
@@ -213,22 +280,36 @@ export class MemoryStore {
 			.get(...(scope === undefined ? [] : [scope]), now, ...(retry === "auto" ? [now] : []));
 		return row ? String(row.id) : undefined;
 	}
-	beginEvolution(id: string, retry: RetryMode = false, timeoutMs = EVOLUTION_TIMEOUT_MS, now = Date.now()): EvolutionRun | undefined {
+	beginEvolution(id: string, retry: RetryMode = false, timeoutMs = EVOLUTION_TIMEOUT_MS, now = Date.now(), model?: string): EvolutionRun | undefined {
+		this.assertLearningReady();
 		return this.transaction(() => {
-			const changed = this.db.prepare(`UPDATE sources SET state='running', attempt=attempt+1, lease=? WHERE id=? AND
-				${retry === "auto" ? automaticEligibility : `(state='pending' OR (state='running' AND lease<=?) ${retry ? "OR state='failed'" : ""})`}`)
-				.run(now + timeoutMs + LEASE_GRACE_MS, id, now, ...(retry === "auto" ? [now] : []));
-			if (!changed.changes) return undefined;
-			const row = this.db.prepare("SELECT data,attempt FROM sources WHERE id=?").get(id)!;
+			const eligibility = retry === true ? `(state='pending' OR (state='running' AND lease<=?) OR state='failed')` : automaticEligibility;
+			const args = [id, now, ...(retry === true ? [] : [now])];
+			if (!this.db.prepare(`SELECT 1 FROM sources WHERE id=? AND ${eligibility}`).get(...args)) return undefined;
+			if (model !== undefined && retry !== true) {
+				const until = budgetUntil(this.db, modelLabel(model), now);
+				if (until > now) {
+					this.db.prepare('UPDATE sources SET retry_at=MAX(retry_at,?) WHERE id=?').run(until, id);
+					return undefined; // No lease, attempt or failure consumed while waiting for shared budget.
+				}
+			}
+			this.db.prepare(`UPDATE sources SET state='running', attempt=attempt+1, lease=? WHERE id=?`).run(now + timeoutMs + LEASE_GRACE_MS, id);
+			const row = this.db.prepare("SELECT data,attempt,output_failures,diagnostic,last_error FROM sources WHERE id=?").get(id)!;
+			if (model !== undefined) reserveCall(this.db, id, Number(row.attempt), modelLabel(model), now);
 			const source = parseSource(row.data);
 			if (source.id !== id) throw new Error("Invalid source identity");
 			const memories = this.readMemories(source.scope).filter((m) => m.scope === source.scope && active(m)
 				&& (source.kind !== "progress" || (m.kind === "project_state" && source.targets!.includes(m.id))))
 				.sort((a,b) => Date.parse(b.updatedAt)-Date.parse(a.updatedAt)).slice(0, 32);
-			return { source, attempt: Number(row.attempt), generation: this.generation(source.scope), memories };
+			// The stored diagnostic explains the last completed outcome. Claiming an attempt must not erase it:
+			// a cancelled or interrupted run would otherwise leave a paused source with no recorded reason.
+			return { source, attempt: Number(row.attempt), generation: this.generation(source.scope), memories,
+				outputFailures: Number(row.output_failures), previousDiagnostic: parseDiagnostic(row.diagnostic),
+				previousError: FAILURE_CODES.includes(row.last_error as FailureCode) ? row.last_error as FailureCode : '' };
 		});
 	}
-	finishEvolution(run: EvolutionRun, claims: Claim[], model: string): string {
+	finishEvolution(run: EvolutionRun, claims: Claim[], model: string, diagnostic: Diagnostic = {}): string {
+		if (!validDiagnostic(diagnostic)) throw new Error('Invalid memory diagnostics');
 		return this.transaction(() => {
 			const job = this.db.prepare("SELECT state,attempt FROM sources WHERE id=?").get(run.source.id);
 			if (job?.state !== "running" || job.attempt !== run.attempt || this.generation(run.source.scope) !== run.generation) throw new EvolutionError("stale");
@@ -294,24 +375,33 @@ export class MemoryStore {
 				}
 			}
 			const event = this.record("model", `${model}: ${run.source.id}${weakerConflicts ? `; weaker replacements withheld=${weakerConflicts}` : ""}`, [...after.values()], run.source.scope);
-			this.db.prepare("UPDATE sources SET state='done',lease=0,failures=0,retry_at=0,failed_at=0,last_error='' WHERE id=?").run(run.source.id);
+			this.db.prepare("UPDATE sources SET state='done',lease=0,failures=0,output_failures=0,retry_at=0,failed_at=0,last_error='',diagnostic=? WHERE id=?")
+				.run(JSON.stringify(diagnostic), run.source.id);
+			finishCall(this.db, run.source.id, run.attempt, 'done', Date.now());
 			return event;
 		});
 	}
-	failEvolution(run: Pick<EvolutionRun, "source" | "attempt">, code: FailureCode = "unknown", now = Date.now()): void {
+	failEvolution(run: Pick<EvolutionRun, "source" | "attempt">, code: FailureCode = "unknown", now = Date.now(), diagnostic: Diagnostic = {}): void {
 		if (!FAILURE_CODES.includes(code)) throw new Error("Invalid failure code");
+		if (!validDiagnostic(diagnostic)) throw new Error('Invalid memory diagnostics');
 		this.transaction(() => {
-			const job = this.db.prepare("SELECT failures FROM sources WHERE id=? AND attempt=? AND state='running'").get(run.source.id, run.attempt);
+			const job = this.db.prepare(`SELECT failures,output_failures,diagnostic,${PAUSED_SQL} AS paused FROM sources WHERE id=? AND attempt=? AND state='running'`).get(run.source.id, run.attempt);
+			finishCall(this.db, run.source.id, run.attempt, !job || code === 'cancelled' ? 'cancelled' : 'failed', now);
 			if (!job) return; // A newer owner or manual suppression wins.
 			if (code === "cancelled") {
-				// Shutdown/reload is not a failed model response and must not exhaust retry budgets.
+				// Shutdown/reload cannot exhaust or silently reset either failure budget.
 				this.db.prepare("UPDATE sources SET state=?,lease=0,retry_at=? WHERE id=?")
-					.run(Number(job.failures) >= MAX_FAILURES ? "failed" : "pending", now, run.source.id);
+					.run(job.paused ? "failed" : "pending", now, run.source.id);
 				return;
 			}
 			const failures = Number(job.failures) + 1;
-			this.db.prepare("UPDATE sources SET state='failed',lease=0,failures=?,retry_at=?,failed_at=?,last_error=? WHERE id=?")
-				.run(failures, retryAt(failures, now), now, code, run.source.id);
+			const outputFailures = Number(job.output_failures) + (['invalid_output', 'output_limit'].includes(code) ? 1 : 0);
+			const paused = failures >= MAX_FAILURES || outputFailures >= MAX_OUTPUT_FAILURES || ['write_rejected', 'unavailable', 'auth', 'request'].includes(code);
+			// Report one outcome, never a blend: a new reason must not inherit an older attempt's field path.
+			// An interrupted run supplies none, so the previous explanation is kept rather than blanked.
+			const details = Object.keys(diagnostic).length ? diagnostic : parseDiagnostic(job.diagnostic);
+			this.db.prepare("UPDATE sources SET state='failed',lease=0,failures=?,output_failures=?,retry_at=?,failed_at=?,last_error=?,diagnostic=? WHERE id=?")
+				.run(failures, outputFailures, paused ? 0 : retryAt(failures, now), now, code, JSON.stringify(details), run.source.id);
 		});
 	}
 	/** Crash recovery is local; an expired lease consumes a failure budget, not infinite restarts. */
@@ -321,21 +411,37 @@ export class MemoryStore {
 		}
 	}
 	pausedJobs(): number {
-		return Number(this.db.prepare("SELECT COUNT(*) AS n FROM sources WHERE state='failed' AND failures>=?").get(MAX_FAILURES)!.n);
+		return Number(this.db.prepare(`SELECT COUNT(*) AS n FROM sources WHERE state='failed' AND ${PAUSED_SQL}`).get()!.n);
+	}
+	takeNotice(identity: string, now = Date.now()): boolean {
+		return this.transaction(() => takeNotice(this.db, identity, now));
+	}
+	jobNoticeKey(id: string): string {
+		const row = this.db.prepare(`SELECT last_error,diagnostic,${PAUSED_SQL} AS paused FROM sources WHERE id=?`).get(id);
+		return JSON.stringify([id, row?.last_error, row ? parseDiagnostic(row.diagnostic).reason : '', !!row?.paused]);
+	}
+	pausedNoticeKey(): string {
+		return JSON.stringify(this.db.prepare(`SELECT id,last_error FROM sources WHERE state='failed' AND ${PAUSED_SQL} ORDER BY id`).all());
+	}
+	budgetStatus(model: string, now = Date.now()): string {
+		const until = budgetUntil(this.db, modelLabel(model), now);
+		return until > now ? `Shared model budget: waiting until ${new Date(until).toISOString()} (manual evolve is a one-call override).` : 'Shared model budget: available.';
 	}
 	/** Bounded diagnostics: only fixed codes/times/counts, never provider bodies or source text. */
 	recoveryStatus(): string {
 		const count = Number(this.db.prepare("SELECT COUNT(*) AS n FROM sources WHERE state='failed'").get()!.n);
-		const rows = this.db.prepare("SELECT id,attempt,failures,retry_at,failed_at,last_error FROM sources WHERE state='failed' ORDER BY failed_at DESC,rowid DESC LIMIT 5").all();
+		const rows = this.db.prepare(`SELECT id,attempt,failures,output_failures,retry_at,failed_at,last_error,diagnostic,${PAUSED_SQL} AS paused FROM sources WHERE state='failed' ORDER BY failed_at DESC,rowid DESC LIMIT 5`).all();
 		const paused = this.pausedJobs();
 		const details = rows.map((r) => {
 			const code = FAILURE_CODES.includes(r.last_error as FailureCode) ? r.last_error : "unknown";
 			const failedAt = r.failed_at ? new Date(Number(r.failed_at)).toISOString() : "unknown (legacy)";
-			const next = Number(r.failures) >= MAX_FAILURES ? "paused; inspect model/auth or output, /memory evolve for one extra attempt"
+			const next = r.paused ? "paused; inspect diagnostics, /memory evolve <source-id> for one extra attempt"
 				: `nextRetry=${r.retry_at ? new Date(Number(r.retry_at)).toISOString() : "due now"}`;
-			return `${clipBytes(redact(String(r.id)), 160)}: ${code}; attempts=${r.attempt}; failures=${r.failures}/${MAX_FAILURES}; failedAt=${failedAt}; ${next}`;
+			return `${clipBytes(redact(String(r.id)), 160)}: ${code}; attempts=${r.attempt}; failures=${r.failures}/${MAX_FAILURES}; outputFailures=${r.output_failures}/${MAX_OUTPUT_FAILURES}; failedAt=${failedAt}; ${next}\n  diagnostics=${JSON.stringify(parseDiagnostic(r.diagnostic))}`;
 		});
-		return [`Automatic recovery: retrying=${count - paused}, paused=${paused} (failure limit ${MAX_FAILURES})`, ...details,
+		const deferred = this.db.prepare("SELECT COUNT(*) AS n,MIN(retry_at) AS next FROM sources WHERE state='pending' AND retry_at>?").get(Date.now())!;
+		return [`Automatic recovery: retrying=${count - paused}, paused=${paused} (failure limit ${MAX_FAILURES}; output limit ${MAX_OUTPUT_FAILURES}; non-retryable errors pause immediately)`,
+			...(Number(deferred.n) ? [`Budget-deferred sources=${deferred.n}; nextEligible=${new Date(Number(deferred.next)).toISOString()}`] : []), ...details,
 			...(count > 5 ? [`${count - 5} more failed sources.`] : [])].join("\n");
 	}
 	/** Explicit exact-ID user feedback only. No inferred usage or self-reinforcement.
@@ -442,14 +548,15 @@ export class MemoryStore {
 			...(rows.length ? [] : ['No model transactions yet.']), 'Use /memory learning for the last capture/nomination decision.'].join('\n');
 	}
 	status(): string {
-		if (this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get()?.value !== "5") throw new Error("Invalid memory schema marker");
+		if (this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get()?.value !== "6") throw new Error("Invalid memory schema marker");
 		const health = this.db.prepare("PRAGMA quick_check").get();
 		if (health?.quick_check !== "ok") throw new Error("Memory database integrity check failed");
-		for (const row of this.db.prepare("SELECT id,data,state,attempt,lease,failures,retry_at,failed_at,last_error FROM sources").iterate()) {
+		for (const row of this.db.prepare("SELECT id,data,state,attempt,lease,failures,output_failures,retry_at,failed_at,last_error,diagnostic FROM sources").iterate()) {
 			const source = parseSource(row.data);
 			if (source.id !== row.id || !["pending", "running", "done", "failed"].includes(String(row.state))
-				|| ![row.attempt, row.lease, row.failures, row.retry_at, row.failed_at].every((v) => Number.isSafeInteger(v) && Number(v) >= 0)
+				|| ![row.attempt, row.lease, row.failures, row.output_failures, row.retry_at, row.failed_at].every((v) => Number.isSafeInteger(v) && Number(v) >= 0)
 				|| (row.last_error !== "" && !FAILURE_CODES.includes(row.last_error as FailureCode))) throw new Error("Invalid source job");
+			parseDiagnostic(row.diagnostic);
 		}
 		for (const row of this.db.prepare("SELECT id,scope,data FROM events").iterate()) parseEvent(row.data, row.id, row.scope);
 		for (const row of this.db.prepare("SELECT source_id,memory_id,verdict,at FROM feedback_receipts").iterate()) {
@@ -457,7 +564,7 @@ export class MemoryStore {
 				|| !FEEDBACK_VERDICTS.has(row.verdict as FeedbackVerdict) || !Number.isSafeInteger(row.at)) throw new Error("Invalid feedback receipt");
 		}
 		const jobs = this.db.prepare("SELECT state,COUNT(*) AS n FROM sources GROUP BY state").all();
-		return `${this.readMemories().length} memories; ${jobs.map((j) => `${j.state}=${j.n}`).join(", ") || "no sources"}; SQLite ok (schema 5)\n${this.recoveryStatus()}\n${this.processingStatus()}`;
+		return `${this.readMemories().length} memories; ${jobs.map((j) => `${j.state}=${j.n}`).join(", ") || "no sources"}; SQLite ok (schema 6)\nState directory: ${redact(this.stateDir)}\n${this.recoveryStatus()}\n${this.legacyStatus()}\n${this.processingStatus()}`;
 	}
 }
 

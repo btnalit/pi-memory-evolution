@@ -8,6 +8,7 @@ import { MemoryStore, type DurableMemory, type Source } from './memory-store.ts'
 import { features, featureOffset } from './search.ts';
 import { rankMemories, selectRelevantMemories, excerpt } from './retriever.ts';
 import { parseClaims } from './evolution.ts';
+import { parseMemoryOutput } from './output.ts';
 const now=Date.parse('2026-09-06T08:00:00Z');
 const memory=(id:string,content:string,extra:Partial<DurableMemory>={}):DurableMemory=>({id,content,scope:'/work',sourceEntryId:'compact:session:entry',kind:'fact',layer:'durable',status:'provisional',revision:1,createdAt:'2026-09-06T06:00:00Z',updatedAt:'2026-09-06T06:00:00Z',...extra});
 const preference=memory('wanted','用户要求会话也能自动注入相关记忆，不应限定于项目。',{kind:'preference',sourceEntryId:'user:session:entry'});
@@ -65,9 +66,18 @@ test('bounded model aliases extend bilingual matching without changing the origi
  assert.deepEqual(selectRelevantMemories([item],'Bluetooth audio',3,now),[]);
  assert.equal(rankMemories([item],'wireframe diagram',now)[0].coverage,1);
 });
-test('invalid or sensitive search aliases reject the entire model result',()=>{
- for(const searchTerms of [['token=secret'],['bad\nline'],['x'],Array(9).fill('alias'),[null],['a'.repeat(65)]])
-  assert.throws(()=>parseClaims(JSON.stringify({memories:[{kind:'fact',content:'Valid claim.',searchTerms}]})));
+test('invalid or sensitive search aliases are dropped without discarding the valid claim',()=>{
+ // An optional recall hint is never authority: drop it, count it, keep the fact out of a paid retry.
+ for(const searchTerms of [['token=secret'],['bad\nline'],['x'],[null],['a'.repeat(65)],'not-an-array',{}])
+  {const r=parseMemoryOutput(JSON.stringify({memories:[{kind:'fact',content:'Valid claim.',searchTerms}]}));
+   assert.deepEqual(r.claims,[{kind:'fact',content:'Valid claim.'}],JSON.stringify(searchTerms));
+   assert.ok(r.diagnostic.ignoredAliases!>=1,JSON.stringify(searchTerms));}
+ // The 8-alias cap drops only the surplus term; duplicates collapse rather than reject.
+ const capped=parseMemoryOutput(JSON.stringify({memories:[{kind:'fact',content:'Valid claim.',searchTerms:Array.from({length:9},(_,i)=>`alias${i}`)}]}));
+ assert.equal(capped.claims[0].searchTerms!.length,8);assert.equal(capped.diagnostic.ignoredAliases,1);
+ assert.deepEqual(parseClaims(JSON.stringify({memories:[{kind:'fact',content:'Valid claim.',searchTerms:Array(9).fill('alias')}]}))[0].searchTerms,['alias']);
+ // Required factual fields stay strict; only aliases degrade.
+ assert.throws(()=>parseClaims(JSON.stringify({memories:[{kind:'fact',content:'x',searchTerms:['keyword']}]})));
  assert.equal(parseClaims('{"memories":[{"kind":"fact","content":"Valid claim.","searchTerms":["keyword","关键词"]}]}')[0].searchTerms!.length,2);
 });
 test('alias enrichment persists and is undoable without refreshing evidence or losing literals',()=>using((s)=>{
@@ -131,6 +141,6 @@ test('schema 2 upgrade preserves records and history instead of reimporting or r
  try {s.capture(source('s','## Critical Context\n- Database uses SQLite.'));const records=s.readMemories(),history=s.history();s.close();
   const db=new Database(join(dir,'memory.sqlite'));db.exec("UPDATE metadata SET value='2' WHERE key='schema'");db.close();
   s=new MemoryStore(dir);assert.deepEqual(s.readMemories(),records);assert.deepEqual(s.history(),history);
-  const check=new Database(join(dir,'memory.sqlite'));try{assert.equal(check.prepare("SELECT value FROM metadata WHERE key='schema'").get()!.value,'5');}finally{check.close();}
+  const check=new Database(join(dir,'memory.sqlite'));try{assert.equal(check.prepare("SELECT value FROM metadata WHERE key='schema'").get()!.value,'6');}finally{check.close();}
  }finally{s.close();rmSync(dir,{recursive:true,force:true});}
 });

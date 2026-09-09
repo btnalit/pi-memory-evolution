@@ -1,13 +1,34 @@
-import { readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from "node:path";
 import type { DurableMemory, MemoryKind } from "./memory-store.ts";
 import { extractStructuredMemories } from "./extractor.ts";
 import { fingerprint, redact } from "./privacy.ts";
 
+export interface LegacyImport { memories: DurableMemory[]; digest: string; found: boolean }
+export function loadLegacyMemories(dir: string): DurableMemory[] { return loadLegacyImport(dir).memories; }
+
+/** Read a bounded immutable snapshot once; actions and memories must be validated together. */
+export function readLegacyFile(path: string): Buffer | undefined {
+	let fd: number;
+	try { fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)); }
+	catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw new Error('Legacy file unreadable'); }
+	try {
+		const stat = fstatSync(fd);
+		if (!stat.isFile() || stat.size > 16_000_000) throw new Error('Legacy file must be a regular file under 16 MB');
+		const data = readFileSync(fd);
+		if (data.length > 16_000_000) throw new Error('Legacy file too large');
+		return data;
+	} finally { closeSync(fd); }
+}
+
 /** One-time, read-only import. Unknown project scope is quarantined, never guessed. */
-export function loadLegacyMemories(dir: string): DurableMemory[] {
+export function loadLegacyImport(dir: string): LegacyImport {
+	const memoriesText = readLegacyFile(join(dir, 'memories.jsonl'))?.toString('utf8');
+	const actionsText = readLegacyFile(join(dir, 'memory-actions.jsonl'))?.toString('utf8');
+	const digest = createHash('sha256').update(JSON.stringify([memoriesText ?? null, actionsText ?? null])).digest('hex');
 	const records = new Map<string, Record<string, any>>();
-	for (const record of lines(join(dir, "memories.jsonl"))) {
+	for (const record of lines(memoriesText)) {
 		if (record.version !== 1 || typeof record.id !== "string" || typeof record.content !== "string"
 			|| !record.id || typeof record.sourceEntryId !== "string" || !record.sourceEntryId
 			|| typeof record.createdAt !== "string" || !Number.isFinite(Date.parse(record.createdAt))
@@ -16,7 +37,7 @@ export function loadLegacyMemories(dir: string): DurableMemory[] {
 	}
 	const mutedSources = new Set<string>();
 	const suppressedContent = new Set<string>();
-	for (const action of lines(join(dir, "memory-actions.jsonl"))) {
+	for (const action of lines(actionsText)) {
 		if (action.version !== 1 || typeof action.memoryId !== "string" || typeof action.createdAt !== "string" || !Number.isFinite(Date.parse(action.createdAt))
 			|| !["confirm", "correct", "forget", "pin", "unpin", "conflict", "resolve"].includes(action.type)) throw new Error("Invalid legacy action; import stopped");
 		const target = records.get(action.memoryId);
@@ -69,7 +90,7 @@ export function loadLegacyMemories(dir: string): DurableMemory[] {
 			}
 		} else memories.push(convert(record));
 	}
-	return memories;
+	return { memories, digest, found: memoriesText !== undefined || actionsText !== undefined };
 }
 
 function convert(record: Record<string, any>): DurableMemory {
@@ -79,11 +100,8 @@ function convert(record: Record<string, any>): DurableMemory {
 		layer: record.layer === "pinned" ? "pinned" : "durable", status: record.status,
 		...(record.suppressedHashes?.length ? { suppressedHashes: record.suppressedHashes } : {}) };
 }
-function lines(path: string): Record<string, any>[] {
-	let text: string;
-	try { text = readFileSync(path, "utf8"); }
-	catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw new Error("Legacy ledger unreadable; import stopped"); }
-	return text.split("\n").filter((line) => line.trim()).map((line) => {
+function lines(text: string | undefined): Record<string, any>[] {
+	return (text ?? '').split("\n").filter((line) => line.trim()).map((line) => {
 		let value: unknown;
 		try { value = JSON.parse(line); } catch { throw new Error("Damaged legacy ledger; import stopped (original preserved)"); }
 		if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid legacy ledger row");

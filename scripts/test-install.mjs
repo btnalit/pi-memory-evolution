@@ -92,7 +92,7 @@ async function smoke(expectedEntry) {
 			// Extension command paths are optional in the public RPC response.
 			if (commands[0].path) assert.equal(realpathSync(commands[0].path), realpathSync(expectedEntry));
 			assert.ok(existsSync(expectedEntry));
-			for (const [command, expected] of [['status', /SQLite ok \(schema 5\)/], ['learning', /Last learning capture/], ['explain', /Last automatic recall snapshot/]]) {
+			for (const [command, expected] of [['status', /SQLite ok \(schema 6\)/], ['learning', /Last learning capture/], ['explain', /Last automatic recall snapshot/]]) {
 				const offset = events.length;
 				await rpc('prompt', { message: `/memory ${command}` });
 				await waitFor(() => events.slice(offset).some(e => e.type === 'extension_ui_request' && e.method === 'notify' && expected.test(e.message)));
@@ -104,7 +104,7 @@ async function smoke(expectedEntry) {
 const stateSnapshot = () => {
 	const db = new Database(join(stateDir, 'memory.sqlite'));
 	try {
-		assert.equal(db.prepare("SELECT value FROM metadata WHERE key='schema'").get().value, '5');
+		assert.equal(db.prepare("SELECT value FROM metadata WHERE key='schema'").get().value, '6');
 		assert.equal(db.prepare('PRAGMA quick_check').get().quick_check, 'ok');
 		return JSON.stringify(['memories', 'sources', 'events', 'metadata', 'blocked', 'feedback_receipts'].map(table => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()));
 	} finally { db.close(); }
@@ -178,7 +178,7 @@ try {
 	assert.equal(stateSnapshot(), snapshot);
 	runPi('remove', source); assert.equal(packages().length, 0);
 	await smoke(); assert.equal(stateSnapshot(), snapshot);
-	console.log('PASS: update, old-pin transition, removal and preserved schema-5 records/history.');
+	console.log('PASS: update, old-pin transition, removal and preserved schema-6 records/history.');
 
 	// Native npm installation against a loopback registry serving the actual tarball.
 	// No peer packages are served: the Pi host must supply its own APIs and TypeBox.

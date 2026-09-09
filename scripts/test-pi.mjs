@@ -215,7 +215,7 @@ try {
 	await waitFor(() => store.readMemories().find(m => m.id === authMemory.id).status === 'conflicted');
 	assert.equal(await ask('SQLite 数据库认证'), '');
 	assert.equal(requests.filter(r => r.semantic).length, 3, 'exact-ID feedback is local, not another model call');
-	assert.match(store.status(), /schema 5/);
+	assert.match(store.status(), /schema 6/);
 
 	const callsBeforePipeline = requests.filter(r => r.semantic).length;
 	await ask('Our priorities are automatic evolution, relevant injection and automatic recall.');

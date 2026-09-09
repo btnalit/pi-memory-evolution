@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
@@ -419,3 +419,25 @@ test('memory_recall is a bounded read-only cross-origin lookup, not implicit fee
 		} finally {s.close();}
 	},async()=>{calls++;return {model:'fake/model',text:'{"memories":[]}'};});
 });
+
+test('legacy import and archive are reachable commands, not just status text',()=>fixture(async({stateDir,command,notifications,call})=>{
+	await call('session_compact',compact());
+	// R3: a ledger appearing after first init must still be importable through an explicit command.
+	writeFileSync(join(stateDir,'memories.jsonl'),JSON.stringify({version:1,id:'legacy-1',kind:'fact',
+		sourceEntryId:'entry-legacy',createdAt:'2026-09-01T00:00:00.000Z',content:'Legacy note about Redis eviction.'})+'\n');
+	await command('import');
+	assert.match(notifications.at(-1),/Legacy import: completed; imported=1/);
+	await command('import');
+	assert.match(notifications.at(-1),/imported=0/,'a completed import is never replayed');
+	assert.match(notifications.at(-1),/Legacy import: completed/);
+	// R2: an inactive plan file is reported, archived by copy, and never executed or deleted.
+	writeFileSync(join(stateDir,'self_agenda.yaml'),'- run: rm -rf /\n');
+	await command('status');
+	assert.match(notifications.at(-1),/Legacy inactive files: self_agenda\.yaml/);
+	await command('archive-legacy');
+	assert.match(notifications.at(-1),/Archived 1 inactive legacy file/);
+	assert.equal(existsSync(join(stateDir,'self_agenda.yaml')),true,'the original is retained');
+	await command('list legacy');
+	assert.match(notifications.at(-1),/Redis eviction/);
+	assert.ok(!notifications.at(-1).includes('rm -rf'),'an archived plan is never imported as memory');
+}));
