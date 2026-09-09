@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MemoryStore } from '../src/memory/memory-store.ts';
-import { Database } from '../src/memory/sqlite.ts';
+import { openDatabase } from '../src/memory/sqlite.ts';
+import { SCHEMA_VERSION } from '../src/memory/limits.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'pme-real-pi-'));
 const agentDir = join(dir, 'agent');
@@ -84,7 +85,7 @@ let processError;
 let output = '';
 let errors = '';
 const send = (message) => child.stdin.write(JSON.stringify(message) + '\n');
-async function waitFor(check, timeoutMs = 15_000) {
+async function waitFor(check, what = 'condition', timeoutMs = 15_000) {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
 		if (processError) throw processError;
@@ -92,7 +93,7 @@ async function waitFor(check, timeoutMs = 15_000) {
 		if (check()) return;
 		await new Promise((resolve) => setTimeout(resolve, 30));
 	}
-	throw new Error(`Timed out. ${errors}\n${output}`);
+	throw new Error(`Timed out waiting for ${what}. ${errors}\n${output}`);
 }
 async function stopChild() {
 	if (!child || childClosed) return;
@@ -113,13 +114,13 @@ async function startChild(cwd) {
 	child.stdout.on('data', (chunk) => output += chunk);
 	child.stderr.on('data', (chunk) => errors += chunk);
 	send({ id: 'commands', type: 'get_commands' });
-	await waitFor(() => output.includes('"name":"memory"'));
+	await waitFor(() => output.includes('"name":"memory"'), 'memory command to register in get_commands response');
 }
 async function ask(message) {
 	const offset = output.length;
 	const count = (output.match(/"type":"agent_settled"/g) ?? []).length;
 	send({ type: 'prompt', message });
-	await waitFor(() => (output.match(/"type":"agent_settled"/g) ?? []).length > count);
+	await waitFor(() => (output.match(/"type":"agent_settled"/g) ?? []).length > count, 'agent_settled event for the prompted turn');
 	assert.ok(!output.slice(offset).includes('"stopReason":"error"'), 'foreground model errors are not successful fixture turns');
 	assert.ok(output.slice(offset).includes('"stopReason":"stop"'), 'fixture must finish with a normal assistant response');
 	assert.equal(output.includes('extension_error'), false);
@@ -141,7 +142,7 @@ try {
 	for (const value of ['9999', '7777']) {
 		const digest = await ask(`Remember, database port is now ${value}.`);
 		if (value === '7777') assert.match(digest, /9999/);
-		await waitFor(() => store.readMemories().some((m) => m.content.includes(value) && m.status !== 'forgotten'));
+		await waitFor(() => store.readMemories().some((m) => m.content.includes(value) && m.status !== 'forgotten'), `active memory containing port ${value}`);
 	}
 	const active = store.readMemories().filter((m) => m.status !== 'forgotten');
 	assert.equal(active.length, 1);
@@ -166,13 +167,13 @@ try {
 	assert.equal(await ask('What do you remember about narwhals?'), '');
 	assert.equal(await ask('继续'), '', 'an unknown subject must not fall back to the previous matched topic');
 	send({ type: 'prompt', message: '/memory explain' });
-	await waitFor(() => output.includes('Last automatic recall snapshot'));
+	await waitFor(() => output.includes('Last automatic recall snapshot'), "/memory explain output containing 'Last automatic recall snapshot'");
 	assert.equal(await ask('Kubernetes networking'), '');
 	assert.equal(await ask('继续'), '', 'topic switch must not revive the old database topic');
 	send({ type: 'prompt', message: '/memory status' });
-	await waitFor(() => output.includes('Recall: all origins') && output.includes('SQLite ok'));
+	await waitFor(() => output.includes('Recall: all origins') && output.includes('SQLite ok'), "/memory status output containing 'Recall: all origins' and 'SQLite ok'");
 	send({ type: 'prompt', message: `/memory forget ${active[0].id}` });
-	await waitFor(() => store.readMemories().every((m) => m.status === 'forgotten'));
+	await waitFor(() => store.readMemories().every((m) => m.status === 'forgotten'), '/memory forget to retire all memories');
 	assert.equal(await ask('What is the database port?'), '');
 	assert.equal(requests.filter((r) => r.semantic).length, 2);
 	assert.equal(requests.filter((r) => !r.semantic).length, 16);
@@ -184,7 +185,7 @@ try {
 	store.finishEvolution(store.beginEvolution('fixture-state'), [], 'fixture-seed');
 	const oldProgress = store.readMemories().find((m) => m.kind === 'project_state' && m.status !== 'forgotten');
 	await ask('Commit fixture changes and push them.');
-	await waitFor(() => store.readMemories().some((m) => m.sourceEntryId.startsWith('progress:') && m.status !== 'forgotten'));
+	await waitFor(() => store.readMemories().some((m) => m.sourceEntryId.startsWith('progress:') && m.status !== 'forgotten'), 'progress-sourced memory recording commit/push status');
 	assert.equal(store.readMemories().find((m) => m.id === oldProgress.id).status, 'forgotten');
 	const progressDigest = await ask('Fixture commit push status?');
 	assert.match(progressDigest, /commit created; push pending/);
@@ -211,29 +212,29 @@ try {
 	assert.equal(requests.filter(r => r.semantic).length, 3, 'read-only tool must not trigger paid evolution');
 	const authMemory = store.readMemories().find(m => m.content.includes('SQLite 数据库认证'));
 	send({ type: 'prompt', message: `/memory feedback ${authMemory.id} useful` });
-	await waitFor(() => store.readMemories().find(m => m.id === authMemory.id).feedback?.utility?.verdict === 'useful');
+	await waitFor(() => store.readMemories().find(m => m.id === authMemory.id).feedback?.utility?.verdict === 'useful', `/memory feedback recording 'useful' on ${authMemory.id}`);
 	assert.equal(store.readMemories().find(m => m.id === authMemory.id).updatedAt, authMemory.updatedAt);
 	await ask(`记忆 ${authMemory.id} 错误。`);
-	await waitFor(() => store.readMemories().find(m => m.id === authMemory.id).status === 'conflicted');
+	await waitFor(() => store.readMemories().find(m => m.id === authMemory.id).status === 'conflicted', `memory ${authMemory.id} to become conflicted after error feedback`);
 	assert.equal(await ask('SQLite 数据库认证'), '');
 	assert.equal(requests.filter(r => r.semantic).length, 3, 'exact-ID feedback is local, not another model call');
-	assert.match(store.status(), /schema 7/);
+	assert.match(store.status(), new RegExp(`schema ${SCHEMA_VERSION}`));
 
 	const callsBeforePipeline = requests.filter(r => r.semantic).length;
 	await ask('Our priorities are automatic evolution, relevant injection and automatic recall.');
-	await waitFor(() => store.readMemories().some(m => m.kind === 'preference' && m.content.includes('prioritizes automatic evolution')));
+	await waitFor(() => store.readMemories().some(m => m.kind === 'preference' && m.content.includes('prioritizes automatic evolution')), "preference memory containing 'prioritizes automatic evolution'");
 	assert.equal(requests.filter(r => r.semantic).length, callsBeforePipeline+1, 'natural requirements learn without a remember cue');
 	writeFileSync(join(projectB, 'long-fixture.txt'), 'Synthetic long work fixture.\n');
 	store.capture({ id: 'long-state', scope: realpathSync(projectB), kind: 'summary', content: '## Progress\n- project-b long-work-fixture commit and push pending; full acceptance remains open.', createdAt: '2020-01-01T00:00:00Z' });
 	store.finishEvolution(store.beginEvolution('long-state'), [], 'fixture-seed');
 	const longOld = store.readMemories().find(m => m.sourceEntryId === 'long-state');
 	await ask('Continue long-work-fixture.');
-	await waitFor(() => store.readMemories().find(m => m.id === longOld.id).status === 'forgotten');
+	await waitFor(() => store.readMemories().find(m => m.id === longOld.id).status === 'forgotten', `long-work memory ${longOld.id} to be retired`);
 	const longDigest = await ask('project-b long-work-fixture');
 	assert.match(longDigest, /commit created; push pending/); assert.match(longDigest, /acceptance remains open/);
 	assert.equal(requests.filter(r => r.semantic).length, callsBeforePipeline+2);
 	send({ type: 'prompt', message: '/memory learning' });
-	await waitFor(() => output.includes('Last learning capture') && output.includes('changedRecords='));
+	await waitFor(() => output.includes('Last learning capture') && output.includes('changedRecords='), "/memory learning output containing 'Last learning capture' and 'changedRecords='");
 
 	// A persisted failure is picked up on startup, then a malformed response retries
 	// on the real recurring timer with no user prompt or /memory evolve command.
@@ -241,13 +242,12 @@ try {
 	store.capture({ id: 'recovery-fixture', kind: 'user', scope: '/other-origin', content: 'Remember SQLite storage.', createdAt: new Date().toISOString() });
 	store.failEvolution(store.beginEvolution('recovery-fixture'), 'timeout', Date.now() - 120_000);
 	await startChild(projectA);
-	await waitFor(() => store.status().includes('invalid_output'));
+	await waitFor(() => store.status().includes('invalid_output'), "recovered store status to include 'invalid_output' after startup replay");
 	assert.equal(recoveryCalls, 1);
-	const db = new Database(join(stateDir, 'memory.sqlite'));
-	// The extension is running and may hold the write lock. Match the store's own wait instead of
-	// failing the run on SQLITE_BUSY the moment a recovery poll overlaps this fixture write.
-	try { db.exec('PRAGMA busy_timeout=5000'); db.exec("UPDATE sources SET retry_at=0 WHERE id='recovery-fixture'"); } finally { db.close(); }
-	await waitFor(() => recoveryCalls === 2 && !store.status().includes('failed='), 25_000);
+	// The extension is running and may hold the write lock; openDatabase applies the store's own wait.
+	const db = openDatabase(join(stateDir, 'memory.sqlite'));
+	try { db.exec("UPDATE sources SET retry_at=0 WHERE id='recovery-fixture'"); } finally { db.close(); }
+	await waitFor(() => recoveryCalls === 2 && !store.status().includes('failed='), 'second recovery attempt to succeed on the recurring timer', 25_000);
 	assert.match(store.status(), /retrying=0, paused=0/);
 	assert.equal(output.includes('extension_error'), false);
 	console.log('PASS: natural requirement capture, early commit/push evidence after 12 diagnostics, project-name update nomination, partial acceptance preserved, learning diagnostics, evidence labels, feedback/quarantine without paid learning, read-only memory_recall round trip, real Pi model/auth, cross-session recall, natural-language questions, multi-hop focus/subject matching, unknown-topic barriers, explain diagnostics, no recall-time learning calls, topic switch, provenance, forget, tool-backed progress update, failed push not called success, automatic startup/timer recovery, no approval.');

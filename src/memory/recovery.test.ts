@@ -7,12 +7,12 @@ import { spawn } from 'node:child_process';
 import { MemoryStore, type Source } from './memory-store.ts';
 import { Database } from './sqlite.ts';
 import { EVOLUTION_TIMEOUT_MS, LEASE_GRACE_MS, MAX_FAILURES, MAX_OUTPUT_FAILURES, retryAt } from './recovery.ts';
+import { SCHEMA_VERSION } from './limits.ts';
 
 const source = (id = 's'): Source => ({ id, kind: 'summary', scope: '/old-origin', content: '## Critical Context\n- Database uses SQLite.', createdAt: '2026-09-01T00:00:00Z' });
 function using(fn: (s: MemoryStore, db: Database, dir: string) => void) {
- const dir = mkdtempSync(join(tmpdir(), 'pme-recovery-'));
- const s = new MemoryStore(dir), db = new Database(join(dir, 'memory.sqlite'));
- try { fn(s, db, dir); } finally { db.close(); s.close(); rmSync(dir, { recursive: true, force: true }); }
+ let dir: string | undefined, s: MemoryStore | undefined, db: Database | undefined;
+ try { dir = mkdtempSync(join(tmpdir(), 'pme-recovery-')); s = new MemoryStore(dir); db = new Database(join(dir, 'memory.sqlite')); fn(s, db, dir); } finally { db?.close(); s?.close(); if (dir) rmSync(dir, { recursive: true, force: true }); }
 }
 const job = (db: Database, id = 's') => db.prepare('SELECT * FROM sources WHERE id=?').get(id)!;
 
@@ -92,7 +92,7 @@ test('schema 3 migration adds recovery fields atomically, preserves data and dis
   assert.equal(job(db).failures, 1); assert.equal(job(db).attempt, 1);
   assert.equal(job(db).failed_at, 0); assert.equal(job(db).last_error, 'unknown');
   assert.deepEqual(migrated.readMemories(), records); assert.deepEqual(migrated.history(), history);
-  assert.match(migrated.status(), /schema 7/); assert.match(migrated.status(), /unknown \(legacy\)/);
+  assert.match(migrated.status(), new RegExp(`schema ${SCHEMA_VERSION}`)); assert.match(migrated.status(), /unknown \(legacy\)/);
  } finally { migrated.close(); }
 }));
 
@@ -115,10 +115,11 @@ test('cancelling a manual override cannot silently unpause exhausted automatic w
 }));
 
 test('competing processes can claim a due failed source only once', async () => {
- const dir=mkdtempSync(join(tmpdir(),'pme-recovery-process-'));const s=new MemoryStore(dir);
- s.capture(source());s.failEvolution(s.beginEvolution('s')!,'provider',Date.now()-120_000);s.close();
- const module=new URL('./memory-store.ts',import.meta.url).href;
+ let dir: string | undefined;
  try {
+  dir=mkdtempSync(join(tmpdir(),'pme-recovery-process-'));const s=new MemoryStore(dir);
+  s.capture(source());s.failEvolution(s.beginEvolution('s')!,'provider',Date.now()-120_000);s.close();
+  const module=new URL('./memory-store.ts',import.meta.url).href;
   const claims=await Promise.all(Array.from({length:4},()=>new Promise<number>((resolve,reject)=>{
    const code=`import {MemoryStore} from ${JSON.stringify(module)};const s=new MemoryStore(${JSON.stringify(dir)});console.log(s.beginEvolution('s','auto')?1:0);s.close();`;
    const child=spawn(process.execPath,['--input-type=module','-e',code],{stdio:['ignore','pipe','pipe']});let stdout='',stderr='';
@@ -126,7 +127,7 @@ test('competing processes can claim a due failed source only once', async () => 
    child.on('exit',c=>c===0?resolve(Number(stdout.trim())):reject(new Error(stderr)));
   })));
   assert.equal(claims.reduce((a,b)=>a+b,0),1);
- }finally{rmSync(dir,{recursive:true,force:true});}
+ }finally{if(dir)rmSync(dir,{recursive:true,force:true});}
 });
 
 test('retry policy is bounded even after manual failures beyond the automatic cap', () => {

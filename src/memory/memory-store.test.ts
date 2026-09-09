@@ -12,8 +12,8 @@ import { archiveLegacyFiles, legacyFiles } from "./legacy-files.ts";
 function temp() { return mkdtempSync(join(tmpdir(), "pme-v2-")); }
 const source = (id = "s1", content = "## Critical Context\n- Database port is 5432.", scope = "/project"): Source => ({ id, scope, kind: "summary", content, createdAt: new Date().toISOString() });
 function using(fn: (s: MemoryStore, dir: string) => void) {
-	const dir = temp(); const s = new MemoryStore(dir);
-	try { fn(s,dir); } finally { s.close(); rmSync(dir,{recursive:true,force:true}); }
+	let dir: string | undefined, s: MemoryStore | undefined;
+	try { dir = temp(); s = new MemoryStore(dir); fn(s,dir); } finally { s?.close(); if (dir) rmSync(dir,{recursive:true,force:true}); }
 }
 
 test("capture commits evidence and claims once; no raw summary in recall", () => using((s) => {
@@ -29,12 +29,13 @@ test("forget cannot return through parent or later extraction", () => using((s) 
 	assert.deepEqual(selectRelevantMemories(s.readMemories(), "Database port"), []);
 }));
 test("correction does not reappear from summary, even across reload", () => {
-	const dir = temp(); let s = new MemoryStore(dir);
+	let dir: string | undefined, s: MemoryStore | undefined;
 	try {
+		dir = temp(); s = new MemoryStore(dir);
 		s.capture(source()); const id = s.readMemories()[0].id;
 		s.act(id, "correct", "Database port is 9999."); s.close(); s = new MemoryStore(dir);
 		s.capture(source("s2")); assert.deepEqual(s.readMemories().map((m) => m.content), ["Database port is 9999."]);
-	} finally { s.close(); rmSync(dir,{recursive:true,force:true}); }
+	} finally { s?.close(); if (dir) rmSync(dir,{recursive:true,force:true}); }
 });
 test("conflict suppresses both sides; pin cannot revive conflict", () => using((s) => {
 	s.capture(source()); s.capture(source("s2", "## Critical Context\n- Database port is 9999."));
@@ -128,9 +129,9 @@ test("job lease prevents duplicate model execution; failed job can retry explici
 	assert.equal(s.pending("/project",true),"s1"); assert.ok(s.beginEvolution("s1",true));
 }));
 test("resume finds persisted pending jobs without another compaction", () => {
-	const dir=temp(); let s=new MemoryStore(dir);
-	try { s.capture(source());s.close();s=new MemoryStore(dir);assert.equal(s.pending("/project"),"s1"); }
-	finally {s.close();rmSync(dir,{recursive:true,force:true});}
+	let dir: string | undefined, s: MemoryStore | undefined;
+	try { dir=temp(); s=new MemoryStore(dir); s.capture(source());s.close();s=new MemoryStore(dir);assert.equal(s.pending("/project"),"s1"); }
+	finally {s?.close();if(dir)rmSync(dir,{recursive:true,force:true});}
 });
 test("cross-process cache invalidation and independent scopes", () => using((s,dir) => {
 	s.capture(source());assert.equal(s.readMemories().length,1);
@@ -185,16 +186,18 @@ test("damaged or unreadable legacy action ledger stops import, never fails open"
 	}
 });
 test("a failed legacy import cannot be bypassed by pointing at an empty directory", () => {
-	const dir=temp(), empty=temp();
+	// Both directories are created inside the try, so a failure creating the second still cleans the first.
+	let dir: string | undefined, empty: string | undefined;
 	try{
+		dir=temp(); empty=temp();
 		writeFileSync(join(dir,"memories.jsonl"),"{broken");
 		const s=new MemoryStore(dir);
 		try{
 			assert.match(s.status(),/Legacy import: failed/);
-			assert.equal(s.importLegacy(empty).state,"failed");
+			assert.equal(s.importLegacy(empty!).state,"failed");
 			assert.throws(()=>s.capture(source()),(e:any)=>e.code==="unavailable");
 		}finally{s.close();}
-	}finally{for(const d of [dir,empty]) rmSync(d,{recursive:true,force:true});}
+	}finally{for(const d of [dir,empty]) if(d) rmSync(d,{recursive:true,force:true});}
 });
 test("legacy import state is tracked separately from schema creation, so a later ledger still imports", () => {
 	const dir=temp();
@@ -228,34 +231,37 @@ test("legacy summary correction extracts correct revision, not forgotten new chi
 	}finally{rmSync(dir,{recursive:true,force:true});}
 });
 test("incompatible schema and corrupted records fail closed", () => {
-	const dir=temp(); let s=new MemoryStore(dir);
+	let dir: string | undefined, s: MemoryStore | undefined;
 	try {
+		dir=temp(); s=new MemoryStore(dir);
 		s.capture(source()); s.close();
 		const db=new Database(join(dir,"memory.sqlite"));
 		db.exec("UPDATE metadata SET value='999' WHERE key='schema'");
-		assert.throws(()=>new MemoryStore(dir), /version/);
+		assert.throws(()=>new MemoryStore(dir!), /version/);
 		db.exec("UPDATE metadata SET value='2' WHERE key='schema'; UPDATE memories SET data='null'"); db.close();
-		s=new MemoryStore(dir); assert.throws(()=>s.readMemories(), /Invalid memory/);
-	} finally { s.close(); rmSync(dir,{recursive:true,force:true}); }
+		s=new MemoryStore(dir); assert.throws(()=>s!.readMemories(), /Invalid memory/);
+	} finally { s?.close(); if (dir) rmSync(dir,{recursive:true,force:true}); }
 });
 test("process exit during an uncommitted transaction preserves the last committed state", async () => {
-	const dir=temp(); const s=new MemoryStore(dir);s.capture(source());s.close();
+	let dir: string | undefined;
 	try {
+		dir=temp(); const s=new MemoryStore(dir);s.capture(source());s.close();
 		const code=`import {DatabaseSync} from 'node:sqlite';const d=new DatabaseSync(${JSON.stringify(join(dir,'memory.sqlite'))});d.exec(\"BEGIN IMMEDIATE; DELETE FROM memories;\");process.exit(0);`;
 		await new Promise<void>((resolve,reject)=>{const child=spawn(process.execPath,['--input-type=module','-e',code],{stdio:'ignore'});child.on('error',reject);child.on('exit',(c)=>c===0?resolve():reject(new Error('child failed')));});
 		const reopened=new MemoryStore(dir);try{assert.equal(reopened.readMemories().length,1);assert.match(reopened.status(),/SQLite ok/);}finally{reopened.close();}
-	} finally { rmSync(dir,{recursive:true,force:true}); }
+	} finally { if (dir) rmSync(dir,{recursive:true,force:true}); }
 });
 test("multiple processes capture concurrently without lost records",async()=>{
-	const dir=temp();const s=new MemoryStore(dir);s.close();
-	const url=new URL("./memory-store.ts",import.meta.url).href;
+	let dir: string | undefined;
 	try {
+		dir=temp();const s=new MemoryStore(dir);s.close();
+		const url=new URL("./memory-store.ts",import.meta.url).href;
 		await Promise.all(Array.from({length:4},(_,i)=>new Promise<void>((resolve,reject)=>{
 			const code=`import {MemoryStore} from ${JSON.stringify(url)};const s=new MemoryStore(${JSON.stringify(dir)});for(let j=0;j<15;j++)s.capture({id:'${i}-'+j,scope:'/project',kind:'summary',createdAt:new Date().toISOString(),content:'## Critical Context\\n- Worker ${i} observation number '+j+'.'});s.close();`;
 			const child=spawn(process.execPath,["--input-type=module","-e",code],{stdio:["ignore","ignore","pipe"]});let error="";child.stderr.on("data",(d)=>error+=d);child.on("error",reject);child.on("exit",(code)=>code===0?resolve():reject(new Error(error)));
 		})));
 		const final=new MemoryStore(dir);try{assert.equal(final.readMemories().length,60);}finally{final.close();}
-	}finally{rmSync(dir,{recursive:true,force:true});}
+	}finally{if(dir)rmSync(dir,{recursive:true,force:true});}
 });
 
 test("inactive legacy files are reported and archived by copy, never executed or deleted", () => {

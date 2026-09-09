@@ -1,4 +1,5 @@
 import { redact } from "./privacy.ts";
+import { MAX_SEARCH_TERMS, MAX_SEARCH_TERM_CHARS, MIN_SEARCH_TERM_CHARS } from './limits.ts';
 
 // Small, explicit bilingual bootstrap for existing records, not a general translator.
 // New model-derived searchTerms extend recall beyond this vocabulary without model calls
@@ -98,8 +99,8 @@ export function featureOffset(text: string, feature: string): number {
 }
 
 export function validSearchTerms(value: unknown): value is string[] | undefined {
-	return value === undefined || (Array.isArray(value) && value.length <= 8 && value.every((term) =>
-		typeof term === "string" && term.trim() === term && term.length >= 2 && term.length <= 64
+	return value === undefined || (Array.isArray(value) && value.length <= MAX_SEARCH_TERMS && value.every((term) =>
+		typeof term === "string" && term.trim() === term && term.length >= MIN_SEARCH_TERM_CHARS && term.length <= MAX_SEARCH_TERM_CHARS
 		&& !term.includes("[REDACTED") && redact(term) === term && !/[\r\n]/u.test(term))
 		&& Buffer.byteLength(JSON.stringify(value)) <= 1024);
 }

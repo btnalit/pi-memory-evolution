@@ -171,7 +171,7 @@ resolution. Model identity is captured before awaiting completion, so switching 
 or invalidating a context cannot mislabel provenance. No credentials are copied to state.
 
 Each input contains a sanitized source (at most 32,000 bytes) and up to 32 recently updated
-active claims **from that source origin**, each capped at 1,440 bytes. This deliberately
+active claims **from that source origin**, each capped at 2,400 bytes (`MAX_CLAIM_BYTES`, i.e. `MAX_CLAIM_CHARS * 3`). This deliberately
 limits automatic replacement authority, **not recall eligibility**. One origin can cover
 multiple projects. The prompt requires an explicitly identifiable same subject/fact and
 preservation of project/resource qualifications; matching cwd alone is not identity.

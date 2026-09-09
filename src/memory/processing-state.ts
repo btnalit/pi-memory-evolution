@@ -25,8 +25,15 @@ export function budgetUntil(db: Database, model: string, now: number, policy: Ro
  if (policy.dailyEstimatedUsd !== null) {
   const day = db.prepare('SELECT at,reserved_usd,charged_usd FROM model_calls WHERE at>? ORDER BY at').all(now - 86_400_000);
   const cost = day.reduce((sum, r) => sum + Number(r.charged_usd ?? r.reserved_usd ?? 0), 0);
-  if (reserveUsd === null || day.some(r => r.charged_usd === null && r.reserved_usd === null)
-   || cost + (reserveUsd ?? 0) > policy.dailyEstimatedUsd) until = Math.max(until, Number(day[0]?.at ?? now) + 86_400_000);
+  // Waiting only helps once the oldest recorded call leaves the window. A model whose cost cannot be
+  // estimated never becomes enforceable, and a single call larger than the whole ceiling never fits,
+  // so those are reported as blocked rather than as a deadline that silently never arrives.
+  if (reserveUsd === null || (reserveUsd ?? 0) > policy.dailyEstimatedUsd) until = Number.POSITIVE_INFINITY;
+  // Reaching here needs a recorded call — an unknown-cost row, or spend already over the ceiling —
+  // so the window is non-empty and its oldest entry is a deadline that genuinely admits the call.
+  else if (day.some(r => r.charged_usd === null && r.reserved_usd === null) || cost + (reserveUsd ?? 0) > policy.dailyEstimatedUsd) {
+   until = Math.max(until, Number(day[0].at) + 86_400_000);
+  }
  }
  return until;
 }

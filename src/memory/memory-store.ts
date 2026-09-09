@@ -1,4 +1,4 @@
-import { Database } from "./sqlite.ts";
+import { openDatabase, type Database } from "./sqlite.ts";
 import { chmodSync, closeSync, lstatSync, mkdirSync, openSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -10,6 +10,7 @@ import { validSearchTerms } from "./search.ts";
 import { sourceEvidence, validEvidence, validFeedback, mayReplace, FEEDBACK_VERDICTS, type Evidence, type MemoryFeedback, type FeedbackVerdict } from "./quality.ts";
 import { EVOLUTION_TIMEOUT_MS, LEASE_GRACE_MS, MAX_FAILURES, MAX_OUTPUT_FAILURES, PAUSED_SQL, FAILURE_CODES, EvolutionError, retryAt, type FailureCode } from "./recovery.ts";
 import { modelLabel, OUTPUT_PROTOCOL_VERSION, parseDiagnostic, validDiagnostic, type Diagnostic } from './diagnostics.ts';
+import { SCHEMA_VERSION, SUPPORTED_SCHEMAS } from './limits.ts';
 import { budgetUntil, reserveCall, finishCall, takeNotice, routeUntil, estimatedCost, type CallOptions } from './processing-state.ts';
 import { loadRoutingPolicy, type RoutingPolicy } from './routing-policy.ts';
 
@@ -86,12 +87,11 @@ export class MemoryStore {
 		catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
 		if (!lstatSync(file).isFile() || lstatSync(file).isSymbolicLink()) throw new Error("Memory database must be a regular file");
 		chmodSync(file, 0o600);
-		this.db = new Database(file);
+		this.db = openDatabase(file);
 		try {
-			this.db.exec("PRAGMA busy_timeout=5000");
 			if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").get()) {
 				const schema = this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get();
-				if (schema && !["2", "3", "4", "5", "6", "7"].includes(String(schema.value))) throw new Error("Unsupported memory database version");
+				if (schema && !SUPPORTED_SCHEMAS.includes(String(schema.value))) throw new Error("Unsupported memory database version");
 			}
 			this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
 				CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -104,7 +104,7 @@ export class MemoryStore {
 				CREATE TABLE IF NOT EXISTS blocked (scope TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(scope,hash));`);
 			this.transaction(() => {
 				const schema = this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get();
-				if (schema && !["2", "3", "4", "5", "6", "7"].includes(String(schema.value))) throw new Error("Unsupported memory database version");
+				if (schema && !SUPPORTED_SCHEMAS.includes(String(schema.value))) throw new Error("Unsupported memory database version");
 				if (!["4", "5", "6", "7"].includes(String(schema?.value))) {
 					const columns = new Set(this.db.prepare("PRAGMA table_info(sources)").all().map((r) => r.name));
 					for (const [name, type] of [["failures", "INTEGER NOT NULL DEFAULT 0"], ["retry_at", "INTEGER NOT NULL DEFAULT 0"],
@@ -151,7 +151,7 @@ export class MemoryStore {
 				const imported = this.importState();
 				if (imported.state === 'completed' && imported.count === 0 && emptyLegacyDigest(imported.digest)
 					&& !this.db.prepare("SELECT 1 FROM events WHERE json_extract(data,'$.actor')='migration' LIMIT 1").get()) this.setImportState({ state: 'not_found' });
-				this.db.prepare("INSERT INTO metadata VALUES ('schema','7') ON CONFLICT(key) DO UPDATE SET value='7'").run();
+				this.db.prepare("INSERT INTO metadata VALUES ('schema',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(SCHEMA_VERSION);
 			});
 			if (this.importState().state === 'pending') {
 				try { this.importLegacy(); } catch { /* Persisted failure blocks learning but leaves status/repair commands available. */ }
@@ -463,9 +463,16 @@ export class MemoryStore {
 	pausedNoticeKey(): string {
 		return JSON.stringify(this.db.prepare(`SELECT id,last_error FROM sources WHERE state IN ('pending','failed') AND ${pausedSQL(this.policy)} ORDER BY id`).all());
 	}
-	budgetStatus(model: string, now = Date.now()): string {
-		const until = budgetUntil(this.db, modelLabel(model), now, this.policy);
-		return until > now ? `Shared model budget: waiting until ${new Date(until).toISOString()} (manual evolve does not bypass shared ceilings).` : 'Shared model budget: available.';
+	/** Reports what a real claim would find, so status cannot disagree with the path that spends money. */
+	budgetStatus(model: string, now = Date.now(), call?: CallOptions): string {
+		// Unconditional, exactly as beginEvolution does it: a missing model yields null (unknown), not free.
+		const reserve = estimatedCost(0, call);
+		const until = budgetUntil(this.db, modelLabel(model), now, this.policy, reserve);
+		if (until <= now) return 'Shared model budget: available.';
+		if (Number.isFinite(until)) return `Shared model budget: waiting until ${new Date(until).toISOString()} (manual evolve does not bypass shared ceilings).`;
+		return reserve === null
+			? `Shared model budget: blocked. dailyEstimatedUsd is set but ${modelLabel(model)} has no catalog pricing, so the ceiling cannot be enforced and no call is made. Remove dailyEstimatedUsd from recovery.json, or use a model with known pricing.`
+			: 'Shared model budget: blocked. One estimated call already exceeds dailyEstimatedUsd, so waiting cannot help. Raise the ceiling in recovery.json.';
 	}
 	routeAvailable(model: string, provider: string, now = Date.now()): boolean {
 		return routeUntil(this.db, modelLabel(model), modelLabel(provider), now) <= now;
@@ -608,7 +615,7 @@ export class MemoryStore {
 			...(rows.length ? [] : ['No model transactions yet.']), 'Use /memory learning for the last capture/nomination decision.'].join('\n');
 	}
 	status(): string {
-		if (this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get()?.value !== "7") throw new Error("Invalid memory schema marker");
+		if (this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get()?.value !== SCHEMA_VERSION) throw new Error("Invalid memory schema marker");
 		const health = this.db.prepare("PRAGMA quick_check").get();
 		if (health?.quick_check !== "ok") throw new Error("Memory database integrity check failed");
 		for (const row of this.db.prepare("SELECT id,data,state,attempt,lease,failures,output_failures,retry_at,failed_at,last_error,diagnostic,calls,call_ms,call_models,last_checked,corrections FROM sources").iterate()) {
@@ -624,7 +631,7 @@ export class MemoryStore {
 				|| !FEEDBACK_VERDICTS.has(row.verdict as FeedbackVerdict) || !Number.isSafeInteger(row.at)) throw new Error("Invalid feedback receipt");
 		}
 		const jobs = this.db.prepare("SELECT state,COUNT(*) AS n FROM sources GROUP BY state").all();
-		return `${this.readMemories().length} memories; ${jobs.map((j) => `${j.state}=${j.n}`).join(", ") || "no sources"}; SQLite ok (schema 7)\nState directory: ${redact(this.stateDir)}\n${this.recoveryStatus()}\n${this.routingStatus()}\n${this.legacyStatus()}\n${this.processingStatus()}`;
+		return `${this.readMemories().length} memories; ${jobs.map((j) => `${j.state}=${j.n}`).join(", ") || "no sources"}; SQLite ok (schema ${SCHEMA_VERSION})\nState directory: ${redact(this.stateDir)}\n${this.recoveryStatus()}\n${this.routingStatus()}\n${this.legacyStatus()}\n${this.processingStatus()}`;
 	}
 }
 

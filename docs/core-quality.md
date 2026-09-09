@@ -186,7 +186,7 @@ Per-user-turn automatic injection remains enabled even when this tool is disable
 
 ## Schema and activation
 
-Schema 2/3/4 upgrades transactionally to **5**. Missing retry fields are added as before,
+Schema 2/3/4/5/6 upgrades transactionally to **7**. Missing retry fields are added as before,
 plus `feedback_receipts(source_id, memory_id, verdict, at)`. Existing memory/source/event
 JSON is not rewritten; IDs, timestamps, tombstones, aliases, source jobs and history are
 preserved. Missing optional evidence stays unknown. No JSONL re-import, evidence-date

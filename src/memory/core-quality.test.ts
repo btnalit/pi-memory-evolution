@@ -10,6 +10,7 @@ import { feedbackCue } from "./feedback.ts";
 import { parseClaims } from "./evolution.ts";
 import { retrieveMemories, selectRelevantMemories } from "./retriever.ts";
 import { buildRuntimeDigest } from "../injector/digest.ts";
+import { SCHEMA_VERSION } from './limits.ts';
 
 const now = Date.parse("2026-09-07T12:00:00Z"), DAY = 86400_000;
 const iso = (days = 0) => new Date(now - days * DAY).toISOString();
@@ -265,7 +266,7 @@ test("schema 4 migration preserves byte-for-byte records/history and leaves miss
 			assert.equal(migrated.history().length, 1);
 			assert.equal(migrated.readMemories()[0].evidence, undefined);
 			assert.equal(memoryQuality(migrated.readMemories()[0], now).basis, "unknown");
-			assert.match(migrated.status(), /schema 7/);
+			assert.match(migrated.status(), new RegExp(`schema ${SCHEMA_VERSION}`));
 		} finally { migrated.close(); }
 	} finally { db.close(); }
 }));

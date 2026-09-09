@@ -17,6 +17,7 @@ import { clipBytes, fingerprint, redact } from "./memory/privacy.ts";
 import { completeMemory, type CompleteMemory } from "./adapter/pi-api.ts";
 import { EVOLUTION_TIMEOUT_MS, RECOVERY_POLL_MS, EvolutionError, failureCode } from "./memory/recovery.ts";
 import { modelLabel } from './memory/diagnostics.ts';
+import { INVALID_POLICY_MESSAGE } from './memory/routing-policy.ts';
 import { archiveLegacyFiles } from './memory/legacy-files.ts';
 
 export interface MemoryEvolutionDependencies {
@@ -48,12 +49,17 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 	const notify = (ctx: ExtensionContext, text: string, type: "info" | "warning") => {
 		try { ctx.ui.notify(redact(text), type); } catch { /* UI failure does not undo a committed update. */ }
 	};
+	// A rejected policy file disables the store itself, so every command fails the same way and the
+	// generic advice points at /memory status, which fails identically. Name the file instead.
+	const policyFailure = (error: unknown) => error instanceof Error && error.message === INVALID_POLICY_MESSAGE;
 	const report = (ctx: ExtensionContext, error?: unknown, sourceId?: string) => {
 		// Never expose raw exceptions. Safe rule/path metadata is enough to identify the failed contract.
 		const detail = error instanceof EvolutionError ? error.diagnostic : {};
 		const reason = detail.reason ? `/${detail.reason}${detail.field ? ` at ${detail.field}` : ''}` : '';
 		lastErrorSource = sourceId;
-		lastError = `Memory operation failed (${failureCode(error)}${reason}); local records retained. /memory status shows diagnostics, retry times and paused jobs.`;
+		lastError = policyFailure(error)
+			? `Memory is disabled: ${join(stateDir, 'recovery.json')} is invalid. Fix or remove it, then /reload. Records are untouched.`
+			: `Memory operation failed (${failureCode(error)}${reason}); local records retained. /memory status shows diagnostics, retry times and paused jobs.`;
 		try {
 			if (!ctx.hasUI) return;
 			const key = sourceId ? getStore().jobNoticeKey(sourceId) : `operation:${failureCode(error)}:${reason}`;
@@ -207,7 +213,7 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 				let text: string;
 				if (operation === "status") {
 					const model = ctx.model ? modelLabel(`${ctx.model.provider}/${ctx.model.id}`) : 'unavailable';
-					text = `${current.status()}\nCurrent model: ${model}\nAllowed routes: ${routeCandidates(ctx, current).map(modelKey).join(' → ') || 'no active model'}\n${current.budgetStatus(model)}\nCapture origin: ${scope}\nRecall: all origins, topic-based\nRecovery polling: every ${(dependencies.pollMs ?? RECOVERY_POLL_MS) / 1000}s while Pi is running`;
+					text = `${current.status()}\nCurrent model: ${model}\nAllowed routes: ${routeCandidates(ctx, current).map(modelKey).join(' → ') || 'no active model'} (at most ${current.policy.sourceModels} of them per source)\n${current.budgetStatus(model, Date.now(), ctx.model ? { provider: ctx.model.provider, pricing: ctx.model.cost } : undefined)}\nCapture origin: ${scope}\nRecall: all origins, topic-based\nRecovery polling: every ${(dependencies.pollMs ?? RECOVERY_POLL_MS) / 1000}s while Pi is running`;
 				}
 				else if (operation === "learning") text = `Last learning capture (transient, not proof of updates):\n${lastLearning}\n${current.processingStatus()}`;
 				else if (operation === "explain") {
@@ -265,10 +271,17 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 					}).join("\n") || "No matching memories. /memory list legacy shows unscoped imports.") + pageInfo;
 				} else if (["correct", "forget", "pin", "unpin", "conflict", "resolve", "adopt"].includes(operation)) {
 					if (!id) throw new Error("A memory id is required");
+					// Only these two read a second argument. Adopt takes the current origin, so a typed
+					// path would otherwise be accepted and thrown away without a word.
+					if (value && !["correct", "conflict"].includes(operation)) throw new Error(`Usage: /memory ${operation} <id>`);
 					text = `Update recorded: ${current.act(id, operation as MemoryAction, operation === "adopt" ? scope : value)}`;
 				} else throw new Error("Unknown operation. Use /memory list|show|search|explain|learning|status|history|evolve|undo|feedback|correct|forget|pin|unpin|conflict|resolve|adopt");
 				notify(ctx, text, "info");
-			} catch { report(ctx); notify(ctx, "Memory command failed. Check the operation/id and /memory status; no partial update was committed.", "warning"); }
+			} catch (error) {
+				report(ctx, error);
+				notify(ctx, policyFailure(error) ? lastError
+					: "Memory command failed. Check the operation/id and /memory status; no partial update was committed.", "warning");
+			}
 		},
 	});
 }
