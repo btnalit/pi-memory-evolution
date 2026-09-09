@@ -10,6 +10,7 @@ This reference covers detailed behavior and optional controls; normal use is aut
 - [Commands](#commands)
 - [Migration](#migration-from-01)
 - [Recovery and troubleshooting](#recovery-and-troubleshooting)
+- [Provider fallback, error policies and budgets](recovery.md)
 
 ## Installation and updates
 
@@ -110,9 +111,11 @@ rename the tool to hide the conflict; an old installation would still run its ho
 - Each processing attempt makes at most one background model call, using up to 32
   recently updated active memories from that source's capture origin. This is a
   conservative automatic-replacement safeguard, **not a recall restriction**.
-  It uses **the current Pi session model and Pi's own provider/auth resolution**.
-  With no model override in the session, this is Pi's configured default model.
-  There is no extra API key, provider setting, subagent, or alternate-model fallback.
+  It defaults to **the current Pi session model and Pi's own provider/auth resolution**.
+  With no session override, this is Pi's configured default. Quota/rate limits or repeated
+  failures may switch to an available model from another configured provider, not a sibling
+  sharing the default provider's quota. The foreground model is never changed. See
+  [fallback privacy, error handling and budgets](recovery.md); no extra credentials are stored.
 - Valid additions/replacements commit immediately, with provenance and before/after
   history. Inferred memories remain labeled `provisional`, but are recallable without
   approval. Pinned memories cannot be automatically replaced.
@@ -123,14 +126,17 @@ rename the tool to hide the conflict; an old installation would still run its ho
   learning its claims requires a successful model attempt.
 - Session start checks persisted work across **all origins**. While Pi remains running,
   a local recovery timer checks every **15 seconds** (after the previous check/call ends),
-  gradually draining eligible pending/failed work one source per check. Selection favors
-  the earliest retry time, then oldest capture; a failed source does not block other work.
-- Failed attempts retry automatically after **1 minute, 5 minutes, 15 minutes, then 1 hour**.
-  After **5 consecutive failures**, that source pauses and a warning points to diagnostics;
-  there are no indefinite paid probes. Retry times/budgets survive reloads and restarts.
-  `/memory status` shows safe error categories, failure times, attempt counts, next retry
-  times and paused counts. `/memory evolve` remains an optional one-off override of the
-  delay/limit, not the normal recovery path; successful/retired jobs are never rerun.
+  gradually draining eligible pending/failed work one source per check (at most one immediate
+  backup per check). Selection favors least recently checked work, then retry time and oldest
+  capture, so unavailable routes do not indefinitely block other sources.
+- Recovery is **error-specific**, with persisted source backoff, separate provider/model
+  cooldowns, at most one output correction, and bounded cross-provider fallback. Generic
+  backoff is 1 minute, 5 minutes, 15 minutes, then 1 hour, plus up to 20% jitter. Defaults
+  cap each source at **4 reserved calls / 2 models / 300 seconds**, and all models and
+  processes share **20 calls per rolling hour**. Three output failures or five generic
+  failures also pause work; unsafe writes/refusals pause immediately. `/memory status`
+  explains routes, budgets and actual outcomes. `/memory evolve` overrides source limits
+  for one attempt, never shared ceilings or settled jobs. [Full policy/configuration](recovery.md).
 - A job lease lasts **150 seconds** (120-second deadline plus 30-second grace). The timer
   detects expired running jobs and schedules them with the same bounded backoff. Shutdown/
   reload cancellation returns work to pending without consuming the failure budget.
@@ -158,7 +164,7 @@ rename the tool to hide the conflict; an old installation would still run its ho
   recall regardless of its original directory.
 - Query coverage, evidence-based document frequency, field weights, mild length
   normalization and a relative cutoff reject weak secondary matches. Unseen query words
-  no longer receive the highest rarity weight. Exact paths must match, and a quoted
+  no longer receive the highest rarity weight. Exact paths must match, including case; `/srv/Atlas` and `/srv/atlas` are distinct. A quoted
   question in a replay/incident note is weaker than evidence answering it. Redundancy
   filtering cannot let a project-state note hide a preference of the same origin.
   Source IDs/cwd have no authority bonus. After relevance gates, host-assigned evidence,
@@ -181,8 +187,10 @@ There is no additional call on ordinary recall. Eligible work turns may now incu
 additional background call each; no related tracked state or no tool observation means
 no progress call. A mixed statement/work turn may additionally incur a separate learning
 call; interrupted turns with usable observations may also learn through automatic recovery.
-Automatic retries may add up to four calls per source after the initial
-failure; every attempt uses the session's then-current model/authentication. Model mistakes
+Automatic retries/fallback share a default total of four reserved calls per source;
+they do not get separate budgets per model. Each request uses Pi's authentication for the
+selected provider. Cross-provider data sharing and optional estimated-cost limits are
+explained in [recovery configuration](recovery.md). Model mistakes
 remain possible; tool observations and model-generated aliases are not proof of truth. Use
 history, correction, pinning and undo rather than treating generated claims as verified facts.
 
@@ -270,7 +278,9 @@ Sensitive lines/blocks are suppressed before capture, edits, model submission an
 recall. This covers common token/password/JSON/Chinese/Bearer/private-key formats,
 including quoted multiline values, indented YAML blocks and control-character cleanup,
 but not every possible secret. Do not rely on a regex as a complete DLP system. Sanitized
-sources and selected existing memories go to the already-configured Pi model provider.
+sources and selected existing memories go to the active Pi model provider or an allowed
+already-configured fallback provider. Fallback is enabled by default; restrict the model
+allowlist or disable it in [recovery configuration](recovery.md) to constrain data sharing.
 
 ## Commands
 
@@ -291,7 +301,7 @@ These are optional direct controls, **not approval gates**:
 /memory evolve                       # optional one-off retry, overriding delay/failure limit
 /memory evolve <source-id>            # retry one named source without clearing other failure counts
 /memory import [directory]            # explicit, repeat-safe legacy JSONL import; never replays a completed one
-/memory archive-legacy                # copy inactive legacy plan files to a timestamped archive; originals kept
+/memory archive-legacy                # copy inactive legacy plan files to a private unique archive; originals kept
 /memory undo <event-id>               # reverse actual changes, if not modified since
 /memory feedback <id> <verdict>       # useful | unhelpful | accurate | incorrect
 /memory correct <id> <replacement>    # literal replacement, 4–480 characters
@@ -350,18 +360,23 @@ preserve unchanged children of corrected summaries and carry superseded-content 
 when corrected legacy claims are adopted into a project.
 
 **Upgrading from earlier 0.2 development builds:** stop Pi and back up the state directory
-first, then update/reload all Pi processes sharing it. Schema markers **2, 3 and 4 upgrade
-transactionally to 5**, adding replay-safe feedback receipts and the optional evidence/feedback
-contract (plus missing retry fields for older schemas). Existing records, IDs, histories and
+first, then update/reload all Pi processes sharing it. Schema markers **2–6 upgrade
+transactionally to 7**, adding missing recovery/feedback fields, source call/time/model
+budgets, provider cooldowns and usage receipts. Known v6 route waits are separated from
+source failure backoff; retained call history seeds counters without inventing missing calls. Existing records, IDs, histories and
 evidence dates remain unchanged. Missing evidence stays unknown, with no fabricated backfill.
 Existing failures below the limit become automatically eligible; their old error cause/time
 remain labeled unknown rather than invented. No copying, manual marker reset or JSONL
-re-import is needed. Older builds reject schema 6; rollback requires a matching backup,
+re-import is needed. Older builds reject schema 7; rollback requires a matching backup,
 not editing the marker. Existing records are immediately eligible for global relevance-based recall.
 Legacy claims previously excluded by cwd filtering become eligible too. This shares
 relevant stored claims with the active Pi session/provider, not raw session archives.
 
-These migration fixes do not replay an already completed import or retroactively erase
+Empty/missing ledgers do not mark an import completed. After supplying files, use
+`/memory import [directory]`. Provably empty v6 snapshots can reopen safely; a zero claim
+count alone never authorizes replay of a real consumed ledger. See [migration details](recovery.md).
+
+These migration fixes do not replay an already completed real import or retroactively erase
 previously stored sensitive data. If an older import already lost revision information,
 use the preserved ledgers/backup to review and correct affected records; do not reset the
 migration marker or replace a populated database blindly.
@@ -395,10 +410,11 @@ JSONL, not changes made in the new database.
   automatically processes due work. `/memory status` distinguishes scheduled retries from
   paused sources and shows the next eligible time (the next poll may be up to 15 seconds
   later when no local work is queued). After a crash, the 150-second lease must expire first.
-  If a source reaches 5 failures, inspect its category: `timeout`, `output_limit`,
-  `invalid_output`, `write_rejected`, `stale`, `provider`, `unavailable`, `interrupted` or
-  `unknown`. Fix model/authentication or investigate repeated output/write rejection;
-  `/memory evolve` can then make one extra attempt without resetting the automatic budget.
+  Inspect source call/time/output limits as well as failure count. Status distinguishes
+  `auth`, `quota`, `rate_limit`, `context_limit`, `request`, `safety`, transport, output and
+  stale-write failures. Provider cooldowns are separate from source retry times; switching
+  providers cannot bypass the shared budget. `/memory evolve` makes one explicit source
+  attempt without resetting counters or overriding shared ceilings. See [error policy](recovery.md).
   A bad source remains saved/visible rather than being deleted or labeled successful.
 - **Persistent storage/import errors:** stop all Pi processes using that agent directory
   and back up the **entire** state directory, including any SQLite sidecars and legacy
@@ -411,4 +427,4 @@ JSONL, not changes made in the new database.
   stopped; do not mix one backup's database with another's WAL/SHM files.
 
 Diagnostics intentionally do not echo provider error bodies, which may contain secrets.
-`SQLite ok (schema 6)` checks database structure/record validity, not the truth of model claims.
+`SQLite ok (schema 7)` checks database structure/record validity, not the truth of model claims.

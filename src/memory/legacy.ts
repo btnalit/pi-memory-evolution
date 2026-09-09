@@ -5,7 +5,12 @@ import type { DurableMemory, MemoryKind } from "./memory-store.ts";
 import { extractStructuredMemories } from "./extractor.ts";
 import { fingerprint, redact } from "./privacy.ts";
 
-export interface LegacyImport { memories: DurableMemory[]; digest: string; found: boolean }
+export interface LegacyImport { memories: DurableMemory[]; digest: string; found: boolean; hasRecords: boolean }
+/** Only provably empty v6 snapshots can reopen an old completed marker; never infer from count alone. */
+export function emptyLegacyDigest(digest?: string): boolean {
+ return [null, '', '\n', '\r\n'].some(a => [null, '', '\n', '\r\n'].some(b =>
+  createHash('sha256').update(JSON.stringify([a, b])).digest('hex') === digest));
+}
 export function loadLegacyMemories(dir: string): DurableMemory[] { return loadLegacyImport(dir).memories; }
 
 /** Read a bounded immutable snapshot once; actions and memories must be validated together. */
@@ -90,7 +95,7 @@ export function loadLegacyImport(dir: string): LegacyImport {
 			}
 		} else memories.push(convert(record));
 	}
-	return { memories, digest, found: memoriesText !== undefined || actionsText !== undefined };
+	return { memories, digest, found: memoriesText !== undefined || actionsText !== undefined, hasRecords: records.size > 0 };
 }
 
 function convert(record: Record<string, any>): DurableMemory {

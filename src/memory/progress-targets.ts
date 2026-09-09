@@ -25,7 +25,7 @@ export function nominateProgress(memories: readonly DurableMemory[], input: { sc
   const body = features(memory.content), aliases = features((memory.searchTerms ?? []).join(' '));
   let resourceScore = 0, resourceReason = '', resourceConflict = false;
   for (const resource of resources) {
-   const path = resource.path.toLowerCase();
+   const path = resource.path; // Do not merge case-distinct files/directories on the host.
    const literals = [...body].filter(w => w.startsWith('literal:/')).map(w => w.slice(8));
    const exact = literals.some(l => l === path || (resource.kind === 'directory' && l.startsWith(path + '/')));
    const named = resource.kind === 'directory' && names(memory.content, resource.name);

@@ -17,6 +17,17 @@ helper scripts and memory state must not ship in the package.
 
 `check:package` inspects `npm pack --dry-run --json`; it does not publish to npm.
 
+## Recovery and routing regressions
+
+`http-diagnostics.test.ts` and `fallback-http.test.ts` use the real Pi ModelRuntime/Registry
+with loopback HTTP responses, not mocks that simply invoke `onResponse`. They verify HTTP
+401/403/400/429/503, quota/context/safety codes, Retry-After, Google SDK JSON errors, and
+cross-provider fallback with the backup's own authentication. No live provider is contacted.
+`scheduler.test.ts` covers bounded correction, per-attempt timeout/late-output rejection,
+provider cooldowns, allowlists, shared hard ceilings and persistent source limits.
+`reliability-regressions.test.ts` covers empty ledgers, safe v6-marker repair, preserving
+zero-claim real imports, schema-6 scheduling migration, and case-sensitive resource identity.
+
 ## npm CLI compatibility
 
 All consumers of `npm pack --json` share `scripts/lib/npm-pack.mjs`. npm 10/11
@@ -67,7 +78,7 @@ host explicitly. The script prints the tested host version. The test:
 1. Builds and extracts the actual npm tarball, outside the development checkout.
 2. Uses real `pi install`, `pi list` and default package discovery—no explicit `-e`
    entry or memory-extension wrapper. Checks `/memory status`, `/memory learning`
-   and `/memory explain`, including schema 6, with no checkout `node_modules`.
+   and `/memory explain`, including schema 7, with no checkout `node_modules`.
 3. Verifies repeated installation does not duplicate the package setting, then
    removes it and confirms the command disappears while records/history remain.
 4. Creates a local Git origin from the packed files and the real lockfile. A
@@ -75,7 +86,7 @@ host explicitly. The script prints the tested host version. The test:
    `file` transport is permitted. No GitHub access is needed.
 5. Exercises the native Git installer and its real npm dependency step, updates to
    a new commit, switches from an old pinned tag back to the default branch, and
-   verifies source switching and removal preserve schema-6 state.
+   verifies source switching and removal preserve schema-7 state.
 6. Serves the actual tarball through a loopback npm registry, with a fresh cache,
    then checks native `pi install npm:pi-memory-evolution`, repeat installation,
    normal loading and removal. No host peer packages are served or installed.

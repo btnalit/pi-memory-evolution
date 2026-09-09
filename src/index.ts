@@ -12,7 +12,7 @@ import { nominateProgress } from "./memory/progress-targets.ts";
 import { recentUserMessages } from "./adapter/session-context.ts";
 import { inspectProgress } from "./adapter/progress-observation.ts";
 import { buildRuntimeDigest } from "./injector/digest.ts";
-import { evolve } from "./memory/evolution.ts";
+import { evolveRouted, routeCandidates, modelKey } from './memory/scheduler.ts';
 import { clipBytes, fingerprint, redact } from "./memory/privacy.ts";
 import { completeMemory, type CompleteMemory } from "./adapter/pi-api.ts";
 import { EVOLUTION_TIMEOUT_MS, RECOVERY_POLL_MS, EvolutionError, failureCode } from "./memory/recovery.ts";
@@ -64,7 +64,7 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 	};
 	const guard = <T, R>(fn: (event: T, ctx: ExtensionContext) => R | Promise<R>) => async (event: T, ctx: ExtensionContext): Promise<R | undefined> => {
 		if (lifetime.signal.aborted) return;
-		try { return await fn(event, ctx); } catch { report(ctx); return; }
+		try { return await fn(event, ctx); } catch (error) { report(ctx, error); return; }
 	};
 	const enqueue = (id: string, ctx: ExtensionContext, retry: RetryMode = false) => {
 		queued++;
@@ -74,9 +74,14 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 				const contextSignal = ctx.signal;
 				// Background recovery is independent of a foreground turn's Esc signal.
 				const timeoutMs = dependencies.timeoutMs ?? EVOLUTION_TIMEOUT_MS;
-				const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(timeoutMs), ...(retry !== "auto" && contextSignal ? [contextSignal] : [])]);
-				const applied = await evolve(getStore(), id, ctx, signal, dependencies.complete ?? completeMemory, retry, timeoutMs);
+				const signal = AbortSignal.any([lifetime.signal, ...(retry !== 'auto' && contextSignal ? [contextSignal] : [])]);
+				const primaryModel = ctx.model;
+				const primary = primaryModel ? modelKey(primaryModel) : undefined;
+				const applied = await evolveRouted(getStore(), id, ctx, signal, dependencies.complete ?? completeMemory, retry, timeoutMs);
 				if (!applied) return "skipped";
+				const used = getStore().routingInfo(id).model;
+				if (primary && used && used !== primary && ctx.hasUI && getStore().takeNotice(`fallback:${primary}:${used}`))
+					notify(ctx, `Memory fallback used ${used}; default ${primary} was unavailable for this attempt. Foreground model unchanged. /memory status shows routing.`, 'info');
 				if (lastErrorSource === id) { lastError = ''; lastErrorSource = undefined; }
 				return "completed";
 			} catch (error) {
@@ -202,7 +207,7 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 				let text: string;
 				if (operation === "status") {
 					const model = ctx.model ? modelLabel(`${ctx.model.provider}/${ctx.model.id}`) : 'unavailable';
-					text = `${current.status()}\nCurrent model: ${model}\n${current.budgetStatus(model)}\nCapture origin: ${scope}\nRecall: all origins, topic-based\nRecovery polling: every ${(dependencies.pollMs ?? RECOVERY_POLL_MS) / 1000}s while Pi is running`;
+					text = `${current.status()}\nCurrent model: ${model}\nAllowed routes: ${routeCandidates(ctx, current).map(modelKey).join(' → ') || 'no active model'}\n${current.budgetStatus(model)}\nCapture origin: ${scope}\nRecall: all origins, topic-based\nRecovery polling: every ${(dependencies.pollMs ?? RECOVERY_POLL_MS) / 1000}s while Pi is running`;
 				}
 				else if (operation === "learning") text = `Last learning capture (transient, not proof of updates):\n${lastLearning}\n${current.processingStatus()}`;
 				else if (operation === "explain") {
@@ -213,7 +218,7 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 					const pending = id ?? current.pending(undefined, true);
 					const result = pending ? await enqueue(pending, ctx, true) : undefined;
 					text = result === "completed" ? "Memory evolution completed." : result === "failed" ? lastError
-						: result === "skipped" ? "Source was already processed, claimed, or cancelled; no update applied here." : "No eligible source.";
+						: result === "skipped" ? "No update applied here: source already processed/claimed/cancelled, or waiting for a route/shared budget. /memory status shows routing and budgets." : "No eligible source.";
 				} else if (operation === "import") {
 					// Explicit, transactional, repeat-safe. A completed import is never replayed over newer edits.
 					const target = [id, value].filter(Boolean).join(" ").trim();

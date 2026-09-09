@@ -6,16 +6,16 @@ export const EVOLUTION_MAX_TOKENS = 8192;
 export const RECOVERY_POLL_MS = 15_000;
 export const LEASE_GRACE_MS = 30_000;
 export const MAX_FAILURES = 5;
-export const MAX_OUTPUT_FAILURES = 2;
+export const MAX_OUTPUT_FAILURES = 3; // Initial output, one correction, at most one alternate model.
 export const CALL_WINDOW_MS = 3_600_000;
 export const MAX_CALLS_PER_WINDOW = 20;
 export const FAILURE_WINDOW_MS = 900_000;
 export const MAX_WINDOW_FAILURES = 5;
 export const NOTICE_COOLDOWN_MS = 3_600_000;
-export const PAUSED_SQL = `(failures>=${MAX_FAILURES} OR output_failures>=${MAX_OUTPUT_FAILURES} OR last_error IN ('write_rejected','unavailable','auth','request'))`;
+export const PAUSED_SQL = `(failures>=${MAX_FAILURES} OR output_failures>=${MAX_OUTPUT_FAILURES} OR last_error IN ('write_rejected','unavailable','safety'))`;
 const RETRY_DELAYS_MS = [60_000, 300_000, 900_000, 3_600_000];
 
-export const FAILURE_CODES = ["timeout", "cancelled", "output_limit", "invalid_output", "stale", "write_rejected", "unavailable", "provider", "auth", "request", "rate_limit", "interrupted", "unknown"] as const;
+export const FAILURE_CODES = ["timeout", "cancelled", "output_limit", "invalid_output", "stale", "write_rejected", "unavailable", "provider", "auth", "request", "rate_limit", "quota", "context_limit", "safety", "interrupted", "unknown"] as const;
 export type FailureCode = typeof FAILURE_CODES[number];
 
 /** Never persist raw exception messages/provider bodies (they may contain secrets). */

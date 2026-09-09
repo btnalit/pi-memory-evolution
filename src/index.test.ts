@@ -113,7 +113,7 @@ test('evolve command does not claim success when another connection wins the job
 		try {
 			other.capture({id:'race',scope:cwd,kind:'user',content:'Remember database settings.',createdAt:new Date().toISOString()});
 			const waiting=command('evolve');const run=other.beginEvolution('race')!;assert.ok(run);
-			await waiting;assert.equal(calls,0);assert.match(notifications.at(-1),/no update applied here/);
+			await waiting;assert.equal(calls,0);assert.match(notifications.at(-1),/no update applied here/i);
 			other.failEvolution(run);
 		} finally {other.close();}
 	},async()=>{calls++;return {model:'test',text:'{"memories":[]}'};});
@@ -198,12 +198,12 @@ async function waitUntil(check:()=>boolean) {
 }
 test('periodic recovery detects a due failure without user activity and uses the current model',()=>{
 	let calls=0;return fixture(async({call,stateDir,ctx,command,notifications})=>{
-		ctx.model={id:'first'};await call('session_start');await call('session_compact',compact());
+		ctx.model={id:'first',provider:'fixture'};await call('session_start');await call('session_compact',compact());
 		const db=new Database(join(stateDir,'memory.sqlite'));
 		try {
 			assert.equal(calls,1);assert.equal(db.prepare('SELECT state FROM sources').get()!.state,'failed');
 			await new Promise(r=>setTimeout(r,35));assert.equal(calls,1,'backoff must not be bypassed by polling');
-			ctx.model={id:'changed'};db.exec('UPDATE sources SET retry_at=0');
+			ctx.model={id:'changed',provider:'fixture'};db.exec('UPDATE sources SET retry_at=0');
 			await waitUntil(()=>db.prepare('SELECT state FROM sources').get()!.state==='done');
 			assert.equal(calls,2);await command('status');assert.match(notifications.at(-1),/retrying=0, paused=0/);
 			assert.ok(!notifications.at(-1).includes('operation failed'));
