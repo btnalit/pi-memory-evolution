@@ -195,7 +195,7 @@ reset, automatic state revival or fabricated verification occurs.
 Reads validate evidence/feedback shape and tool-observation kind, and return independent
 copies of nested metadata. Status validates receipt fields in addition to existing
 record/job/history integrity. Unsupported schema versions fail before DDL. Old builds
-reject schema 5: do not manually downgrade its marker.
+reject schema 6: do not manually downgrade its marker.
 
 Stop all Pi processes sharing the state directory and back up the complete state before
 activation. Update/restart all those processes together (or reload after a consistent

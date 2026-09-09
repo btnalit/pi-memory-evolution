@@ -67,7 +67,7 @@ host explicitly. The script prints the tested host version. The test:
 1. Builds and extracts the actual npm tarball, outside the development checkout.
 2. Uses real `pi install`, `pi list` and default package discovery—no explicit `-e`
    entry or memory-extension wrapper. Checks `/memory status`, `/memory learning`
-   and `/memory explain`, including schema 5, with no checkout `node_modules`.
+   and `/memory explain`, including schema 6, with no checkout `node_modules`.
 3. Verifies repeated installation does not duplicate the package setting, then
    removes it and confirms the command disappears while records/history remain.
 4. Creates a local Git origin from the packed files and the real lockfile. A
@@ -75,7 +75,7 @@ host explicitly. The script prints the tested host version. The test:
    `file` transport is permitted. No GitHub access is needed.
 5. Exercises the native Git installer and its real npm dependency step, updates to
    a new commit, switches from an old pinned tag back to the default branch, and
-   verifies source switching and removal preserve schema-5 state.
+   verifies source switching and removal preserve schema-6 state.
 6. Serves the actual tarball through a loopback npm registry, with a fresh cache,
    then checks native `pi install npm:pi-memory-evolution`, repeat installation,
    normal loading and removal. No host peer packages are served or installed.
