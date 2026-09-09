@@ -2,6 +2,13 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
+## [0.2.4](https://github.com/btnalit/pi-memory-evolution/compare/v0.2.3...v0.2.4) (2026-09-09)
+
+
+### Bug Fixes
+
+* correct the schema marker in docs and state the promise up front ([#12](https://github.com/btnalit/pi-memory-evolution/issues/12)) ([2a651c4](https://github.com/btnalit/pi-memory-evolution/commit/2a651c484af606ab66b0381b8a73afc11a660585))
+
 ## [0.2.3](https://github.com/btnalit/pi-memory-evolution/compare/v0.2.2...v0.2.3) (2026-09-09)
 
 
