@@ -13,8 +13,12 @@ learning may send the sanitized source and selected candidate memories to anothe
 an explicit allowlist or disable fallback below if some configured providers must not
 receive memory data. Installing this update does not require per-request approvals.
 
-The active model is always first when eligible. Backups must support text; other models
-of the active provider are not used to evade account-wide quota/rate limits. An explicit
+The active model is always first when eligible. Backups must support text. Another model of
+the **same** provider is never chosen automatically, because it shares that provider's
+credentials and account quota. Naming one in `fallbackModels` overrides that: it is the only
+redundancy available when Pi has a single configured provider, and it is then used for
+model-specific failures (`rate_limit`, `invalid_output`, `output_limit`, `context_limit`)
+but still skipped for `auth` and `quota`, which no sibling can escape. An explicit
 fallback list defines priority; otherwise known catalog input/output price, non-reasoning
 preference and stable model ID order choose among available backups. Unknown/zero prices
 are not assumed free. Catalog availability is not proof of working credentials or credit.
@@ -31,7 +35,7 @@ Last-checked ordering moves temporarily unroutable sources behind other eligible
 | --- | --- |
 | HTTP 401/403 | Cool down that provider for 15 minutes; try an allowed other provider. Pi owns auth resolution/refresh. |
 | HTTP 402 or fixed quota/billing code | Cool down the provider for 1 hour or a later supplied reset; try another provider. |
-| HTTP 429 without a known quota code | Provider cooldown of at least 60 seconds and at least `Retry-After`; try another provider. |
+| HTTP 429 without a known quota code | Cool down that **model** for at least 60 seconds and at least `Retry-After`, since tpm/rpm ceilings are usually per model; try another provider, or an allowlisted model of the same provider. |
 | HTTP 408, timeout, network/5xx failure | Delayed retry; two recent transport failures cool down that model for 15 minutes and permit fallback. |
 | Context overflow or HTTP 400/404/422 | Do not resend unchanged requests to that model immediately; cool it down for 1 hour and permit a compatible backup. |
 | Invalid JSON / output truncation | Initial attempt, at most one corrective prompt, then an alternate model. Three output failures pause the source; two failures do not authorize repeatedly probing the same model. |

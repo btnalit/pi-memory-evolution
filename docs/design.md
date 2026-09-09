@@ -177,7 +177,7 @@ multiple projects. The prompt requires an explicitly identifiable same subject/f
 preservation of project/resource qualifications; matching cwd alone is not identity.
 
 Output is validated JSON (an outer Markdown fence is tolerated), at most 64,000 bytes
-and 16 claims of 4–480 UTF-16 code units each. Fields are restricted to `kind`, `content`,
+and 16 claims of 4–800 UTF-16 code units each. Fields are restricted to `kind`, `content`,
 optional `replaces` and `searchTerms`. Aliases are at most 8 sanitized strings of 2–64
 characters, with total JSON <=1024 bytes. Malformed claims/aliases reject the batch.
 The prompt asks for concise Chinese/English aliases, never added facts. Existing text

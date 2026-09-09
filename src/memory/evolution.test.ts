@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { MemoryStore } from './memory-store.ts';
 import { evolve, parseClaims } from './evolution.ts';
+import { MAX_CLAIM_CHARS, MIN_CLAIM_CHARS } from './extractor.ts';
 import type { CompleteMemory } from '../adapter/pi-api.ts';
 
 test('valid JSON claims; rejects extra actions, excessive output and unsupported kinds',()=>{
@@ -15,7 +16,9 @@ test('valid JSON claims; rejects extra actions, excessive output and unsupported
 async function using(fn:(store:MemoryStore)=>Promise<void>){const dir=mkdtempSync(join(tmpdir(),'pme-evolve-'));const store=new MemoryStore(dir);try{store.capture({id:'s1',scope:'/project',kind:'summary',content:'## Critical Context\n- Database uses SQLite.',createdAt:new Date().toISOString()});await fn(store);}finally{store.close();rmSync(dir,{recursive:true,force:true});}}
 test('automatically applies valid model output, no approval and one call per source',()=>using(async(store)=>{
 	let calls=0;
-	const complete:CompleteMemory=async(_ctx,system,input)=>{calls++;assert.match(system,/historical DATA/);assert.match(input,/SQLite/);return {model:'active/model',text:'{"memories":[{"kind":"fact","content":"Database has local storage."}]}'};};
+	const complete:CompleteMemory=async(_ctx,system,input)=>{calls++;assert.match(system,/historical DATA/);assert.match(input,/SQLite/);
+		// The claim bounds are interpolated: a plain string literal would ship '${...}' to the model.
+		assert.match(system,new RegExp(`each ${MIN_CLAIM_CHARS}-${MAX_CLAIM_CHARS} characters`));assert.ok(!system.includes('${'));return {model:'active/model',text:'{"memories":[{"kind":"fact","content":"Database has local storage."}]}'};};
 	assert.equal(await evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),complete),true);
 	assert.equal(await evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),complete),false);
 	assert.equal(calls,1);assert.equal(store.readMemories().length,2);assert.match(store.history()[0].reason,/active\/model/);

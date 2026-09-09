@@ -44,9 +44,14 @@ export function finishCall(db: Database, source: string, attempt: number, outcom
  db.prepare('UPDATE sources SET call_ms=call_ms+? WHERE id=?').run(Math.max(0, now - Number(row.at)), source);
  if (outcome !== 'failed' || !code) return;
  let scope = '', delay = 0;
- if (['auth','quota','rate_limit'].includes(code)) {
+ if (['auth','quota'].includes(code)) {
+  // Credentials and account quota are provider-wide: no sibling on that provider can help.
   scope = `provider:${row.provider}`;
-  delay = code === 'auth' ? 900_000 : code === 'quota' ? 3_600_000 : 60_000;
+  delay = code === 'auth' ? 900_000 : 3_600_000;
+ } else if (code === 'rate_limit') {
+  // tpm/rpm ceilings are per model on the major providers, so a provider-wide wait would also
+  // block a sibling holding its own budget. Retry-After still widens the wait when supplied.
+  scope = `model:${row.model}`; delay = 60_000;
  } else if (['request','context_limit'].includes(code)) { scope = `model:${row.model}`; delay = 3_600_000; }
  else if (['provider','timeout','interrupted','invalid_output','output_limit'].includes(code)) {
   const family = ['invalid_output','output_limit'].includes(code) ? "'invalid_output','output_limit'" : "'provider','timeout','interrupted'";
