@@ -9,7 +9,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { MemoryStore } from '../src/memory/memory-store.ts';
-import { Database } from '../src/memory/sqlite.ts';
+import { openDatabase } from '../src/memory/sqlite.ts';
+import { SCHEMA_VERSION } from '../src/memory/limits.ts';
 import { parseNpmPack } from './lib/npm-pack.mjs';
 
 process.umask(0o077);
@@ -40,7 +41,7 @@ const sourceOf = entry => typeof entry === 'string' ? entry : entry.source;
 const git = (...args) => run('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', ...args], origin);
 let child, closed = true, error, buffer = '', events = [], serial = 0, stderr = '';
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-async function waitFor(fn) {
+async function waitFor(fn, what = 'condition') {
 	const deadline = Date.now() + 20_000;
 	while (Date.now() < deadline) {
 		if (error) throw error;
@@ -48,12 +49,14 @@ async function waitFor(fn) {
 		const value = fn(); if (value) return value;
 		await pause(25);
 	}
-	throw new Error(`RPC timeout: ${stderr}`);
+	// A bounded tail of what was actually scanned, not the whole buffer.
+	const seen = JSON.stringify(events.slice(-20)).slice(-4000);
+	throw new Error(`RPC timeout waiting for ${what}: ${stderr}\nLast ${Math.min(20, events.length)} of ${events.length} events: ${seen}`);
 }
 async function rpc(type, fields = {}) {
 	const id = String(++serial);
 	child.stdin.write(JSON.stringify({ id, type, ...fields }) + '\n');
-	const reply = await waitFor(() => events.find(e => e.type === 'response' && e.id === id));
+	const reply = await waitFor(() => events.find(e => e.type === 'response' && e.id === id), `response to ${type} (id=${id})`);
 	assert.equal(reply.success, true, `RPC rejected ${type}`);
 	return reply.data;
 }
@@ -92,20 +95,19 @@ async function smoke(expectedEntry) {
 			// Extension command paths are optional in the public RPC response.
 			if (commands[0].path) assert.equal(realpathSync(commands[0].path), realpathSync(expectedEntry));
 			assert.ok(existsSync(expectedEntry));
-			for (const [command, expected] of [['status', /SQLite ok \(schema 7\)/], ['learning', /Last learning capture/], ['explain', /Last automatic recall snapshot/]]) {
+			for (const [command, expected] of [['status', new RegExp(`SQLite ok \\(schema ${SCHEMA_VERSION}\\)`)], ['learning', /Last learning capture/], ['explain', /Last automatic recall snapshot/]]) {
 				const offset = events.length;
 				await rpc('prompt', { message: `/memory ${command}` });
-				await waitFor(() => events.slice(offset).some(e => e.type === 'extension_ui_request' && e.method === 'notify' && expected.test(e.message)));
+				await waitFor(() => events.slice(offset).some(e => e.type === 'extension_ui_request' && e.method === 'notify' && expected.test(e.message)), `/memory ${command} notify output matching ${expected}`);
 			}
 		}
 		assert.ok(!events.some(e => e.type === 'extension_ui_request' && e.notifyType === 'warning'), 'extension warning during clean startup/diagnostics');
 	} finally { await stop(); }
 }
 const stateSnapshot = () => {
-	const db = new Database(join(stateDir, 'memory.sqlite'));
-	db.exec('PRAGMA busy_timeout=5000'); // Same wait as the store, so a stray lock cannot fail the snapshot.
+	const db = openDatabase(join(stateDir, 'memory.sqlite'));
 	try {
-		assert.equal(db.prepare("SELECT value FROM metadata WHERE key='schema'").get().value, '7');
+		assert.equal(db.prepare("SELECT value FROM metadata WHERE key='schema'").get().value, SCHEMA_VERSION);
 		assert.equal(db.prepare('PRAGMA quick_check').get().quick_check, 'ok');
 		return JSON.stringify(['memories', 'sources', 'events', 'metadata', 'blocked', 'feedback_receipts'].map(table => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()));
 	} finally { db.close(); }
@@ -179,7 +181,7 @@ try {
 	assert.equal(stateSnapshot(), snapshot);
 	runPi('remove', source); assert.equal(packages().length, 0);
 	await smoke(); assert.equal(stateSnapshot(), snapshot);
-	console.log('PASS: update, old-pin transition, removal and preserved schema-7 records/history.');
+	console.log('PASS: update, old-pin transition, removal and preserved schema-' + SCHEMA_VERSION + ' records/history.');
 
 	// Native npm installation against a loopback registry serving the actual tarball.
 	// No peer packages are served: the Pi host must supply its own APIs and TypeBox.

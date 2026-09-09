@@ -1,4 +1,5 @@
-import { MAX_CLAIM_CHARS, MIN_CLAIM_CHARS, type Claim } from './extractor.ts';
+import { type Claim } from './extractor.ts';
+import { MAX_CLAIMS, MAX_CLAIM_CHARS, MIN_CLAIM_CHARS } from './limits.ts';
 import { MEMORY_KINDS } from './memory-store.ts';
 import { EvolutionError } from './recovery.ts';
 import { OUTPUT_PROTOCOL_VERSION, type Diagnostic, type DiagnosticReason } from './diagnostics.ts';
@@ -57,7 +58,7 @@ export function parseMemoryOutput(text: string): { claims: Claim[]; diagnostic: 
  if (Object.keys(root).some(k => k !== 'memories')) fail('unknown_field');
  if (!Array.isArray(root.memories)) fail('result_shape', 'memories');
  const memories = root.memories as unknown[];
- if (memories.length > 16) fail('too_many_claims', 'memories', memories.length);
+ if (memories.length > MAX_CLAIMS) fail('too_many_claims', 'memories', memories.length);
  let ignoredAliases = 0;
  const claims = memories.map((claim, index): Claim => {
   const field = `memories[${index}]`;

@@ -9,6 +9,7 @@ import { features, featureOffset } from './search.ts';
 import { rankMemories, selectRelevantMemories, excerpt } from './retriever.ts';
 import { parseClaims } from './evolution.ts';
 import { parseMemoryOutput } from './output.ts';
+import { SCHEMA_VERSION } from './limits.ts';
 const now=Date.parse('2026-09-06T08:00:00Z');
 const memory=(id:string,content:string,extra:Partial<DurableMemory>={}):DurableMemory=>({id,content,scope:'/work',sourceEntryId:'compact:session:entry',kind:'fact',layer:'durable',status:'provisional',revision:1,createdAt:'2026-09-06T06:00:00Z',updatedAt:'2026-09-06T06:00:00Z',...extra});
 const preference=memory('wanted','用户要求会话也能自动注入相关记忆，不应限定于项目。',{kind:'preference',sourceEntryId:'user:session:entry'});
@@ -141,6 +142,6 @@ test('schema 2 upgrade preserves records and history instead of reimporting or r
  try {s.capture(source('s','## Critical Context\n- Database uses SQLite.'));const records=s.readMemories(),history=s.history();s.close();
   const db=new Database(join(dir,'memory.sqlite'));db.exec("UPDATE metadata SET value='2' WHERE key='schema'");db.close();
   s=new MemoryStore(dir);assert.deepEqual(s.readMemories(),records);assert.deepEqual(s.history(),history);
-  const check=new Database(join(dir,'memory.sqlite'));try{assert.equal(check.prepare("SELECT value FROM metadata WHERE key='schema'").get()!.value,'7');}finally{check.close();}
+  const check=new Database(join(dir,'memory.sqlite'));try{assert.equal(check.prepare("SELECT value FROM metadata WHERE key='schema'").get()!.value,SCHEMA_VERSION);}finally{check.close();}
  }finally{s.close();rmSync(dir,{recursive:true,force:true});}
 });

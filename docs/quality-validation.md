@@ -80,6 +80,6 @@ observations/compactions can update tracked progress; exact-ID correction remain
 
 The local installation references the checkout. Back up with Pi stopped before schema
 upgrade, then reload/restart all instances sharing the database. Status should report
-`SQLite ok (schema 3)` and global topic-based recall. Older builds require a matching
+`SQLite ok (schema 7)` and global topic-based recall. Older builds require a matching
 backup for rollback; do not manually downgrade the schema marker. No npm/tag release or
 live paid-provider/multi-day TUI validation was performed.

@@ -52,9 +52,10 @@
 		"typecheck": "tsc --noEmit",
 		"test:pi": "node scripts/test-pi.mjs",
 		"test:install": "node scripts/test-install.mjs",
-		"check": "npm run typecheck && npm test && npm run check:package && npm run check:automation",
+		"check": "npm run typecheck && npm test && npm run check:package && npm run check:docs && npm run check:automation",
 		"check:automation": "node scripts/check-automation.mjs",
 		"build": "node scripts/build-package.mjs",
+		"check:docs": "node scripts/check-doc-constants.mjs",
 		"check:package": "node scripts/check-package.mjs"
 	},
 	"devDependencies": {

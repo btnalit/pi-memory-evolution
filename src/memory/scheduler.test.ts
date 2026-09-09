@@ -16,10 +16,15 @@ const primary = model('primary'), backup = model('backup');
 const context = () => ({ model: primary, modelRegistry: { getAvailable: () => [model('primary','sibling'), backup] } }) as unknown as ExtensionContext;
 const source = (id: string) => ({ id, scope: '/fixture', kind: 'user' as const, content: 'Remember Atlas uses SQLite.', createdAt: new Date().toISOString() });
 async function using(fn: (s: MemoryStore, db: Database, dir: string) => Promise<void>, policy?: object) {
- const dir = mkdtempSync(join(tmpdir(), 'pme-routing-'));
- if (policy) writeFileSync(join(dir, 'recovery.json'), JSON.stringify(policy));
- const s = new MemoryStore(dir), db = new Database(join(dir, 'memory.sqlite'));
- try { s.capture(source('source')); await fn(s, db, dir); } finally { db.close(); s.close(); rmSync(dir, { recursive: true, force: true }); }
+ // Setup inside the try: a throw here would otherwise skip cleanup and orphan the directory.
+ let dir = '', s: MemoryStore | undefined, db: Database | undefined;
+ try {
+  dir = mkdtempSync(join(tmpdir(), 'pme-routing-'));
+  if (policy) writeFileSync(join(dir, 'recovery.json'), JSON.stringify(policy));
+  s = new MemoryStore(dir); db = new Database(join(dir, 'memory.sqlite'));
+  s.capture(source('source'));
+  await fn(s, db, dir);
+ } finally { db?.close(); s?.close(); if (dir) rmSync(dir, { recursive: true, force: true }); }
 }
 const signal = () => AbortSignal.timeout(5000);
 const ok = (ctx: ExtensionContext) => ({ model: `${ctx.model!.provider}/${ctx.model!.id}`, text: '{"memories":[]}' });
@@ -175,3 +180,49 @@ test('a sibling absorbs model-specific limits but is skipped for shared quota an
   assert.deepEqual(seen, [...routes], `${code} routing`);
  }, { fallbackModels: ['primary/sibling'] });
 });
+
+test('an unenforceable cost ceiling is reported as blocked, never as available or as a deadline', () => using(async s => {
+ const unpriced = { provider: 'local' };
+ // Fail closed: an unknown price is not proof a call is free.
+ assert.equal(s.beginEvolution('source', 'auto', undefined, Date.now(), 'local/model', unpriced), undefined);
+ // The defect was the reporting, not the block: status claimed the budget was available while every
+ // claim was refused, and the refusal renewed a 24h deadline that could never arrive.
+ const text = s.budgetStatus('local/model', Date.now(), unpriced);
+ assert.match(text, /blocked/); assert.match(text, /no catalog pricing/); assert.match(text, /recovery\.json/);
+ assert.ok(!text.includes('available'), text);
+ assert.ok(!text.includes('waiting until'), text);
+ assert.equal(s.beginEvolution('source', 'auto', undefined, Date.now() + 3 * 86_400_000, 'local/model', unpriced), undefined,
+  'waiting cannot make an unpriced model enforceable');
+}, { dailyEstimatedUsd: 5 }));
+
+const priced = { provider: 'primary', pricing: primary.cost };
+const spend = (db: Database, at: number, usd: number, model = 'primary/model') =>
+ db.prepare("INSERT INTO model_calls(source_id,attempt,model,provider,at,outcome,charged_usd) VALUES (?,1,?,?,?,'done',?)")
+  .run(`c${at}${usd}`, model, model.split('/')[0], at, usd);
+
+test('a call larger than the whole ceiling stays blocked even while other spend sits in the window', () => using(async (s, db) => {
+ const now = Date.now();
+ // Unrelated spend must not turn "never fits" into a deadline that only flips back to blocked once
+ // that spend ages out. Nothing leaving the window makes this one call fit.
+ spend(db, now - 23 * 3_600_000, 0.01, 'backup/model');
+ const text = s.budgetStatus('primary/model', now, priced);
+ assert.match(text, /blocked/);
+ assert.ok(!text.includes('waiting until'), text);
+}, { dailyEstimatedUsd: 0.001 }));
+
+test('accumulated spend under the ceiling is a real wait the window can actually clear', () => using(async (s, db) => {
+ const now = Date.now();
+ assert.match(s.budgetStatus('primary/model', now, priced), /available/, 'one call alone fits this ceiling');
+ spend(db, now, 0.99);
+ const waiting = s.budgetStatus('primary/model', now, priced);
+ assert.match(waiting, /waiting until/);
+ assert.ok(!waiting.includes('blocked'), waiting);
+}, { dailyEstimatedUsd: 1 }));
+
+test('status without an active model reports what a claim would find, not an empty budget', () => using(async s => {
+ // ctx.model can be absent, and beginEvolution then prices that call as unknown. Status asking a
+ // different question — treating "no model" as free — is how it came to print the opposite before.
+ const text = s.budgetStatus('primary/model', Date.now());
+ assert.match(text, /blocked/);
+ assert.ok(!/budget: available/.test(text), text);
+}, { dailyEstimatedUsd: 5 }));
