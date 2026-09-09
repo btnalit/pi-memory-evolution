@@ -42,7 +42,7 @@ pi install https://github.com/btnalit/pi-memory-evolution
 /memory status
 ```
 
-出现 `SQLite ok (schema 5)` 表示存储初始化成功。后续正常使用 Pi 即可，学习和召回会自动运行。
+出现 `SQLite ok (schema 6)` 表示存储初始化成功。后续正常使用 Pi 即可，学习和召回会自动运行。
 
 ## 使用
 

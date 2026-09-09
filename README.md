@@ -46,7 +46,7 @@ Choose **one** source, then run these commands inside Pi:
 /memory status
 ```
 
-`SQLite ok (schema 5)` confirms storage initialization. Continue using Pi normally;
+`SQLite ok (schema 6)` confirms storage initialization. Continue using Pi normally;
 learning and recall run automatically.
 
 ## Use

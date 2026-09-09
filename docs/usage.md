@@ -289,6 +289,9 @@ These are optional direct controls, **not approval gates**:
 /memory status                       # integrity + retries + processed-versus-changed outcomes
 /memory history                      # last 10 events across all origins
 /memory evolve                       # optional one-off retry, overriding delay/failure limit
+/memory evolve <source-id>            # retry one named source without clearing other failure counts
+/memory import [directory]            # explicit, repeat-safe legacy JSONL import; never replays a completed one
+/memory archive-legacy                # copy inactive legacy plan files to a timestamped archive; originals kept
 /memory undo <event-id>               # reverse actual changes, if not modified since
 /memory feedback <id> <verdict>       # useful | unhelpful | accurate | incorrect
 /memory correct <id> <replacement>    # literal replacement, 4–480 characters
@@ -353,7 +356,7 @@ contract (plus missing retry fields for older schemas). Existing records, IDs, h
 evidence dates remain unchanged. Missing evidence stays unknown, with no fabricated backfill.
 Existing failures below the limit become automatically eligible; their old error cause/time
 remain labeled unknown rather than invented. No copying, manual marker reset or JSONL
-re-import is needed. Older builds reject schema 5; rollback requires a matching backup,
+re-import is needed. Older builds reject schema 6; rollback requires a matching backup,
 not editing the marker. Existing records are immediately eligible for global relevance-based recall.
 Legacy claims previously excluded by cwd filtering become eligible too. This shares
 relevant stored claims with the active Pi session/provider, not raw session archives.
@@ -408,4 +411,4 @@ JSONL, not changes made in the new database.
   stopped; do not mix one backup's database with another's WAL/SHM files.
 
 Diagnostics intentionally do not echo provider error bodies, which may contain secrets.
-`SQLite ok (schema 5)` checks database structure/record validity, not the truth of model claims.
+`SQLite ok (schema 6)` checks database structure/record validity, not the truth of model claims.
