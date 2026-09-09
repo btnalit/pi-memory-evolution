@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { MemoryStore, type Source } from './memory-store.ts';
 import { Database } from './sqlite.ts';
-import { EVOLUTION_TIMEOUT_MS, LEASE_GRACE_MS, MAX_FAILURES, MAX_OUTPUT_FAILURES, MAX_WINDOW_FAILURES, retryAt } from './recovery.ts';
+import { EVOLUTION_TIMEOUT_MS, LEASE_GRACE_MS, MAX_FAILURES, MAX_OUTPUT_FAILURES, retryAt } from './recovery.ts';
 
 const source = (id = 's'): Source => ({ id, kind: 'summary', scope: '/old-origin', content: '## Critical Context\n- Database uses SQLite.', createdAt: '2026-09-01T00:00:00Z' });
 function using(fn: (s: MemoryStore, db: Database, dir: string) => void) {
@@ -92,7 +92,7 @@ test('schema 3 migration adds recovery fields atomically, preserves data and dis
   assert.equal(job(db).failures, 1); assert.equal(job(db).attempt, 1);
   assert.equal(job(db).failed_at, 0); assert.equal(job(db).last_error, 'unknown');
   assert.deepEqual(migrated.readMemories(), records); assert.deepEqual(migrated.history(), history);
-  assert.match(migrated.status(), /schema 6/); assert.match(migrated.status(), /unknown \(legacy\)/);
+  assert.match(migrated.status(), /schema 7/); assert.match(migrated.status(), /unknown \(legacy\)/);
  } finally { migrated.close(); }
 }));
 
@@ -174,7 +174,7 @@ test('repeated output-protocol failures pause a source before the generic failur
 test('a shared failure window stops each new source from burning its own retry budget', () => using((s, db) => {
  const model = 'provider/model';
  let now = Date.now();
- for (let i = 0; i < MAX_WINDOW_FAILURES; i++) {
+ for (let i = 0; i < 2; i++) {
   s.capture(source(`s${i}`));
   const run = s.beginEvolution(`s${i}`, 'auto', undefined, now, model);
   assert.ok(run, `source ${i} must get its first attempt`);
@@ -187,10 +187,10 @@ test('a shared failure window stops each new source from burning its own retry b
  assert.equal(Number(fresh.attempt), 0, 'a deferred source consumes no attempt');
  assert.equal(Number(fresh.failures), 0, 'and no failure budget');
  assert.equal(fresh.state, 'pending');
- assert.ok(Number(fresh.retry_at) > now, 'it is deferred, not failed');
- assert.match(s.budgetStatus(model, now), /waiting until/);
+ assert.equal(Number(fresh.retry_at), 0, 'route waits must not poison the source backoff');
+ assert.equal(s.routeAvailable(model, 'provider', now), false);
  assert.match(s.budgetStatus('other/model', now), /available/, 'the budget is per model');
- // A manual override stays a deliberate one-call escape hatch.
+ // A manual override may probe the route, but not bypass the shared hard request ceiling.
  assert.ok(s.beginEvolution('fresh', true, undefined, now, model));
 }));
 

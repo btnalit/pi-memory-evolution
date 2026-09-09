@@ -61,7 +61,7 @@ export function features(text: string, includeSingle = false): Set<string> {
 	const result = new Set<string>();
 	let prose = redact(text).replace(/\[REDACTED[^\]\n]*\]/gu, " ");
 	prose = prose.replace(LITERALS, (literal) => {
-		const clean = literal.replace(/[.:]+$/u, "").toLowerCase();
+		const clean = literal.replace(/[.:]+$/u, ''); // Literal resource identity is case-sensitive, unlike prose.
 		result.add(`literal:${clean}`);
 		result.add(`literal:${clean.split("/").at(-1)}`);
 		return " ";
@@ -94,7 +94,7 @@ export function featureOffset(text: string, feature: string): number {
 		pattern.lastIndex = 0;
 		return pattern.exec(prose)?.index ?? -1;
 	}
-	return prose.toLowerCase().indexOf(feature.replace(/^literal:/u, ""));
+	return feature.startsWith('literal:') ? text.indexOf(feature.slice(8)) : prose.toLowerCase().indexOf(feature);
 }
 
 export function validSearchTerms(value: unknown): value is string[] | undefined {

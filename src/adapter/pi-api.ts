@@ -2,6 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { EVOLUTION_MAX_TOKENS, EvolutionError, type FailureCode } from "../memory/recovery.ts";
 import { modelLabel, OUTPUT_PROTOCOL_VERSION, type Diagnostic } from '../memory/diagnostics.ts';
+import { diagnosticFetch, httpFailure, observeStatus, observeStructuredError, OBSERVABLE_HTTP_APIS } from './http-diagnostics.ts';
 
 export interface Completion { text: string; model: string; diagnostic?: Diagnostic }
 
@@ -27,10 +28,6 @@ function responseText(content: { type: string; text?: string; textSignature?: st
 	if (!text.trim()) throw new EvolutionError('invalid_output', { ...diagnostic, reason: 'empty_text' });
 	return text;
 }
-function providerCode(status?: number): FailureCode {
-	return status === 401 || status === 403 ? 'auth' : status === 429 ? 'rate_limit'
-		: status === 400 || status === 404 || status === 422 ? 'request' : 'provider';
-}
 export type CompleteMemory = (ctx: ExtensionContext, systemPrompt: string, input: string, signal: AbortSignal) => Promise<Completion>;
 
 /** Pi 0.85 public model facade reuses the active model, provider composition and auth. */
@@ -48,17 +45,30 @@ export const completeMemory: CompleteMemory = async (ctx, systemPrompt, input, s
 		const response = await registry.complete(model, {
 			systemPrompt,
 			messages: [{ role: "user", content: input, timestamp: Date.now() }],
-		}, { signal, maxTokens, maxRetries: 0, cacheRetention: "none", sessionId: randomUUID(),
-			onResponse: (response: { status: number }) => { if (Number.isSafeInteger(response.status) && response.status >= 100 && response.status <= 599) diagnostic.httpStatus = response.status; } });
+		}, { signal, maxTokens, timeoutMs: 120_000, maxRetries: 0, cacheRetention: "none", sessionId: randomUUID(),
+			...(OBSERVABLE_HTTP_APIS.has(model.api) ? { fetch: diagnosticFetch(diagnostic, signal) } : {}),
+			// A request-local HTTP path exposes failed statuses; the foreground transport is unchanged.
+			...(model.api === 'openai-codex-responses' ? { transport: 'sse' as const } : {}),
+			onResponse: (response: { status: number; headers?: Record<string, string> }) => observeStatus(diagnostic, response.status, response.headers) });
+		const usage = response.usage;
+		if (usage && [usage.input, usage.output, usage.cacheRead, usage.cacheWrite].every(n => Number.isSafeInteger(n) && n >= 0)
+			&& usage.input + usage.output + usage.cacheRead + usage.cacheWrite > 0) {
+			diagnostic.inputTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+			diagnostic.outputTokens = usage.output;
+			if (Number.isFinite(usage.cost?.total) && usage.cost.total >= 0) diagnostic.reportedUsd = usage.cost.total;
+		}
+		if (['refusal', 'sensitive', 'content_filter', 'incomplete.content_filter', 'SAFETY', 'RECITATION', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII'].includes(response.rawStopReason ?? ''))
+			throw new EvolutionError('safety', { ...diagnostic, errorClass: 'safety' });
 		if (['stop', 'length', 'error', 'aborted', 'toolUse'].includes(response.stopReason)) diagnostic.stopReason = response.stopReason as Diagnostic['stopReason'];
 		if (response.stopReason !== 'stop') {
-			const code: FailureCode = response.stopReason === 'length' ? 'output_limit' : providerCode(diagnostic.httpStatus);
+			observeStructuredError(diagnostic, response.errorMessage);
+			const code: FailureCode = response.stopReason === 'length' ? 'output_limit' : httpFailure(diagnostic);
 			throw new EvolutionError(code, { ...diagnostic, reason: 'abnormal_stop' });
 		}
 		return { model: modelId, text: responseText(response.content, diagnostic), diagnostic };
 	} catch (error) {
 		if (error instanceof EvolutionError) throw error;
-		throw new EvolutionError(providerCode(diagnostic.httpStatus), { ...diagnostic,
+		throw new EvolutionError(httpFailure(diagnostic), { ...diagnostic,
 			reason: diagnostic.httpStatus && diagnostic.httpStatus >= 400 ? 'http_error' : 'request_failed' });
 	}
 };

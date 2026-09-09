@@ -194,9 +194,9 @@ not detected globally.
 
 Each attempt uses at most one model call, no tools, an 8,192-output-token cap (clamped
 against a smaller model limit), a fresh request session ID and `cacheRetention: "none"`.
-A 120-second outer deadline bounds waiting
-even when a provider ignores abort; remote computation/billing cannot be guaranteed to
-stop. Failed calls retain local summary claims. User-cue prose is saved but needs a
+A 120-second per-attempt deadline bounds waiting even when a provider ignores abort;
+remote computation/billing cannot be guaranteed to stop. A backup has a fresh deadline,
+clamped by the source's remaining 300-second cumulative allowance. Failed calls retain local summary claims. User-cue prose is saved but needs a
 successful model attempt to become claims; it has no local extraction fallback.
 
 Global recall is **not global rewriting**. Cross-origin variants remain separate instead
@@ -223,6 +223,12 @@ One SQLite database, WAL + FULL synchronous mode and private file permissions.
 - `feedback_receipts`: exact source-ID/memory-ID idempotency keys, verdict and numeric
   timestamp, including redundant/late feedback receipts; undo never reopens them.
 - `metadata`: schema/import marker.
+- `model_calls`: reserved attempts, selected model/provider, outcome, usage and estimated/reported cost.
+- `route_health`: provider/model cooldowns, separate from source backoff.
+- `recovery_notices`: bounded persistent notice deduplication keys.
+Source-level call/model/time/correction counts survive receipt pruning; shared ceilings are
+reserved transactionally. The active model is preferred; allowed backups come only from
+other Pi-configured providers. [Recovery policy and privacy](recovery.md) define the bounds.
 
 The `scope` field records canonical cwd, not an inferred repository/branch/subject identity
 (or an explicit annotation of a legacy record). It is no longer a recall boundary. Reads
@@ -239,13 +245,16 @@ failure with backoff; attempt/state checks prevent late results or failures from
 a new owner's job. Model waiting and recurring recovery use the same serial task chain;
 queued capture/manual work prevents the timer from piling up duplicate tasks.
 
-Automatic selection/claim both enforce persisted due time and failure budget, ordered by
-retry time then oldest source. Each actual failure schedules 1 minute, 5 minutes, 15 minutes,
-then 1 hour of backoff. Five consecutive failures pause that source with a warning and
-status diagnostics; repeated crashes also consume the budget. Shutdown cancellation does
-not. Successful completion resets the failure fields. Other eligible work continues;
-there is no unbounded per-source model loop. `/memory evolve` selects one newest eligible
-source and can override the delay/cap for one explicit attempt (not reset the budget).
+Automatic selection/claim enforce source backoff and call/time/failure caps. Least-recently
+checked ordering prevents temporarily unroutable sources starving other work. Provider/model
+cooldowns never contaminate a source's retry_at. Generic runtime backoff is 1 minute,
+5 minutes, 15 minutes, then 1 hour with up to 20% jitter; quota/auth/rate-limit errors can
+immediately use an allowed other provider. Two recent transport failures pause a model.
+Defaults allow 4 reserved calls / 2 models / 300 seconds per source, one format correction,
+and 20 reservations/hour shared across providers and processes. Unsafe writes/refusals
+pause immediately. Three output failures or five generic failures also pause work.
+Shutdown adds no failures, but an already reserved request may still cost money.
+`/memory evolve` overrides source delay/caps for one attempt, never shared ceilings.
 Completed/retired jobs are never forced to run again. A source resumed in another directory
 retains its original provenance. While Pi is closed no polling occurs.
 
@@ -266,9 +275,9 @@ Memory reads validate indexed identity/origin/hash against JSON. Undo validates 
 unique before/after IDs and only succeeds when the current records still equal the event's
 after state. New records become tombstones rather than being physically erased. Status
 also validates source jobs/history and the schema marker. Unsupported schema versions
-are rejected before DDL. Schemas 2/3/4 upgrade transactionally to 5 without rewriting
-claims/history or resetting evidence timestamps; missing retry columns/indexes and the
-feedback receipt table are added. Old evidence metadata stays absent/unknown.
+are rejected before DDL. Schemas 2–6 upgrade transactionally to 7 without rewriting
+claims/history or resetting evidence timestamps. Missing retry/feedback tables and routing
+accounting are added; known v6 model waits are separated from source backoff. Old evidence metadata stays absent/unknown.
 Old failures below the cap are due immediately, with unknown cause/time explicitly labeled.
 The source/alias/retry contract is validated on read.
 These detect structural corruption, not all well-formed edits by an owner of the database.
@@ -278,7 +287,7 @@ Undo does not clear suppression hashes or reopen jobs. Forget/undo is not secure
 
 Earlier 0.2 SQLite records, IDs, histories and origin labels stay intact and become
 eligible for global relevance-based recall, including existing `legacy` claims. The
-schema-2/3/4-to-5 upgrade requires no data copying, JSONL re-import or manual reset.
+schema-2-through-6-to-7 upgrade requires no data copying, JSONL re-import or manual reset.
 Stop/back up before upgrading, reload all processes sharing the DB, and restore a matching
 backup for rollback; older code must not be pointed at a manually downgraded marker.
 
@@ -288,6 +297,9 @@ facts. Parent corrections preserve unchanged children and derive new facts witho
 reintroducing explicitly suppressed child content. Missing origins retain the `legacy`
 label. Adoption is an optional annotation, not a recall prerequisite. Completed imports
 are not replayed; earlier discarded revision information is not automatically reconstructed.
+Empty/missing ledgers do not consume the import opportunity. Only saved digests proving a
+recognized empty v6 snapshot (without a migration event) can reopen old completed markers;
+zero derived claims from a real consumed ledger are not sufficient.
 Old signals/proposals/execution plans remain historical files, never automatic actions.
 
 List defaults to all origins, 20 per page sorted by update time then ID; `all` is an alias.

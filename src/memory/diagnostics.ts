@@ -20,15 +20,22 @@ export interface Diagnostic {
  ignoredAliases?: number;
  httpStatus?: number;
  stopReason?: 'stop' | 'length' | 'error' | 'aborted' | 'toolUse';
+ errorClass?: 'quota' | 'context_limit' | 'safety';
+ retryAfterMs?: number;
+ inputTokens?: number;
+ outputTokens?: number;
+ reportedUsd?: number;
 }
-const NUMBERS = ['protocol', 'actual', 'outputBytes', 'textBlocks', 'finalBlocks', 'commentaryBlocks', 'ignoredAliases', 'httpStatus'] as const;
-const KEYS = new Set<string>([...NUMBERS, 'model', 'reason', 'field', 'stopReason']);
+const NUMBERS = ['protocol', 'actual', 'outputBytes', 'textBlocks', 'finalBlocks', 'commentaryBlocks', 'ignoredAliases', 'httpStatus', 'retryAfterMs', 'inputTokens', 'outputTokens'] as const;
+const KEYS = new Set<string>([...NUMBERS, 'model', 'reason', 'field', 'stopReason', 'errorClass', 'reportedUsd']);
 export function modelLabel(value: string): string { return clipBytes(redact(value), 200); }
 export function validDiagnostic(value: unknown): value is Diagnostic {
  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
  const d = value as Diagnostic;
  return Object.keys(d).every(k => KEYS.has(k))
   && NUMBERS.every(k => d[k] === undefined || (Number.isSafeInteger(d[k]) && d[k]! >= 0))
+  && (d.errorClass === undefined || ['quota', 'context_limit', 'safety'].includes(d.errorClass))
+  && (d.reportedUsd === undefined || (Number.isFinite(d.reportedUsd) && d.reportedUsd >= 0))
   && (d.model === undefined || (typeof d.model === 'string' && modelLabel(d.model) === d.model))
   && (d.reason === undefined || DIAGNOSTIC_REASONS.includes(d.reason))
   && (d.field === undefined || (typeof d.field === 'string' && /^(?:result|memories(?:\[(?:[0-9]|1[0-5])\](?:\.(?:kind|content|replaces|searchTerms))?)?)$/u.test(d.field)))

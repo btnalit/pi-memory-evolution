@@ -15,8 +15,10 @@ const stateDir = join(agentDir, 'agent-suite', 'memory-evolution');
 const requests = [];
 let recoveryCalls = 0;
 let longWorkCwd = '';
-// The synthetic Git work must not inherit hooks, repo paths, signing or user config.
-const fixtureEnv = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
+// Never inherit provider keys: automatic fallback must not discover a live provider in a fixture.
+// Git work also must not inherit hooks, repo paths, signing or user configuration.
+const fixtureEnv = { PATH: process.env.PATH, ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+	HOME: dir, USERPROFILE: dir, XDG_CONFIG_HOME: join(dir, 'config'), XDG_CACHE_HOME: join(dir, 'cache'), XDG_STATE_HOME: join(dir, 'state'),
 	GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_GLOBAL: '/dev/null' };
 const text = (content) => typeof content === 'string' ? content : content.map((c) => c.text ?? '').join('\n');
 const server = createServer(async (req, res) => {
@@ -215,7 +217,7 @@ try {
 	await waitFor(() => store.readMemories().find(m => m.id === authMemory.id).status === 'conflicted');
 	assert.equal(await ask('SQLite 数据库认证'), '');
 	assert.equal(requests.filter(r => r.semantic).length, 3, 'exact-ID feedback is local, not another model call');
-	assert.match(store.status(), /schema 6/);
+	assert.match(store.status(), /schema 7/);
 
 	const callsBeforePipeline = requests.filter(r => r.semantic).length;
 	await ask('Our priorities are automatic evolution, relevant injection and automatic recall.');

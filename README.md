@@ -22,8 +22,10 @@ assistant to remember them.
 - **Recall across sessions.** Find background from another session or directory.
   A read-only `memory_recall` tool lets the assistant look up missing context mid-task.
 
-Learning uses Pi's active model and existing authentication. No separate API key,
-embedding service or vector database is required.
+Learning defaults to Pi's active model and existing authentication. Quota/rate limits
+or repeated failures can use an available model from another configured provider, without
+changing the foreground model. [Fallback and budgets](docs/recovery.md) are configurable;
+no separate API key, embedding service or vector database is required.
 
 ## Install
 
@@ -46,7 +48,7 @@ Choose **one** source, then run these commands inside Pi:
 /memory status
 ```
 
-`SQLite ok (schema 6)` confirms storage initialization. Continue using Pi normally;
+`SQLite ok (schema 7)` confirms storage initialization. Continue using Pi normally;
 learning and recall run automatically.
 
 ## Use
@@ -96,7 +98,9 @@ Local SQLite state lives in `~/.pi/agent/agent-suite/memory-evolution/`.
 `PI_CODING_AGENT_DIR` changes that prefix; different working directories share the
 same store by default.
 
-Learning sends filtered source content to the active model and consumes its quota.
+Learning sends filtered source content to the active model, or an allowed fallback provider,
+and consumes that provider's quota. Cross-provider fallback is enabled by default; restrict
+its allowlist or disable it in [recovery configuration](docs/recovery.md).
 Memories are historical evidence, not independently verified facts. Matching and
 secret filtering are imperfect; verify important claims. See [privacy and storage](docs/usage.md#local-storage-and-provenance).
 
