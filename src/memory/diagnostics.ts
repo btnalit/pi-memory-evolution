@@ -24,9 +24,11 @@ export interface Diagnostic {
  retryAfterMs?: number;
  inputTokens?: number;
  outputTokens?: number;
+ /** Reasoning tokens, when the provider reports them. A subset of outputTokens, never an addition. */
+ reasoningTokens?: number;
  reportedUsd?: number;
 }
-const NUMBERS = ['protocol', 'actual', 'outputBytes', 'textBlocks', 'finalBlocks', 'commentaryBlocks', 'ignoredAliases', 'httpStatus', 'retryAfterMs', 'inputTokens', 'outputTokens'] as const;
+const NUMBERS = ['protocol', 'actual', 'outputBytes', 'textBlocks', 'finalBlocks', 'commentaryBlocks', 'ignoredAliases', 'httpStatus', 'retryAfterMs', 'inputTokens', 'outputTokens', 'reasoningTokens'] as const;
 const KEYS = new Set<string>([...NUMBERS, 'model', 'reason', 'field', 'stopReason', 'errorClass', 'reportedUsd']);
 export function modelLabel(value: string): string { return clipBytes(redact(value), 200); }
 export function validDiagnostic(value: unknown): value is Diagnostic {

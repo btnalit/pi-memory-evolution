@@ -119,8 +119,11 @@ rename the tool to hide the conflict; an old installation would still run its ho
 - Valid additions/replacements commit immediately, with provenance and before/after
   history. Inferred memories remain labeled `provisional`, but are recallable without
   approval. Pinned memories cannot be automatically replaced.
-- Replayed source events are idempotent. Calls have a **120-second deadline** and an
-  **8192-output-token cap** (clamped to the active model's smaller limit). They are
+- Replayed source events are idempotent. Calls have a **120-second deadline** and send
+  **the active model's own output limit** as the cap, never a smaller one: a ceiling is
+  consumed by the model's reasoning before it writes an answer, so an invented one can
+  leave a thinking model with nothing to say. Cost is governed by the routing policy
+  instead. They are
   cancelled on session shutdown/reload. Structured summary claims survive model failure.
   User-cue prose has no local-extraction fallback: its sanitized source is saved, but
   learning its claims requires a successful model attempt.

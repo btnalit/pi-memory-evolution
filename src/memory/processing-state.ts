@@ -3,6 +3,7 @@ import { fingerprint } from './privacy.ts';
 import { CALL_WINDOW_MS, FAILURE_WINDOW_MS, MAX_WINDOW_FAILURES, NOTICE_COOLDOWN_MS, type FailureCode } from './recovery.ts';
 import { DEFAULT_POLICY, type RoutingPolicy } from './routing-policy.ts';
 import type { Diagnostic } from './diagnostics.ts';
+import { MAX_OUTPUT_TOKENS } from './limits.ts';
 
 export interface CallPricing { input: number; output: number; cacheRead: number; cacheWrite: number; tiers?: { input: number; output: number; cacheRead: number; cacheWrite: number }[] }
 export interface CallOptions { provider: string; pricing?: CallPricing; outputTokens?: number; promptBytes?: number }
@@ -13,7 +14,7 @@ export function estimatedCost(inputBytes: number, options?: CallOptions): number
  const output = Math.max(...rates.map(r => r.output));
  // All-zero custom catalog pricing is frequently missing, not proof of a free account.
  if (!input && !output) return null;
- return ((inputBytes + (options?.promptBytes ?? 20_000)) * input + (options?.outputTokens ?? 8192) * output) / 1_000_000;
+ return ((inputBytes + (options?.promptBytes ?? 20_000)) * input + (options?.outputTokens ?? MAX_OUTPUT_TOKENS) * output) / 1_000_000;
 }
 /** Atomic callers share the hard request ceiling across models/providers and Pi processes. */
 export function budgetUntil(db: Database, model: string, now: number, policy: RoutingPolicy = DEFAULT_POLICY, reserveUsd?: number | null): number {

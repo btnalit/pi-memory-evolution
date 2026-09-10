@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-	MAX_CLAIMS, MAX_CLAIM_BYTES, MAX_CLAIM_CHARS, MIN_CLAIM_CHARS,
+	MAX_CLAIMS, MAX_CLAIM_BYTES, MAX_CLAIM_CHARS, MIN_CLAIM_CHARS, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS,
 	MAX_SEARCH_TERMS, MAX_SEARCH_TERM_CHARS, MIN_SEARCH_TERM_CHARS, SCHEMA_VERSION,
 } from '../src/memory/limits.ts';
 
@@ -68,6 +68,8 @@ const BOUNDS = [
 	['docs/usage.md', /literal replacement, (\d+)–(\d+) characters/, [MIN_CLAIM_CHARS, MAX_CLAIM_CHARS], 'correct command bounds'],
 	['docs/design.md', /and (\d+) claims of (\d+)–(\d+) UTF-16 code units/, [MAX_CLAIMS, MIN_CLAIM_CHARS, MAX_CLAIM_CHARS], 'claim shape'],
 	['docs/design.md', /each capped at ([\d,]+) bytes/, [group(MAX_CLAIM_BYTES)], 'existing-claim clip'],
+	['docs/design.md', /validated JSON \(an outer Markdown fence is tolerated\), at most ([\d,]+) bytes/, [group(MAX_OUTPUT_BYTES)], 'output size guard'],
+	['docs/design.md', /estimation use ([\d,]+) tokens/, [group(MAX_OUTPUT_TOKENS)], 'reserved answer budget'],
 ];
 for (const [file, pattern, expected, what] of BOUNDS) {
 	const body = read.get(file);
@@ -85,6 +87,23 @@ for (const [needle, what] of [
 	[`up to \${MAX_SEARCH_TERMS} concise English AND Chinese searchTerms per claim (\${MIN_SEARCH_TERM_CHARS}-\${MAX_SEARCH_TERM_CHARS} characters each)`, 'search-term bounds'],
 ]) assert.ok(prompt.includes(needle), `evolution.ts PROMPT no longer interpolates its ${what}; a literal number there can drift from the validator`);
 
+// The output ceiling must stay the model's own. A ceiling of ours is spent on reasoning before the
+// answer is written, so a thinking model burns all of it and returns `length` with zero bytes — the
+// defect this replaced. Comments explain that, so strip them before checking what the code does.
+const adapter = readFileSync('src/adapter/pi-api.ts', 'utf8')
+	.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/\/\/[^\n]*/gu, '');
+const ceiling = /^\s*const maxTokens = .*$/mu.exec(adapter);
+assert.ok(ceiling, 'pi-api.ts no longer derives its output ceiling in one place; this check cannot verify it');
+assert.ok(ceiling[0].includes('model.maxTokens'), 'pi-api.ts must take its output ceiling from model.maxTokens');
+// `> 0` is the only legitimate number here: any other literal is an invented ceiling.
+assert.ok(!/\b(?!0\b)\d+\b/u.test(ceiling[0]) && !ceiling[0].includes('Math.min'),
+	`pi-api.ts must not narrow the model's own output ceiling. A smaller number is spent on reasoning\n`
+	+ `    before the answer is written, which is how a thinking model returns nothing:\n    ${ceiling[0].trim()}`);
+assert.ok(!/\bEVOLUTION_MAX_TOKENS\b/u.test(readdirSync('src', { recursive: true }).filter(f => String(f).endsWith('.ts'))
+	.map(f => readFileSync(join('src', String(f)), 'utf8')).join('\n')), 'EVOLUTION_MAX_TOKENS is back; the ceiling belongs to the model');
+assert.ok(MAX_OUTPUT_BYTES >= MAX_CLAIMS * (MAX_CLAIM_BYTES + 1024),
+	'MAX_OUTPUT_BYTES must still admit the worst reply the claim and alias caps allow');
+assert.ok(MAX_OUTPUT_TOKENS === MAX_CLAIMS * MAX_CLAIM_CHARS, 'MAX_OUTPUT_TOKENS must stay derived from the claim contract');
 assert.ok(MAX_CLAIM_BYTES === MAX_CLAIM_CHARS * 3, 'MAX_CLAIM_BYTES must stay worst-case UTF-8 for MAX_CLAIM_CHARS');
 assert.ok(MAX_SEARCH_TERM_CHARS > MIN_SEARCH_TERM_CHARS && MAX_CLAIM_CHARS > MIN_CLAIM_CHARS, 'bounds inverted');
 
