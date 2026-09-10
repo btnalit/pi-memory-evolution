@@ -34,6 +34,14 @@ export const MAX_SEARCH_TERM_CHARS = 64;
 // Every claim at its character cap. CJK costs roughly one token per character, so characters
 // are the conservative token unit; JSON punctuation and aliases fit in the caller's slack term.
 export const MAX_OUTPUT_TOKENS = MAX_CLAIMS * MAX_CLAIM_CHARS;
+/** The output ceiling for one call: the model's own limit, or nothing when it declares none.
+ * Defined once because the number sent to the provider and the number reserved locally for
+ * context arithmetic and spend MUST be the same. Reserving less than is asked for lets a payload
+ * be packed that leaves no room for the reply the request permits — the provider then rejects the
+ * whole call, and a cost ceiling can be overshot by a call that was admitted as cheaper. */
+export function answerCeiling(modelMaxTokens: unknown): number | undefined {
+	return Number.isSafeInteger(modelMaxTokens) && (modelMaxTokens as number) > 0 ? modelMaxTokens as number : undefined;
+}
 // Worst legal reply on the wire (~56.8 KB: MAX_CLAIMS x (MAX_CLAIM_BYTES + the 1024-byte alias
 // budget) plus punctuation), rounded up so pretty-printed but legal output is not rejected.
 export const MAX_OUTPUT_BYTES = 64_000;

@@ -2,6 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { EvolutionError, type FailureCode } from "../memory/recovery.ts";
 import { modelLabel, OUTPUT_PROTOCOL_VERSION, type Diagnostic } from '../memory/diagnostics.ts';
+import { answerCeiling } from '../memory/limits.ts';
 import { diagnosticFetch, httpFailure, observeStatus, observeStructuredError, OBSERVABLE_HTTP_APIS } from './http-diagnostics.ts';
 
 export interface Completion { text: string; model: string; diagnostic?: Diagnostic }
@@ -43,7 +44,7 @@ export const completeMemory: CompleteMemory = async (ctx, systemPrompt, input, s
 	// before any answer is written, so an invented ceiling can leave a thinking model with no room
 	// to answer at all. This one cannot: it is the most the model could ever emit. Not every adapter
 	// substitutes a default when the field is omitted, so it is sent explicitly rather than left out.
-	const maxTokens = Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0 ? model.maxTokens : undefined;
+	const maxTokens = answerCeiling(model.maxTokens);
 	try {
 		const response = await registry.complete(model, {
 			systemPrompt,

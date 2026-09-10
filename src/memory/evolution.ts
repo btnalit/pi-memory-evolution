@@ -5,7 +5,7 @@ import { EVOLUTION_TIMEOUT_MS, EvolutionError, failureCode, type FailureCode } f
 import type { Claim } from "./extractor.ts";
 import { clipBytes, redact } from "./privacy.ts";
 // The prompt states these to the model and the parser judges its reply by them: one source only.
-import { MAX_CLAIMS, MAX_CLAIM_BYTES, MAX_CLAIM_CHARS, MIN_CLAIM_CHARS, MAX_OUTPUT_TOKENS, MAX_SEARCH_TERMS, MAX_SEARCH_TERM_CHARS, MIN_SEARCH_TERM_CHARS } from './limits.ts';
+import { answerCeiling, MAX_CLAIMS, MAX_CLAIM_BYTES, MAX_CLAIM_CHARS, MIN_CLAIM_CHARS, MAX_OUTPUT_TOKENS, MAX_SEARCH_TERMS, MAX_SEARCH_TERM_CHARS, MIN_SEARCH_TERM_CHARS } from './limits.ts';
 import { parseMemoryOutput } from './output.ts';
 import { modelLabel, OUTPUT_PROTOCOL_VERSION, type Diagnostic } from './diagnostics.ts';
 
@@ -27,10 +27,10 @@ export async function evolve(store: MemoryStore, sourceId: string, ctx: Extensio
 	signal.throwIfAborted();
 	const selectedModel = ctx.model;
 	const model = selectedModel ? modelLabel(`${selectedModel.provider}/${selectedModel.id}`) : 'unavailable';
-	// The largest reply this contract can legally produce, or the model's own ceiling when it is smaller.
-	// Local only: it reserves context and estimates spend. The ceiling actually sent is the model's own,
-	// because a narrower one is spent on reasoning before the answer. Reported usage replaces this after.
-	const answerReserve = Math.min(MAX_OUTPUT_TOKENS, selectedModel?.maxTokens || MAX_OUTPUT_TOKENS);
+	// Exactly what the adapter will ask the provider for, so context arithmetic and the spend estimate
+	// cannot promise less room than the request permits. A model declaring no limit is sent none, and
+	// the provider's own default applies; this contract's worst legal reply is the estimate for that.
+	const answerReserve = answerCeiling(selectedModel?.maxTokens) ?? MAX_OUTPUT_TOKENS;
 	const run = store.beginEvolution(sourceId, retry, timeoutMs, Date.now(), model, selectedModel ? {
 		provider: selectedModel.provider, pricing: selectedModel.cost,
 		outputTokens: answerReserve, promptBytes: Buffer.byteLength(PROMPT) + 1200,

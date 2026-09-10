@@ -198,9 +198,10 @@ never a smaller number of the extension's: a ceiling is spent on reasoning befor
 is written, so an invented one can leave a thinking model with no room to answer, returning
 `length` with zero bytes. A model declaring no limit is sent none. Reported `reasoning`
 usage is recorded, so a starved reply is distinguishable from a broken one. Spend stays
-governed per call, per source and per day by the routing policy. Context reservation and cost
-estimation use 12,800 tokens — this contract's worst legal reply, or the model's own limit
-when smaller — which is reserved locally, never sent as a cap.
+governed per call, per source and per day by the routing policy. Context reservation and the
+spend estimate reserve **exactly the ceiling that will be sent**, so neither can admit a payload
+that leaves no room for the reply the request permits, nor admit a call as cheaper than it may
+bill. A model declaring no limit is reserved 12,800 tokens, this contract's worst legal reply.
 A 120-second per-attempt deadline bounds waiting even when a provider ignores abort;
 remote computation/billing cannot be guaranteed to stop. A backup has a fresh deadline,
 clamped by the source's remaining 300-second cumulative allowance. Failed calls retain local summary claims. User-cue prose is saved but needs a

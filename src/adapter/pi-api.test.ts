@@ -14,15 +14,21 @@ test('uses exact active model and Pi registry completion/auth, no secondary mode
 // thinking model with nothing left to say. The model's own limit cannot: it is the most it could ever
 // emit. Not every adapter substitutes a default for an omitted field, so it is sent, not left out.
 test('the model\'s own ceiling is sent, never a smaller one of ours',async()=>{
+	const sent=new Set<string>();
 	for(const [model,expected] of [[{id:'small',provider:'test',maxTokens:4096},4096],
 		[{id:'big',provider:'test',maxTokens:200000},200000],[{id:'none',provider:'test'},undefined],
 		[{id:'bad',provider:'test',maxTokens:0},undefined],[{id:'nan',provider:'test',maxTokens:1.5},undefined]] as const){
+		// 'maxTokens' in options, not options.maxTokens: a key present but holding undefined would
+		// otherwise read as absent, and some adapters treat a present key differently from a missing one.
 		let seen:unknown='unset';
 		const ctx={model,modelRegistry:{complete:async(_model:unknown,_context:unknown,options:any)=>{
-			seen=options.maxTokens;return {stopReason:'stop',content:[{type:'text',text:'{"memories":[]}'}]};
+			seen='maxTokens' in options?options.maxTokens:undefined;
+			if('maxTokens' in options)sent.add(model.id);
+			return {stopReason:'stop',content:[{type:'text',text:'{"memories":[]}'}]};
 		}}};
 		await completeMemory(ctx as unknown as ExtensionContext,'system','input',AbortSignal.timeout(1000));
 		assert.equal(seen,expected,`wrong ceiling for ${model.id}`);
+		assert.equal(sent.has(model.id),expected!==undefined,`wrong field presence for ${model.id}`);
 	}
 });
 test('reasoning tokens are recorded, so a starved answer can be told from a broken model',async()=>{

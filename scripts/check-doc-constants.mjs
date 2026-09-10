@@ -69,7 +69,7 @@ const BOUNDS = [
 	['docs/design.md', /and (\d+) claims of (\d+)–(\d+) UTF-16 code units/, [MAX_CLAIMS, MIN_CLAIM_CHARS, MAX_CLAIM_CHARS], 'claim shape'],
 	['docs/design.md', /each capped at ([\d,]+) bytes/, [group(MAX_CLAIM_BYTES)], 'existing-claim clip'],
 	['docs/design.md', /validated JSON \(an outer Markdown fence is tolerated\), at most ([\d,]+) bytes/, [group(MAX_OUTPUT_BYTES)], 'output size guard'],
-	['docs/design.md', /estimation use ([\d,]+) tokens/, [group(MAX_OUTPUT_TOKENS)], 'reserved answer budget'],
+	['docs/design.md', /declaring no limit is reserved ([\d,]+) tokens/, [group(MAX_OUTPUT_TOKENS)], 'reserved answer budget'],
 ];
 for (const [file, pattern, expected, what] of BOUNDS) {
 	const body = read.get(file);
@@ -87,18 +87,29 @@ for (const [needle, what] of [
 	[`up to \${MAX_SEARCH_TERMS} concise English AND Chinese searchTerms per claim (\${MIN_SEARCH_TERM_CHARS}-\${MAX_SEARCH_TERM_CHARS} characters each)`, 'search-term bounds'],
 ]) assert.ok(prompt.includes(needle), `evolution.ts PROMPT no longer interpolates its ${what}; a literal number there can drift from the validator`);
 
-// The output ceiling must stay the model's own. A ceiling of ours is spent on reasoning before the
-// answer is written, so a thinking model burns all of it and returns `length` with zero bytes — the
-// defect this replaced. Comments explain that, so strip them before checking what the code does.
-const adapter = readFileSync('src/adapter/pi-api.ts', 'utf8')
-	.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/\/\/[^\n]*/gu, '');
-const ceiling = /^\s*const maxTokens = .*$/mu.exec(adapter);
-assert.ok(ceiling, 'pi-api.ts no longer derives its output ceiling in one place; this check cannot verify it');
-assert.ok(ceiling[0].includes('model.maxTokens'), 'pi-api.ts must take its output ceiling from model.maxTokens');
-// `> 0` is the only legitimate number here: any other literal is an invented ceiling.
-assert.ok(!/\b(?!0\b)\d+\b/u.test(ceiling[0]) && !ceiling[0].includes('Math.min'),
-	`pi-api.ts must not narrow the model's own output ceiling. A smaller number is spent on reasoning\n`
-	+ `    before the answer is written, which is how a thinking model returns nothing:\n    ${ceiling[0].trim()}`);
+// Two rules the ceiling must keep. It stays the model's own, because a ceiling of ours is spent on
+// reasoning before the answer is written — a thinking model burns all of it and returns `length` with
+// zero bytes, the defect this replaced. And the number reserved locally stays the number sent, because
+// reserving less lets a payload be packed that leaves no room for the reply the request permits.
+// Comments explain all that, so strip them before checking what the code actually does. Statements are
+// read up to their `;` rather than to end of line, so wrapping a long line cannot fail the check.
+const statement = (file, name) => {
+	const source = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//gu, '').replace(/\/\/[^\n]*/gu, '');
+	const found = new RegExp(String.raw`^\s*const ${name} =[\s\S]*?;`, 'mu').exec(source);
+	assert.ok(found, `${file} no longer declares \`${name}\` in one statement; this check cannot verify it`);
+	return found[0].replace(/\s+/gu, ' ').trim();
+};
+for (const [file, name] of [['src/adapter/pi-api.ts', 'maxTokens'], ['src/memory/evolution.ts', 'answerReserve']]) {
+	const text = statement(file, name);
+	assert.ok(text.includes('answerCeiling('),
+		`${file} must take \`${name}\` from answerCeiling() in limits.ts. It is one function so that the\n`
+		+ `    ceiling sent to the provider and the budget reserved for it cannot drift apart:\n    ${text}`);
+	// MAX_OUTPUT_TOKENS is the documented fallback when a model declares no limit of its own; any
+	// other number, or a narrowing helper, would be a ceiling we invented.
+	assert.ok(!/\d/u.test(text.replace(/MAX_OUTPUT_TOKENS/gu, '')) && !/\bMath\.(?:min|max)\b/u.test(text),
+		`${file} must not narrow the model's own output ceiling. A smaller number is spent on reasoning\n`
+		+ `    before the answer is written, which is how a thinking model returns nothing:\n    ${text}`);
+}
 assert.ok(!/\bEVOLUTION_MAX_TOKENS\b/u.test(readdirSync('src', { recursive: true }).filter(f => String(f).endsWith('.ts'))
 	.map(f => readFileSync(join('src', String(f)), 'utf8')).join('\n')), 'EVOLUTION_MAX_TOKENS is back; the ceiling belongs to the model');
 assert.ok(MAX_OUTPUT_BYTES >= MAX_CLAIMS * (MAX_CLAIM_BYTES + 1024),
