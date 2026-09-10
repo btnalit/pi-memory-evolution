@@ -124,10 +124,26 @@ assert.ok(!/\bEVOLUTION_MAX_TOKENS\b/u.test(readdirSync('src', { recursive: true
 const AUTHORITY_ERRORS = [
 	['Invalid memory diagnostics', 'rejects a malformed argument from a caller, before any model output is read'],
 	['Invalid replacement target', 'pinned, cross-origin, or a record already newer than this source'],
+	['Invalid or sensitive claim', 'the model echoed something credential-shaped; retrying would resend the same\n'
+		+ '    unredacted source to another call and, invalid_output being sibling-eligible, to another vendor'],
 ];
 const writePath = readFileSync('src/memory/memory-store.ts', 'utf8');
-const finish = writePath.slice(writePath.indexOf('\tfinishEvolution(run: EvolutionRun'), writePath.indexOf('\tfailEvolution('));
+const region = (from, to) => {
+	const start = writePath.indexOf(from);
+	assert.ok(start >= 0, `${from} could not be located; this check cannot verify it`);
+	const end = writePath.indexOf(to, start);
+	assert.ok(end > start, `the end of ${from} could not be located; this check cannot verify it`);
+	return writePath.slice(start, end);
+};
+// claim() is called from inside finishEvolution and throws the credential barrier, so its body is
+// scanned too: a check that stopped at finishEvolution's own text would be blind to the one throw
+// whose classification matters most.
+const finish = region('\tfinishEvolution(run: EvolutionRun', '\tfailEvolution(') + region('\tprivate claim(', '\n\t}');
 assert.ok(finish.length > 500, 'finishEvolution could not be located; this check cannot verify it');
+// Wrapping that call is how the barrier was accidentally made correctable once already.
+assert.ok(!/try\s*\{[^}]*this\.claim\(/u.test(finish),
+	'finishEvolution must call this.claim() unwrapped. Catching it turns the credential barrier into a\n'
+	+ '    correctable invalid_output, which resends the same unredacted source to another provider.');
 for (const [message] of AUTHORITY_ERRORS)
 	assert.ok(finish.includes(`throw new Error("${message}")`) || finish.includes(`throw new Error('${message}')`),
 		`Stale AUTHORITY_ERRORS entry: finishEvolution no longer throws "${message}" — remove it`);

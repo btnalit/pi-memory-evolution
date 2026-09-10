@@ -40,6 +40,9 @@ Last-checked ordering moves temporarily unroutable sources behind other eligible
 | Context overflow or HTTP 400/404/422 | Do not resend unchanged requests to that model immediately; cool it down for 1 hour and permit a compatible backup. |
 | Invalid JSON / output truncation / **broken output contract** | Initial attempt, at most one corrective prompt naming the rule that was broken, then an alternate model. Three output failures pause the source; two failures do not authorize repeatedly probing the same model. |
 | Unsafe/unauthorized write or recognized safety/refusal | Reject and pause that source. No fallback to circumvent safety or write guards. |
+| Stale result | Re-read on a bounded delayed retry; not counted as a provider-health failure. |
+| Cancellation / shutdown / reload | Release the lease without adding a failure; already-reserved requests may still have consumed quota. |
+| Unknown error | Safe generic category and bounded transport retry; no guessing that arbitrary error prose means insufficient credit. |
 
 A claim the store refuses is classified by *whose* mistake it is, because the two need opposite
 handling. A **broken output contract** — a progress source answering with a plain addition instead
@@ -54,9 +57,6 @@ is offered, so it stays `write_rejected` and stops the source rather than burnin
 last of those is a deliberate refusal to retry rather than an inability: a correction would resend
 the same unredacted source to another call and, because `invalid_output` permits cross-provider
 fallback, to another vendor. One exposure and a stop is the cheaper outcome.
-| Stale result | Re-read on a bounded delayed retry; not counted as a provider-health failure. |
-| Cancellation / shutdown / reload | Release the lease without adding a failure; already-reserved requests may still have consumed quota. |
-| Unknown error | Safe generic category and bounded transport retry; no guessing that arbitrary error prose means insufficient credit. |
 
 Generic source backoff is 1 minute, 5 minutes, 15 minutes, then 1 hour, with up to 20%
 positive jitter on runtime failures. Route failures can try one alternate immediately;
