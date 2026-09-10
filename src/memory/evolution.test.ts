@@ -7,6 +7,7 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { MemoryStore } from './memory-store.ts';
 import { evolve, parseClaims } from './evolution.ts';
 import { MAX_CLAIM_CHARS, MIN_CLAIM_CHARS } from './extractor.ts';
+import { MAX_CANDIDATES } from './limits.ts';
 import { MAX_OUTPUT_TOKENS } from './limits.ts';
 import type { CompleteMemory } from '../adapter/pi-api.ts';
 
@@ -93,4 +94,46 @@ test('the reply budget reserved locally is exactly the ceiling the request will 
 	store.capture({id:'s3',scope:'/project',kind:'summary',content:'## Critical Context\n- Queue uses NATS.',createdAt:new Date().toISOString()});
 	await assert.rejects(evolve(store,'s3',ctx(19000,20000),AbortSignal.timeout(1000),complete),
 		(error:{code?:string})=>error.code==='context_limit');
+}));
+
+// Retrieval is the host's job: it is deterministic, free, and already knows the vocabulary of every
+// record. Handing the model the most recent 32 and asking it to search was paying a model to do it
+// worse. A record the source never mentions is not shown, so it also cannot be named in `replaces`.
+test('the model is shown only records the source mentions, not merely the recent ones',()=>using(async(store)=>{
+	const seed:CompleteMemory=async()=>({model:'fake/model',text:JSON.stringify({memories:[
+		{kind:'fact',content:'Database uses SQLite.'},
+		{kind:'fact',content:'The office printer sits on floor three.'},
+		{kind:'preference',content:'The user prefers concise replies in code review.'},
+	]})});
+	await evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),seed);
+
+	store.capture({id:'s2',scope:'/project',kind:'summary',content:'## Critical Context\n- Database now uses PostgreSQL.',createdAt:new Date().toISOString()});
+	let shown:{content:string}[]=[];
+	await evolve(store,'s2',{} as ExtensionContext,AbortSignal.timeout(1000),async(_ctx,_system,input)=>{
+		shown=JSON.parse(input).existing;return {model:'fake/model',text:'{"memories":[]}'};});
+	const contents=shown.map(m=>m.content);
+	assert.ok(contents.some(c=>c.includes('SQLite')),'the record this source is about must be offered');
+	assert.ok(!contents.some(c=>c.includes('printer')),'a record the source never mentions must not be offered');
+	assert.ok(!contents.some(c=>c.includes('code review')),'nor an unrelated preference that merely happens to be recent');
+}));
+
+test('a source cannot replace a record it never mentions, because it is never shown one',()=>using(async(store)=>{
+	const seed:CompleteMemory=async()=>({model:'fake/model',text:'{"memories":[{"kind":"fact","content":"The office printer sits on floor three."}]}'});
+	await evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),seed);
+	const printer=store.readMemories().find(m=>m.content.includes('printer'))!;
+	store.capture({id:'s2',scope:'/project',kind:'summary',content:'## Critical Context\n- Database now uses PostgreSQL.',createdAt:new Date().toISOString()});
+	const run=store.beginEvolution('s2')!;
+	assert.ok(!run.candidates.some(c=>c.id===printer.id),'containment must exclude it from the shown set');
+	// Bypassing the model proves the store still refuses the write rather than trusting the claim.
+	assert.throws(()=>store.finishEvolution(run,[{kind:'fact',content:'Database uses PostgreSQL.',replaces:printer.id}],'fake/model'));
+}));
+
+test('the shown set stays bounded even when a long source mentions the whole scope',()=>using(async(store)=>{
+	const many=Array.from({length:MAX_CANDIDATES+4},(_,i)=>({kind:'fact' as const,content:`Atlas service ${i} listens on port ${9000+i}.`}));
+	await evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),
+		async()=>({model:'fake/model',text:JSON.stringify({memories:many})}));
+	store.capture({id:'s2',scope:'/project',kind:'summary',
+		content:'## Critical Context\n'+many.map(m=>`- ${m.content}`).join('\n'),createdAt:new Date().toISOString()});
+	const run=store.beginEvolution('s2')!;
+	assert.equal(run.candidates.length,MAX_CANDIDATES);
 }));

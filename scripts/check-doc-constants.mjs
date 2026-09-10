@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-	MAX_CLAIMS, MAX_CLAIM_BYTES, MAX_CLAIM_CHARS, MIN_CLAIM_CHARS, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS,
+	MAX_CANDIDATES, MAX_CLAIMS, MAX_CLAIM_BYTES, MAX_CLAIM_CHARS, MIN_CLAIM_CHARS, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS, RELATED_CONTAINMENT,
 	MAX_SEARCH_TERMS, MAX_SEARCH_TERM_CHARS, MIN_SEARCH_TERM_CHARS, SCHEMA_VERSION,
 } from '../src/memory/limits.ts';
 
@@ -68,6 +68,8 @@ const BOUNDS = [
 	['docs/usage.md', /literal replacement, (\d+)–(\d+) characters/, [MIN_CLAIM_CHARS, MAX_CLAIM_CHARS], 'correct command bounds'],
 	['docs/design.md', /and (\d+) claims of (\d+)–(\d+) UTF-16 code units/, [MAX_CLAIMS, MIN_CLAIM_CHARS, MAX_CLAIM_CHARS], 'claim shape'],
 	['docs/design.md', /each capped at ([\d,]+) bytes/, [group(MAX_CLAIM_BYTES)], 'existing-claim clip'],
+	['docs/design.md', /at most (\d+) existing claims that/, [MAX_CANDIDATES], 'candidate cap'],
+	['docs/design.md', /at least ([\d.]+) of its vocabulary/, [RELATED_CONTAINMENT], 'candidate threshold'],
 	['docs/design.md', /validated JSON \(an outer Markdown fence is tolerated\), at most ([\d,]+) bytes/, [group(MAX_OUTPUT_BYTES)], 'output size guard'],
 	['docs/design.md', /declaring no limit is reserved ([\d,]+) tokens/, [group(MAX_OUTPUT_TOKENS)], 'reserved answer budget'],
 ];
@@ -112,6 +114,12 @@ for (const [file, name] of [['src/adapter/pi-api.ts', 'maxTokens'], ['src/memory
 }
 assert.ok(!/\bEVOLUTION_MAX_TOKENS\b/u.test(readdirSync('src', { recursive: true }).filter(f => String(f).endsWith('.ts'))
 	.map(f => readFileSync(join('src', String(f)), 'utf8')).join('\n')), 'EVOLUTION_MAX_TOKENS is back; the ceiling belongs to the model');
+// The set shown to the model is the set it may name. If those ever come apart, the model can be
+// offered a record the store will then refuse, turning a good reply into a paid rejected write.
+assert.ok(/run\.candidates\.find\(\(m\) => m\.id === claim\.replaces\)/u.test(readFileSync('src/memory/memory-store.ts', 'utf8')),
+	'finishEvolution must resolve replaces against run.candidates: the records shown are the records nameable');
+assert.ok(/existing: run\.candidates\.map\(/u.test(readFileSync('src/memory/evolution.ts', 'utf8')),
+	'the payload must be built from run.candidates, or the shown set stops matching the nameable set');
 assert.ok(MAX_OUTPUT_BYTES >= MAX_CLAIMS * (MAX_CLAIM_BYTES + 1024),
 	'MAX_OUTPUT_BYTES must still admit the worst reply the claim and alias caps allow');
 assert.ok(MAX_OUTPUT_TOKENS === MAX_CLAIMS * MAX_CLAIM_CHARS, 'MAX_OUTPUT_TOKENS must stay derived from the claim contract');

@@ -1,4 +1,6 @@
 import { openDatabase, type Database } from "./sqlite.ts";
+import { containment, features } from "./search.ts";
+import { MAX_CANDIDATES, RELATED_CONTAINMENT } from "./limits.ts";
 import { chmodSync, closeSync, lstatSync, mkdirSync, openSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -52,7 +54,11 @@ export interface EvolutionRun {
 	source: Source;
 	attempt: number;
 	generation: number;
+	/** Everything the host may reason about locally: duplicate detection and alias enrichment. */
 	memories: DurableMemory[];
+	/** The subset actually shown to the model, and therefore the only records it may name in
+	 * `replaces`. Naming anything else means it invented an ID it was never given. */
+	candidates: DurableMemory[];
 	outputFailures: number;
 	previousError: FailureCode | '';
 	previousDiagnostic: Diagnostic;
@@ -339,9 +345,19 @@ export class MemoryStore {
 			const memories = this.readMemories(source.scope).filter((m) => m.scope === source.scope && active(m)
 				&& (source.kind !== "progress" || (m.kind === "project_state" && source.targets!.includes(m.id))))
 				.sort((a,b) => Date.parse(b.updatedAt)-Date.parse(a.updatedAt)).slice(0, 32);
+			// A progress source already arrives with its targets nominated, so its candidates are exactly
+			// those. Everything else is narrowed here instead of handing the model a pile of recent records
+			// and asking it to search: retrieval is the host's job and it is deterministic, free and better
+			// at it. Records the source never mentions cannot be superseded by it, so they are not shown.
+			const vocabulary = source.kind === "progress" ? undefined : features(source.content);
+			const candidates = vocabulary === undefined ? memories
+				: memories.map((memory) => ({ memory, score: containment(vocabulary, features(memory.content)) }))
+					.filter(({ score }) => score >= RELATED_CONTAINMENT)
+					// Recency breaks ties, and a long summary mentioning most of the scope produces many.
+					.sort((a, b) => b.score - a.score).slice(0, MAX_CANDIDATES).map(({ memory }) => memory);
 			// The stored diagnostic explains the last completed outcome. Claiming an attempt must not erase it:
 			// a cancelled or interrupted run would otherwise leave a paused source with no recorded reason.
-			return { source, attempt: Number(row.attempt) + 1, generation: this.generation(source.scope), memories, timeoutMs, correctOutput,
+			return { source, attempt: Number(row.attempt) + 1, generation: this.generation(source.scope), memories, candidates, timeoutMs, correctOutput,
 				outputFailures: Number(row.output_failures), previousDiagnostic: parseDiagnostic(row.diagnostic),
 				previousError: FAILURE_CODES.includes(row.last_error as FailureCode) ? row.last_error as FailureCode : '' };
 		});
@@ -370,7 +386,7 @@ export class MemoryStore {
 				if (run.source.kind === "progress" && (claim.kind !== "project_state" || !claim.replaces || !run.source.targets!.includes(claim.replaces)))
 					throw new Error("Progress observations may only update nominated project-state records");
 				if (claim.replaces) {
-					const old = run.memories.find((m) => m.id === claim.replaces);
+					const old = run.candidates.find((m) => m.id === claim.replaces);
 					if (!old || old.scope !== run.source.scope || targets.has(old.id) || old.layer === "pinned"
 						|| (run.source.kind === "progress" && old.kind !== "project_state")
 						|| Date.parse(old.updatedAt) > Date.parse(run.source.createdAt)) throw new Error("Invalid replacement target");

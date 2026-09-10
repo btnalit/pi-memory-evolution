@@ -67,7 +67,8 @@ not inherit old utility/accuracy feedback. A literal correction clears old alias
 feedback; undo restores the actual prior metadata.
 
 **Limit:** conflict detection still depends on the model identifying a `replaces` target
-in its bounded same-origin candidate set. Arbitrary contradictory additions, paraphrases
+in its candidate set, which the host now selects by what the source mentions rather than by
+what is recent. Records the source never mentions are out of reach for that source. Arbitrary contradictory additions, paraphrases
 and cross-origin identities are not automatically resolved. Multiple source events are
 not treated as independent corroboration; repeated summaries may share the same root
 observation. There is no reinforcement count or model-generated confidence score.

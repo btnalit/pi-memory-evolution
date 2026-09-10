@@ -86,6 +86,15 @@ export function features(text: string, includeSingle = false): Set<string> {
 	return result;
 }
 
+/** Share of `memory`'s vocabulary that `source` mentions. Asymmetric on purpose: the question is
+ * "does this source talk about that record", never "are these two texts the same size". */
+export function containment(source: Set<string>, memory: Set<string>): number {
+	if (!memory.size) return 0;
+	let shared = 0;
+	for (const feature of memory) if (source.has(feature)) shared++;
+	return shared / memory.size;
+}
+
 export function featureOffset(text: string, feature: string): number {
 	// Preserve offsets while applying the same literal/prose boundary as indexing.
 	const prose = feature.startsWith("literal:") ? text : text.replace(LITERALS, (literal) => " ".repeat(literal.length));

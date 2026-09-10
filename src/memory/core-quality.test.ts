@@ -57,7 +57,7 @@ test("weaker summary replacement is quarantined, stronger preference remains rec
 
 test("weak replacement cannot bypass quarantine with duplicate model additions", () => using(s => {
 	learn(s, source("user", "user", "Remember Atlas port.", 2), "fact", "Atlas database port is 5432."); const old = s.readMemories()[0];
-	s.capture(source("weak", "summary", "unstructured source"));
+	s.capture(source("weak", "summary", "## Critical Context\n- Atlas database port is 1111."));
 	s.finishEvolution(s.beginEvolution("weak")!, [
 		{ kind: "decision", content: "Atlas database port is 1111." },
 		{ kind: "fact", content: "Atlas database port is 1111.", replaces: old.id },
@@ -85,7 +85,7 @@ test("manual corrections are evidence, not pins; newer user correction still upd
 	s.act(old.id, "correct", "Atlas database port is 7777."); const corrected = s.readMemories()[0];
 	assert.equal(corrected.evidence?.basis, "manual_correction"); assert.equal(corrected.evidence?.method, "manual");
 	const future = new Date(Date.parse(corrected.updatedAt) + 1000).toISOString();
-	learn(s, { ...source("weak", "summary", "wrong old summary"), createdAt: future }, "fact", "Atlas database port is 1111.", old.id);
+	learn(s, { ...source("weak", "summary", "## Critical Context\n- Atlas database port is 1111."), createdAt: future }, "fact", "Atlas database port is 1111.", old.id);
 	assert.equal(s.readMemories().find(m => m.id === old.id)!.content, corrected.content);
 	learn(s, { ...source("user", "user", "Correction: Atlas port is 9999."), createdAt: future }, "fact", "Atlas database port is 9999.", old.id);
 	assert.equal(s.readMemories().find(m => m.id === old.id)!.status, "forgotten");
