@@ -2,6 +2,13 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
+## [0.3.1](https://github.com/btnalit/pi-memory-evolution/compare/v0.3.0...v0.3.1) (2026-09-10)
+
+
+### Bug Fixes
+
+* let a model correct a broken output contract instead of losing the source ([#24](https://github.com/btnalit/pi-memory-evolution/issues/24)) ([97cde15](https://github.com/btnalit/pi-memory-evolution/commit/97cde1593d466993ec37ca0de81c0fcba09ef2cc))
+
 ## [0.3.0](https://github.com/btnalit/pi-memory-evolution/compare/v0.2.7...v0.3.0) (2026-09-10)
 
 
