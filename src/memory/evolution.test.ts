@@ -7,7 +7,8 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { MemoryStore } from './memory-store.ts';
 import { evolve, parseClaims } from './evolution.ts';
 import { MAX_CLAIM_CHARS, MIN_CLAIM_CHARS } from './extractor.ts';
-import { MAX_OUTPUT_TOKENS } from './limits.ts';
+import { MAX_CANDIDATES, MAX_OUTPUT_TOKENS, RELATED_CONTAINMENT } from './limits.ts';
+import { features, mentions } from './search.ts';
 import type { CompleteMemory } from '../adapter/pi-api.ts';
 
 test('valid JSON claims; rejects extra actions, excessive output and unsupported kinds',()=>{
@@ -151,6 +152,95 @@ test('a record the source contradicts survives beside the many it merely restate
 	const run=store.beginEvolution('s2')!;
 	assert.ok(run.candidates.some(c=>c.id===stale.id),
 		'the contradicted record must be offered, or it can never be retired and both versions stay active');
+}));
+
+// The cap must apply AFTER the containment filter. Capping by recency first hid every matching
+// record that had aged past the 32 most recent, so in a scope with more than 32 records an older
+// one could never be shown again — therefore never superseded, only accumulated alongside.
+// Measured on the live 89-record store this stranded 46 relevant records, including the exact
+// record a user correction was aimed at (containment 0.70, the highest of the whole scope, at
+// recency rank 63 of 89: that call was given zero relevant candidates).
+test('a matching record older than the recency cap is still shown, so it can still be superseded',()=>using(async(store)=>{
+	const at=(i:number)=>new Date(Date.parse('2026-01-01T00:00:00.000Z')+i*86400_000).toISOString();
+	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:at(0),
+		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
+	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+		text:JSON.stringify({memories:[{kind:'fact',content:'The Atlas service listens on port 9999.'}]})}));
+	const target=store.readMemories().find(m=>m.content.includes('9999'))!;
+
+	// Unrelated later work, all newer, enough to push the target past the cap on recency alone.
+	for(let round=0;round<3;round++){
+		store.capture({id:`filler${round}`,scope:'/project',kind:'summary',createdAt:at(1+round),
+			content:'## Critical Context\n- Unrelated bluetooth speaker pairing work.'});
+		await evolve(store,`filler${round}`,{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+			text:JSON.stringify({memories:Array.from({length:16},(_,i)=>({kind:'fact',
+				content:`The bluetooth speaker in room ${round}${i} pairs automatically.`}))})}));
+	}
+	// One record that BOTH qualifies and stays inside the recency cap, so the subset assertion below
+	// compares a non-empty old selection. Without it every top-32 record scores 0.00 and `.every()`
+	// is vacuously true — it would pass against an implementation that dropped everything.
+	store.capture({id:'recent',scope:'/project',kind:'summary',createdAt:at(5),
+		content:'## Critical Context\n- The Atlas service deploy script also runs on port 7777.'});
+
+	const active=(m:{status:string})=>m.status!=='forgotten'&&m.status!=='conflicted';
+	const scoped=store.readMemories('/project').filter(active)
+		.sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
+	const rank=scoped.findIndex(m=>m.id===target.id);
+	assert.ok(scoped.length>MAX_CANDIDATES,`the fixture must exceed the cap or it proves nothing, had ${scoped.length}`);
+	assert.ok(rank>=MAX_CANDIDATES,`the target must sit outside the recency cap, was rank ${rank}`);
+
+	const content='## Critical Context\n- The Atlas service now listens on port 7777.';
+	store.capture({id:'s2',scope:'/project',kind:'summary',createdAt:at(9),content});
+	const run=store.beginEvolution('s2')!;
+	assert.ok(run.candidates.some(c=>c.id===target.id),
+		'a record the source is squarely about must be shown however old it is, or it can never be retired');
+
+	// Nothing once shown is cut: a hit inside the recency top-32 overall is necessarily among the 32
+	// most recent hits, so the old cap-then-filter selection is a subset of this one.
+	const vocabulary=features(content);
+	const capThenFilter=scoped.slice(0,MAX_CANDIDATES)
+		.filter(m=>mentions(vocabulary,m.content,m.searchTerms)>=RELATED_CONTAINMENT);
+	assert.ok(capThenFilter.length>0,
+		`the subset check proves nothing unless the previous selection was non-empty, had ${capThenFilter.length}`);
+	assert.ok(capThenFilter.every(m=>run.candidates.some(c=>c.id===m.id)),
+		'every record the previous selection would have shown must still be shown');
+	// The cap may only ever cut the oldest, so the shown set must stay in strict recency order. This is
+	// the test backstop for the anti-ranking rule: ranking by containment would put the target (0.80)
+	// above the more recent record (0.57) and, once more than the cap qualifies, cut the wrong end.
+	const updated=run.candidates.map(c=>Date.parse(c.updatedAt));
+	assert.deepEqual(updated,[...updated].sort((a,b)=>b-a),
+		'candidates must stay ordered by updatedAt descending: containment filters, it must never rank');
+}));
+
+// The cap is what the reservation estimate is derived from, and the host WRITES through
+// run.memories (searchTerms are replaced wholesale on an exact-content match, and a duplicate's
+// evidence is refreshed). Those writes must stay bounded to what was recent or actually shown, or
+// model output rewrites records the model never saw - losing aliases it could not have preserved
+// and restarting the aging clock on records it never named.
+test('the cap bounds what is shown, and the host may only write through what was recent or shown',()=>using(async(store)=>{
+	const at=(i:number)=>new Date(Date.parse('2026-02-01T00:00:00.000Z')+i*3600_000).toISOString();
+	const line=(i:number)=>`The Atlas service instance ${i} listens on port ${9000+i} for the ledger pipeline.`;
+	for(let round=0;round<3;round++){
+		store.capture({id:`atlas${round}`,scope:'/project',kind:'summary',createdAt:at(round),
+			content:'## Critical Context\n'+Array.from({length:16},(_,i)=>`- ${line(round*16+i)}`).join('\n')});
+		await evolve(store,`atlas${round}`,{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+			text:JSON.stringify({memories:Array.from({length:16},(_,i)=>({kind:'fact',content:line(round*16+i)}))})}));
+	}
+	store.capture({id:'s2',scope:'/project',kind:'summary',createdAt:at(9),
+		content:'## Critical Context\n'+Array.from({length:48},(_,i)=>`- ${line(i)}`).join('\n')});
+	const run=store.beginEvolution('s2')!;
+
+	assert.equal(run.candidates.length,MAX_CANDIDATES,
+		'far more records qualify than may be sent, so the payload cap must actually bind');
+	const updated=run.candidates.map(c=>Date.parse(c.updatedAt));
+	assert.deepEqual(updated,[...updated].sort((a,b)=>b-a),
+		'the cap may only ever cut the oldest, so the shown set must stay ordered by updatedAt descending');
+	assert.ok(run.candidates.every(c=>run.memories.some(m=>m.id===c.id)),
+		'every shown record must be writable, or a legitimate replacement cannot be applied');
+	const oldest=store.readMemories('/project').find(m=>m.content===line(0))!;
+	assert.ok(!run.candidates.some(c=>c.id===oldest.id),'fixture: the oldest must lose the cap race');
+	assert.ok(!run.memories.some(m=>m.id===oldest.id),
+		'a record that was neither recent nor shown must not be writable: the model never saw it');
 }));
 
 // The reported failure, end to end: a weak model returns valid JSON but ignores the progress

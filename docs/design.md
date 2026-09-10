@@ -178,6 +178,10 @@ Jaccard, because a source is orders of magnitude longer than a claim. A progress
 uses exactly the records nominated in `targets`.
 
 This is a **filter, never a ranking**, and the qualifying records keep the original recency order.
+The cap applies **after** the filter, not before: capping by recency first meant a scope holding more
+than 32 records could never show an older one again, however squarely the source was about it, so it
+could never be superseded — only accumulated alongside. Reach is still bounded by the 32 most recent
+qualifying records, and ordering stays by update time, never by recency of confirmation.
 Containment is highest for a record the source merely restates and lower for the one it
 contradicts, because the changed value is exactly the term that is missing; ordering by it and
 cutting to a small cap would drop the record that most needed superseding, and both versions
