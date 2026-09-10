@@ -2,6 +2,13 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
+## [0.3.2](https://github.com/btnalit/pi-memory-evolution/compare/v0.3.1...v0.3.2) (2026-09-10)
+
+
+### Bug Fixes
+
+* apply the candidate cap after the containment filter, not before ([#26](https://github.com/btnalit/pi-memory-evolution/issues/26)) ([58cccac](https://github.com/btnalit/pi-memory-evolution/commit/58cccac3ee9367a3c9c386ac9d0686198493a926))
+
 ## [0.3.1](https://github.com/btnalit/pi-memory-evolution/compare/v0.3.0...v0.3.1) (2026-09-10)
 
 
