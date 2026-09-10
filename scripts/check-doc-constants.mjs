@@ -115,6 +115,30 @@ for (const [file, name] of [['src/adapter/pi-api.ts', 'maxTokens'], ['src/memory
 }
 assert.ok(!/\bEVOLUTION_MAX_TOKENS\b/u.test(readdirSync('src', { recursive: true }).filter(f => String(f).endsWith('.ts'))
 	.map(f => readFileSync(join('src', String(f)), 'utf8')).join('\n')), 'EVOLUTION_MAX_TOKENS is back; the ceiling belongs to the model');
+// A bare `throw new Error` inside finishEvolution becomes 'unknown', which evolution.ts maps to the
+// current stage: write_rejected. That pauses the source permanently and never tells the model what
+// it broke, so one formatting mistake by a weak model destroys a source. Only refusals the store
+// makes on its own authority may do that; a broken output contract must raise a typed
+// EvolutionError('invalid_output', { reason }) so it can be corrected and retried on another model.
+// Each survivor is allowed by name with the reason it is not the model's mistake to fix.
+const AUTHORITY_ERRORS = [
+	['Invalid memory diagnostics', 'rejects a malformed argument from a caller, before any model output is read'],
+	['Invalid replacement target', 'pinned, cross-origin, or a record already newer than this source'],
+];
+const writePath = readFileSync('src/memory/memory-store.ts', 'utf8');
+const finish = writePath.slice(writePath.indexOf('\tfinishEvolution(run: EvolutionRun'), writePath.indexOf('\tfailEvolution('));
+assert.ok(finish.length > 500, 'finishEvolution could not be located; this check cannot verify it');
+for (const [message] of AUTHORITY_ERRORS)
+	assert.ok(finish.includes(`throw new Error("${message}")`) || finish.includes(`throw new Error('${message}')`),
+		`Stale AUTHORITY_ERRORS entry: finishEvolution no longer throws "${message}" — remove it`);
+for (const m of finish.matchAll(/throw new Error\((["'])(.*?)\1\)/gu))
+	assert.ok(AUTHORITY_ERRORS.some(([message]) => message === m[2]),
+		`finishEvolution throws a bare Error the classification does not allow: "${m[2]}".\n`
+		+ '    A bare Error there becomes write_rejected, which pauses the source for good and never tells\n'
+		+ '    the model what it broke. If it is the model breaking the output contract, raise\n'
+		+ "    EvolutionError('invalid_output', { reason }) instead. If the store is refusing on its own\n"
+		+ '    authority, add it to AUTHORITY_ERRORS in this script with the reason it cannot be corrected.');
+
 // The set shown to the model is the set it may name. If those ever come apart, the model can be
 // offered a record the store will then refuse, turning a good reply into a paid rejected write.
 assert.ok(/run\.candidates\.find\(\(m\) => m\.id === claim\.replaces\)/u.test(readFileSync('src/memory/memory-store.ts', 'utf8')),

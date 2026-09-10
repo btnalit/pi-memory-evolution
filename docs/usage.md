@@ -139,7 +139,9 @@ rename the tool to hide the conflict; an old installation would still run its ho
   backoff is 1 minute, 5 minutes, 15 minutes, then 1 hour, plus up to 20% jitter. Defaults
   cap each source at **4 reserved calls / 2 models / 300 seconds**, and all models and
   processes share **20 calls per rolling hour**. Three output failures or five generic
-  failures also pause work; unsafe writes/refusals pause immediately. `/memory status`
+  failures also pause work; a write refused on the store's own authority (pinned, cross-origin,
+  or a record already newer than the source) pauses immediately, while a model that breaks the
+  output contract is corrected and retried like any other invalid output. `/memory status`
   explains routes, budgets and actual outcomes. `/memory evolve` overrides source limits
   for one attempt, never shared ceilings or settled jobs. [Full policy/configuration](recovery.md).
 - A job lease lasts **150 seconds** (120-second deadline plus 30-second grace). The timer
