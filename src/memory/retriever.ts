@@ -12,7 +12,7 @@ function overlap(text: string, query: Set<string>): number {
 
 /** Relevance scores are NOT confidence/truth scores. No authority bonus for cwd,
  * legacy labels, source IDs or dates. Metadata can only help an explicit origin query. */
-type RecallOptions = { includeExpiredProjectState?: boolean };
+type RecallOptions = { includeDormant?: boolean };
 type RankedMemory = { memory: DurableMemory; score: number; rankScore: number; quality: ReturnType<typeof memoryQuality>; coverage: number; matches: string[]; reason?: string };
 export interface RecallDiagnostics {
 	mode: string;
@@ -34,7 +34,7 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 	const qualities = new Map(memories.map(m => [m.id, memoryQuality(m, now)]));
 	const excludedReason = (m: DurableMemory) => ["forgotten", "conflicted"].includes(m.status) ? m.status
 		: m.feedback?.accuracy?.verdict === "incorrect" ? "disputed"
-		: !options.includeExpiredProjectState && qualities.get(m.id)!.expired ? "expired-project-state" : undefined;
+		: !options.includeDormant && qualities.get(m.id)!.dormant ? "dormant" : undefined;
 	const active = memories.filter(m => !excludedReason(m));
 	const diagnostics: RecallDiagnostics = { mode: plan.mode, query: [...query].slice(0, 32), context: [...context].slice(0, 32),
 		eligible: active.length, excluded: memories.length - active.length, matched: 0, selected: [], candidates: [],

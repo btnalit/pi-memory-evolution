@@ -8,6 +8,7 @@ import {
 	MAX_CANDIDATES, MAX_CLAIMS, MAX_CLAIM_BYTES, MAX_CLAIM_CHARS, MIN_CLAIM_CHARS, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS, RELATED_CONTAINMENT,
 	MAX_SEARCH_TERMS, MAX_SEARCH_TERM_CHARS, MIN_SEARCH_TERM_CHARS, SCHEMA_VERSION,
 } from '../src/memory/limits.ts';
+import { AGING } from '../src/memory/quality.ts';
 
 const files = ['README.md', 'README.cn.md', ...readdirSync('docs').filter(f => f.endsWith('.md')).map(f => join('docs', f))];
 const read = new Map(files.map(f => [f, readFileSync(f, 'utf8')]));
@@ -184,6 +185,60 @@ assert.ok(MAX_OUTPUT_BYTES >= MAX_CLAIMS * (MAX_CLAIM_BYTES + 1024),
 assert.ok(MAX_OUTPUT_TOKENS === MAX_CLAIMS * MAX_CLAIM_CHARS, 'MAX_OUTPUT_TOKENS must stay derived from the claim contract');
 assert.ok(MAX_CLAIM_BYTES === MAX_CLAIM_CHARS * 3, 'MAX_CLAIM_BYTES must stay worst-case UTF-8 for MAX_CLAIM_CHARS');
 assert.ok(MAX_SEARCH_TERM_CHARS > MIN_SEARCH_TERM_CHARS && MAX_CLAIM_CHARS > MIN_CLAIM_CHARS, 'bounds inverted');
+
+// The aging table has never been gated, and constant drift has shipped before. Each kind states a
+// half-life, a floor and a dormancy horizon, and all three change ranking or what gets injected.
+{
+	const doc = read.get('docs/core-quality.md');
+	for (const [kind, policy] of Object.entries(AGING)) {
+		const row = new RegExp(`^\\| ${kind} \\| ([0-9]+) days \\| ([0-9.]+) \\| ([0-9]+) days \\|$`, 'mu').exec(doc);
+		if (!row) { failures.push(`docs/core-quality.md: no aging row for ${kind}`); continue; }
+		check('docs/core-quality.md', row[0], row[1], policy.halfLifeDays, `${kind} half-life`);
+		check('docs/core-quality.md', row[0], Number(row[2]).toFixed(2), policy.floor.toFixed(2), `${kind} floor`);
+		check('docs/core-quality.md', row[0], row[3], policy.dormantDays, `${kind} dormancy horizon`);
+	}
+	const listed = /([0-9]+) days for project state, ([0-9]+) for facts, ([0-9]+) for decisions, ([0-9]+) for preferences/u.exec(read.get('docs/design.md'));
+	if (!listed) failures.push('docs/design.md: the dormancy horizons are no longer stated where the gate can check them');
+	else for (const [i, kind] of ['project_state', 'fact', 'decision', 'preference'].entries())
+		check('docs/design.md', listed[0], listed[i + 1], AGING[kind].dormantDays, `${kind} dormancy horizon`);
+}
+// Confirmation must move only the decay anchor. `updatedAt` is the replacement authority gate, and
+// bumping it would make a refreshed record refuse a legitimately older queued source; routing it
+// through `record()` would create an undo point for the mere fact of having been mentioned.
+{
+	const store = readFileSync('src/memory/memory-store.ts', 'utf8');
+	const start = store.indexOf('private reinforce(');
+	assert.ok(start > 0, 'reinforce() must remain the single place confirmation is written');
+	const body = store.slice(start, store.indexOf('\n\t}', start));
+	// Reads of updatedAt are required; only assignment is forbidden, in either syntax.
+	assert.ok(!/updatedAt\s*[:=][^=]/u.test(body),
+		'reinforce() must never assign updatedAt: it is the replacement authority gate, and a refreshed\n'
+		+ '    record that carries a newer updatedAt refuses a legitimately older queued source.');
+	assert.ok(/this\.db\.prepare\("UPDATE memories SET data=\? WHERE id=\?"\)/u.test(body) && !/this\.record\(/u.test(body),
+		'reinforce() must write the row directly and must not route through record() or a helper that\n'
+		+ '    does: confirmation changes no content, evidence or status, so it must not create an undo\n'
+		+ '    point or an event snapshot for every mentioned record.');
+}
+
+// Dormancy is documented four times as "still recallable on request". That is only true while the
+// explicit surfaces actually ask for dormant records: `includeDormant` has a default of false, so
+// forgetting it turns dormancy into silent deletion for anyone trying to find their own record.
+{
+	const index = readFileSync('src/index.ts', 'utf8');
+	// Anchored to the two call sites, not counted: a count is satisfied by moving the option from a
+	// surface that needs it to one that does not, which restores the exact defect it guards.
+	assert.ok(/const result = retrieveMemories\([^\n]*includeDormant: true/u.test(index),
+		'the memory_recall tool must pass includeDormant: true - it is an explicit request, and\n'
+		+ '    dormancy governs what is pushed unprompted, not what can be found.');
+	assert.ok(/operation === "search"\)[\s\S]{0,240}?includeDormant: true/u.test(index),
+		'`/memory search` must pass includeDormant: true, or dormancy silently deletes a record from\n'
+		+ '    the one surface a user reaches for when they know it is there.');
+	const start = index.indexOf('before_agent_start');
+	const injection = index.slice(start, index.indexOf('buildRuntimeDigest', start));
+	assert.ok(start > 0 && !/includeDormant/u.test(injection),
+		'automatic injection must NOT include dormant records: not being pushed unprompted is the\n'
+		+ '    entire meaning of dormancy.');
+}
 
 if (failures.length) {
 	console.error(`FAIL: ${failures.length} documented constant(s) disagree with the code:\n\n` + failures.join('\n\n') + '\n');

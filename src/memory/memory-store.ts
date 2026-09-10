@@ -37,6 +37,11 @@ export interface DurableMemory {
 	/** Exact superseded content, carried across explicit legacy adoption. */
 	suppressedHashes?: string[];
 	searchTerms?: string[];
+	/** When this record was last confirmed by later evidence, as distinct from last changed. Decay
+	 * and dormancy run from it; `updatedAt` does not move, because it is the replacement authority
+	 * gate and moving it would make a refreshed record refuse a legitimately older queued source.
+	 * Missing on records nothing has reconfirmed, which simply means decay runs from `updatedAt`. */
+	reinforcedAt?: string;
 	/** Host-assigned provenance; missing on old records means unknown, never verified. */
 	evidence?: Evidence;
 	feedback?: MemoryFeedback;
@@ -245,6 +250,25 @@ export class MemoryStore {
 	private generation(scope: string): number {
 		return Number(this.db.prepare("SELECT COALESCE(MAX(rowid),0) AS n FROM events WHERE scope=?").get(scope)!.n);
 	}
+	/** Confirmation is not a change: no content, evidence, status or `updatedAt` moves, so it writes
+	 * no event and creates no undo point - there is nothing to undo about having been mentioned. Only
+	 * `reinforcedAt` moves, and only forward, so replay or an out-of-order source cannot roll it back.
+	 * Pinned records are skipped because their freshness is already fixed at 1. */
+	private reinforce(ids: Iterable<string>, at: string): void {
+		const stamp = Date.parse(at);
+		if (!Number.isFinite(stamp)) return;
+		let touched = false;
+		for (const id of ids) {
+			const memory = this.get(id);
+			if (!memory || !active(memory) || memory.layer === "pinned") continue;
+			if (stamp <= Math.max(Date.parse(memory.updatedAt), Date.parse(memory.reinforcedAt ?? "") || 0)) continue;
+			const next = { ...memory, reinforcedAt: new Date(stamp).toISOString() };
+			if (!isMemory(next)) throw new Error("Invalid memory update");
+			this.db.prepare("UPDATE memories SET data=? WHERE id=?").run(JSON.stringify(next), id);
+			touched = true;
+		}
+		if (touched) this.cache.clear();
+	}
 	private record(actor: string, reason: string, after: DurableMemory[], scope: string): string {
 		const before = after.map((m) => this.get(m.id) ?? null);
 		const at = new Date().toISOString();
@@ -393,6 +417,8 @@ export class MemoryStore {
 			if (job?.state !== "running" || job.attempt !== run.attempt || this.generation(run.source.scope) !== run.generation) throw new EvolutionError("stale");
 			const after = new Map<string, DurableMemory>();
 			const targets = new Set<string>();
+			const confirmed = new Set<string>();
+			const reaffirmed = new Set<string>();
 			let weakerConflicts = 0;
 			const incoming = sourceEvidence(run.source, "model");
 			// Two different things used to throw the same bare Error and land on write_rejected, which
@@ -438,6 +464,11 @@ export class MemoryStore {
 					targets.add(old.id);
 					if (claim.kind !== old.kind) broke('replaces_kind', index, 'kind');
 					if (fingerprint(old.content) === fingerprint(claim.content)) {
+						// Naming a record and replacing it with itself is an explicit "this still holds", so it
+						// must count at least as much as leaving it standing silently. Without this, a summary
+						// source that reaffirms a record outright moves nothing while one that says nothing
+						// about it confirms it - the stronger signal worth less than the weaker one.
+						reaffirmed.add(old.id);
 						if (run.source.kind !== "summary" && mayReplace(old, incoming)) after.set(old.id, { ...old, sourceEntryId: run.source.id,
 							updatedAt: run.source.createdAt, evidence: incoming, status: "provisional", revision: old.revision + 1 });
 						annotate(old, claim); continue;
@@ -473,7 +504,26 @@ export class MemoryStore {
 					else annotate(run.memories.find((m) => m.kind === claim.kind && fingerprint(m.content) === fingerprint(claim.content)), claim);
 				}
 			}
+			// Shown, measured to be mentioned by this source, and either left standing or explicitly
+			// replaced by identical content: the model saw the record beside fresh evidence about the same
+			// terms and did not contradict it. That is "not disputed by evidence that mentioned it", not
+			// "verified" - enough to keep a record out of dormancy, never enough to raise its authority.
+			//
+			// The model producing content the store already holds is deliberately NOT a signal. The whole
+			// content of every candidate is in front of it and the prompt asks for aliases on unchanged
+			// records, so re-emitting one is the cheapest move available, not independent re-derivation.
+			// Progress sources are excluded because their candidates are host-nominated targets, not
+			// records measured to be mentioned. Today that guard is subsumed by the project_state rule
+			// below - `selectCandidates` only ever nominates project_state for a progress source - so it
+			// has no test of its own. It stays because the two rules answer different questions, and
+			// dropping it would make project_state's rule silently load-bearing for both.
+			// project_state is excluded for the same reason - states go stale silently, and silence is far
+			// too weak to keep resetting the one seven-day safety cap that actually does work.
+			if (run.source.kind !== "progress") for (const shown of run.candidates)
+				if (shown.kind !== "project_state" && (!targets.has(shown.id) || reaffirmed.has(shown.id))) confirmed.add(shown.id);
 			const event = this.record("model", `${model}: ${run.source.id}${weakerConflicts ? `; weaker replacements withheld=${weakerConflicts}` : ""}`, [...after.values()], run.source.scope);
+			// After `record`, so a record this batch also changed is confirmed on top of that change.
+			this.reinforce(confirmed, run.source.createdAt);
 			this.db.prepare("UPDATE sources SET state='done',lease=0,failures=0,output_failures=0,retry_at=0,failed_at=0,last_error='',diagnostic=? WHERE id=?")
 				.run(JSON.stringify(diagnostic), run.source.id);
 			finishCall(this.db, run.source.id, run.attempt, 'done', Date.now(), '', diagnostic);
@@ -656,10 +706,18 @@ export class MemoryStore {
 			if (!row) throw new Error("Unknown event id");
 			const event = parseEvent(row.data, id, row.scope);
 			if (!event.after.length) throw new Error("Event has no memory changes");
+			// `reinforcedAt` is deliberately outside this comparison. Confirmation writes no event, so an
+			// event's snapshot can never carry a stamp written after it; comparing it would make every
+			// confirmed record permanently un-undoable. It is also not part of what an undo restores -
+			// there is nothing to undo about having been mentioned - so the current stamp is carried
+			// forward onto the restored record rather than reverted with it.
+			const settled = (memory: DurableMemory | undefined) => memory && JSON.stringify({ ...memory, reinforcedAt: undefined });
 			const restored = event.after.map((after, i) => {
-				if (JSON.stringify(this.get(after.id)) !== JSON.stringify(after)) throw new Error("Memory changed since this event; undo refused");
+				const current = this.get(after.id);
+				if (settled(current) !== settled(after)) throw new Error("Memory changed since this event; undo refused");
 				this.block(after);
 				return { ...(event.before[i] ?? { ...after, status: "forgotten" as const }), revision: after.revision + 1,
+					...(current?.reinforcedAt ? { reinforcedAt: current.reinforcedAt } : {}),
 					suppressedHashes: [...new Set([...(event.before[i]?.suppressedHashes ?? []), ...(after.suppressedHashes ?? []), fingerprint(after.content)])] };
 			});
 			return this.record("manual", `Undo ${id}`, restored, event.scope);
@@ -737,6 +795,7 @@ function isMemory(value: unknown): value is DurableMemory {
 		&& (m.suppressedHashes === undefined || (Array.isArray(m.suppressedHashes) && m.suppressedHashes.every((h) => typeof h === "string" && /^[a-f0-9]{24}$/u.test(h))))
 		&& typeof m.createdAt === "string" && typeof m.updatedAt === "string"
 		&& Number.isFinite(Date.parse(m.createdAt)) && Number.isFinite(Date.parse(m.updatedAt))
+		&& (m.reinforcedAt === undefined || (typeof m.reinforcedAt === "string" && Number.isFinite(Date.parse(m.reinforcedAt))))
 		&& Number.isInteger(m.revision) && m.revision > 0 && ["durable", "pinned"].includes(m.layer)
 		&& ["provisional", "confirmed", "forgotten", "conflicted"].includes(m.status);
 }

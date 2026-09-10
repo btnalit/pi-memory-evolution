@@ -112,11 +112,20 @@ are clipped with an ellipsis/hash suffix. Origins are provenance hints, not evid
 that another project's fact applies here. Identical content is deduplicated only within
 one origin: equal port/path text from different contexts can mean different facts.
 
-Forgotten/conflicted claims never recall. Unpinned project-state claims expire from recall
-after 7 days; facts/preferences/decisions have no automatic age deletion. All kinds have
-bounded gradual freshness decay, with separate half-lives/floors and pin exemption.
+Forgotten/conflicted claims never recall. Every unpinned kind becomes **dormant** past its own
+horizon — 7 days for project state, 180 for facts, 365 for decisions, 730 for preferences — which
+stops it being offered for injection without deleting it: it stays stored, stays recallable on
+request, and stays a replacement candidate, so later evidence can revive or retire it with no
+human step. No kind has automatic age deletion. All kinds have bounded gradual freshness decay,
+with separate half-lives/floors and pin exemption. Decay and dormancy run from the last
+confirmation rather than the last edit; `updatedAt`, the replacement authority gate, never moves
+for a confirmation.
 Pin/unpin, legacy annotation, explicit feedback and conflict resolution preserve the evidence
-date, and undo restores the prior date. Event history separately records when an operation occurred.
+date, and undo restores the prior date. Undo also ignores the confirmation stamp when deciding
+whether a record changed, and carries it forward rather than reverting it: confirmation writes no
+event, so an event snapshot can never carry a later stamp, and comparing it would make every
+confirmed record permanently un-undoable. Event history separately records when an operation
+occurred.
 
 See [core-quality.md](core-quality.md) for the evidence contract, exact ranking policy,
 weaker-replacement guard, replay-safe feedback and read-only mid-task `memory_recall` tool.
