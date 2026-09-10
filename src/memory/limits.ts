@@ -35,9 +35,21 @@ export const MAX_SEARCH_TERM_CHARS = 64;
  * source merely restates and lower for the one it contradicts — the changed value is exactly
  * the term that is missing — so ordering by it drops the record that most needs superseding.
  * IDF weighting makes that worse, not better: the missing term is the rare one. Qualifying
- * records therefore keep the original recency order, and the cap only bounds the payload. */
+ * records therefore keep the original recency order, and the cap below only bounds the payload. */
 export const RELATED_CONTAINMENT = 0.4;
-/** Unchanged from the recency-only selection this filter narrows, so nothing once shown is cut. */
+/** How many qualifying records may be sent. Applied AFTER the containment filter, never before:
+ * capping by recency first meant a scope with more than 32 records could never show an older one
+ * again, however squarely the source was about it, so it could never be superseded — only
+ * accumulated alongside. Measured on a live 89-record scope, 46 relevant records were unreachable
+ * that way, including the exact record a user correction was aimed at (rank 63, top containment).
+ *
+ * Nothing once shown is cut: a record inside the recency top-32 overall is necessarily among the
+ * 32 most recent qualifying records, so the old selection is a subset of this one.
+ *
+ * Residual, deliberately accepted: reach is still bounded by "the 32 most recent that qualify".
+ * Containment saturates on long summary sources (38 of 89 records scored 1.00), so in a busy scope
+ * the oldest still do not re-enter. Ordering stays by `updatedAt` and must not become recency of
+ * confirmation, or records would be shown because they were recently shown. */
 export const MAX_CANDIDATES = 32;
 
 /** What a reply may cost us, derived from the contract above rather than invented. These are

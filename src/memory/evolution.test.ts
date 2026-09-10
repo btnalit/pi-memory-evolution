@@ -7,7 +7,8 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { MemoryStore } from './memory-store.ts';
 import { evolve, parseClaims } from './evolution.ts';
 import { MAX_CLAIM_CHARS, MIN_CLAIM_CHARS } from './extractor.ts';
-import { MAX_OUTPUT_TOKENS } from './limits.ts';
+import { MAX_CANDIDATES, MAX_OUTPUT_TOKENS, RELATED_CONTAINMENT } from './limits.ts';
+import { features, mentions } from './search.ts';
 import type { CompleteMemory } from '../adapter/pi-api.ts';
 
 test('valid JSON claims; rejects extra actions, excessive output and unsupported kinds',()=>{
@@ -151,6 +152,50 @@ test('a record the source contradicts survives beside the many it merely restate
 	const run=store.beginEvolution('s2')!;
 	assert.ok(run.candidates.some(c=>c.id===stale.id),
 		'the contradicted record must be offered, or it can never be retired and both versions stay active');
+}));
+
+// The cap must apply AFTER the containment filter. Capping by recency first hid every matching
+// record that had aged past the 32 most recent, so in a scope with more than 32 records an older
+// one could never be shown again — therefore never superseded, only accumulated alongside.
+// Measured on the live 89-record store this stranded 46 relevant records, including the exact
+// record a user correction was aimed at (containment 0.70, the highest of the whole scope, at
+// recency rank 63 of 89: that call was given zero relevant candidates).
+test('a matching record older than the recency cap is still shown, so it can still be superseded',()=>using(async(store)=>{
+	const at=(i:number)=>new Date(Date.parse('2026-01-01T00:00:00.000Z')+i*86400_000).toISOString();
+	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:at(0),
+		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
+	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+		text:JSON.stringify({memories:[{kind:'fact',content:'The Atlas service listens on port 9999.'}]})}));
+	const target=store.readMemories().find(m=>m.content.includes('9999'))!;
+
+	// Unrelated later work, all newer, enough to push the target past the cap on recency alone.
+	for(let round=0;round<3;round++){
+		store.capture({id:`filler${round}`,scope:'/project',kind:'summary',createdAt:at(1+round),
+			content:'## Critical Context\n- Unrelated bluetooth speaker pairing work.'});
+		await evolve(store,`filler${round}`,{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+			text:JSON.stringify({memories:Array.from({length:16},(_,i)=>({kind:'fact',
+				content:`The bluetooth speaker in room ${round}${i} pairs automatically.`}))})}));
+	}
+	const active=(m:{status:string})=>m.status!=='forgotten'&&m.status!=='conflicted';
+	const scoped=store.readMemories('/project').filter(active)
+		.sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
+	const rank=scoped.findIndex(m=>m.id===target.id);
+	assert.ok(scoped.length>MAX_CANDIDATES,`the fixture must exceed the cap or it proves nothing, had ${scoped.length}`);
+	assert.ok(rank>=MAX_CANDIDATES,`the target must sit outside the recency cap, was rank ${rank}`);
+
+	const content='## Critical Context\n- The Atlas service now listens on port 7777.';
+	store.capture({id:'s2',scope:'/project',kind:'summary',createdAt:at(9),content});
+	const run=store.beginEvolution('s2')!;
+	assert.ok(run.candidates.some(c=>c.id===target.id),
+		'a record the source is squarely about must be shown however old it is, or it can never be retired');
+
+	// Nothing once shown is cut: a hit inside the recency top-32 overall is necessarily among the 32
+	// most recent hits, so the old cap-then-filter selection is a subset of this one.
+	const vocabulary=features(content);
+	const capThenFilter=scoped.slice(0,MAX_CANDIDATES)
+		.filter(m=>mentions(vocabulary,m.content,m.searchTerms)>=RELATED_CONTAINMENT);
+	assert.ok(capThenFilter.every(m=>run.candidates.some(c=>c.id===m.id)),
+		'every record the previous selection would have shown must still be shown');
 }));
 
 // The reported failure, end to end: a weak model returns valid JSON but ignores the progress

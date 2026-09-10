@@ -314,6 +314,31 @@ export class MemoryStore {
 			.get(...(scope === undefined ? [] : [scope]), now);
 		return row ? String(row.id) : undefined;
 	}
+	/** The single definition of what a source may reason about locally and what it may be shown.
+	 * The reservation estimate and the run itself must call this same function: an estimate cheaper
+	 * than the payload it authorizes is how a call gets admitted that the provider then refuses.
+	 *
+	 * A progress source arrives with its targets already nominated, so those are its candidates.
+	 * For everything else the host drops records this source never mentions: it cannot supersede
+	 * a fact it does not talk about, and retrieval is the host's job — deterministic and free —
+	 * not something to pay a model to do by handing it every recent record to search through.
+	 *
+	 * `memories` is host-local only (duplicate detection, alias enrichment) and therefore uncapped;
+	 * only `candidates` is sent, so only `candidates` carries the payload bound. */
+	private selectCandidates(source: Source): { memories: DurableMemory[]; candidates: DurableMemory[] } {
+		const memories = this.readMemories(source.scope).filter((m) => m.scope === source.scope && active(m)
+			&& (source.kind !== "progress" || (m.kind === "project_state" && source.targets!.includes(m.id))))
+			.sort((a,b) => Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
+		// Order is left alone deliberately. Containment filters; it must never rank. See limits.ts.
+		// The cap is applied AFTER the filter. Capping first hid every matching record that had aged
+		// past the 32 most recent, so in any scope with more than 32 records an older one could never
+		// be shown again, and therefore never superseded — only accumulated alongside.
+		const vocabulary = source.kind === "progress" ? undefined : features(source.content);
+		const candidates = (vocabulary === undefined ? memories
+			: memories.filter((m) => mentions(vocabulary, m.content, m.searchTerms) >= RELATED_CONTAINMENT)).slice(0, MAX_CANDIDATES);
+		return { memories, candidates };
+	}
+
 	beginEvolution(id: string, retry: RetryMode = false, timeoutMs = EVOLUTION_TIMEOUT_MS, now = Date.now(), model?: string, call?: CallOptions): EvolutionRun | undefined {
 		this.assertLearningReady();
 		return this.transaction(() => {
@@ -330,8 +355,7 @@ export class MemoryStore {
 				const provider = modelLabel(call?.provider ?? model.split('/')[0]);
 				if (retry !== true && routeUntil(this.db, model, provider, now) > now) return undefined;
 				const source = parseSource(row.data);
-				const bytes = Buffer.byteLength(JSON.stringify(source)) + this.readMemories(source.scope)
-					.filter(active).sort((a,b) => Date.parse(b.updatedAt)-Date.parse(a.updatedAt)).slice(0,32)
+				const bytes = Buffer.byteLength(JSON.stringify(source)) + this.selectCandidates(source).candidates
 					.reduce((sum,m) => sum + Buffer.byteLength(JSON.stringify(m)), 0);
 				const reserve = estimatedCost(bytes, call);
 				if (budgetUntil(this.db, model, now, this.policy, reserve) > now) return undefined;
@@ -342,17 +366,7 @@ export class MemoryStore {
 			this.db.prepare(`UPDATE sources SET state='running', attempt=attempt+1, lease=? WHERE id=?`).run(now + timeoutMs + LEASE_GRACE_MS, id);
 			const source = parseSource(row.data);
 			if (source.id !== id) throw new Error("Invalid source identity");
-			const memories = this.readMemories(source.scope).filter((m) => m.scope === source.scope && active(m)
-				&& (source.kind !== "progress" || (m.kind === "project_state" && source.targets!.includes(m.id))))
-				.sort((a,b) => Date.parse(b.updatedAt)-Date.parse(a.updatedAt)).slice(0, MAX_CANDIDATES);
-			// A progress source arrives with its targets already nominated, so those are its candidates.
-			// For everything else the host drops records this source never mentions: it cannot supersede
-			// a fact it does not talk about, and retrieval is the host's job — deterministic and free —
-			// not something to pay a model to do by handing it every recent record to search through.
-			// Order is left alone deliberately. Containment filters; it must never rank. See limits.ts.
-			const vocabulary = source.kind === "progress" ? undefined : features(source.content);
-			const candidates = vocabulary === undefined ? memories
-				: memories.filter((m) => mentions(vocabulary, m.content, m.searchTerms) >= RELATED_CONTAINMENT);
+			const { memories, candidates } = this.selectCandidates(source);
 			// The stored diagnostic explains the last completed outcome. Claiming an attempt must not erase it:
 			// a cancelled or interrupted run would otherwise leave a paused source with no recorded reason.
 			return { source, attempt: Number(row.attempt) + 1, generation: this.generation(source.scope), memories, candidates, timeoutMs, correctOutput,
