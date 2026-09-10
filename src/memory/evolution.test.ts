@@ -94,3 +94,55 @@ test('the reply budget reserved locally is exactly the ceiling the request will 
 	await assert.rejects(evolve(store,'s3',ctx(19000,20000),AbortSignal.timeout(1000),complete),
 		(error:{code?:string})=>error.code==='context_limit');
 }));
+
+// Retrieval is the host's job: it is deterministic, free, and already knows the vocabulary of every
+// record. Handing the model the most recent 32 and asking it to search was paying a model to do it
+// worse. A record the source never mentions is not shown, so it also cannot be named in `replaces`.
+test('the model is shown only records the source mentions, not merely the recent ones',()=>using(async(store)=>{
+	const seed:CompleteMemory=async()=>({model:'fake/model',text:JSON.stringify({memories:[
+		{kind:'fact',content:'Database uses SQLite.'},
+		{kind:'fact',content:'The office printer sits on floor three.'},
+		{kind:'preference',content:'The user prefers concise replies in code review.'},
+	]})});
+	await evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),seed);
+
+	store.capture({id:'s2',scope:'/project',kind:'summary',content:'## Critical Context\n- Database now uses PostgreSQL.',createdAt:new Date().toISOString()});
+	let shown:{content:string}[]=[];
+	await evolve(store,'s2',{} as ExtensionContext,AbortSignal.timeout(1000),async(_ctx,_system,input)=>{
+		shown=JSON.parse(input).existing;return {model:'fake/model',text:'{"memories":[]}'};});
+	const contents=shown.map(m=>m.content);
+	assert.ok(contents.some(c=>c.includes('SQLite')),'the record this source is about must be offered');
+	assert.ok(!contents.some(c=>c.includes('printer')),'a record the source never mentions must not be offered');
+	assert.ok(!contents.some(c=>c.includes('code review')),'nor an unrelated preference that merely happens to be recent');
+}));
+
+test('a source cannot replace a record it never mentions, because it is never shown one',()=>using(async(store)=>{
+	const seed:CompleteMemory=async()=>({model:'fake/model',text:'{"memories":[{"kind":"fact","content":"The office printer sits on floor three."}]}'});
+	await evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),seed);
+	const printer=store.readMemories().find(m=>m.content.includes('printer'))!;
+	store.capture({id:'s2',scope:'/project',kind:'summary',content:'## Critical Context\n- Database now uses PostgreSQL.',createdAt:new Date().toISOString()});
+	const run=store.beginEvolution('s2')!;
+	assert.ok(!run.candidates.some(c=>c.id===printer.id),'containment must exclude it from the shown set');
+	// Bypassing the model proves the store still refuses the write rather than trusting the claim.
+	assert.throws(()=>store.finishEvolution(run,[{kind:'fact',content:'Database uses PostgreSQL.',replaces:printer.id}],'fake/model'));
+}));
+
+// Containment is a filter and must never become a ranking. A source that restates many records
+// verbatim scores 1.0 against each, while the single record it CONTRADICTS scores lower — the
+// changed value is precisely the term that is missing. Ranking by it and cutting to a small cap
+// therefore drops the one record that needed superseding, and the store keeps both versions alive
+// forever. IDF weighting is worse, not better: the missing term is the rare one.
+test('a record the source contradicts survives beside the many it merely restates',()=>using(async(store)=>{
+	// Enough restated records to fill any plausible small cap ahead of the contradicted one, while
+	// staying inside MAX_CLAIMS so the seeding reply is itself valid.
+	const restated=Array.from({length:10},(_,i)=>({kind:'fact' as const,content:`Atlas service ${i} listens on port ${9000+i}.`}));
+	await evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+		text:JSON.stringify({memories:[...restated,{kind:'fact',content:'Database uses SQLite.'}]})}));
+	const stale=store.readMemories().find(m=>m.content.includes('SQLite'))!;
+
+	store.capture({id:'s2',scope:'/project',kind:'summary',createdAt:new Date().toISOString(),
+		content:'## Critical Context\n'+restated.map(m=>`- ${m.content}`).join('\n')+'\n- Database now uses PostgreSQL.'});
+	const run=store.beginEvolution('s2')!;
+	assert.ok(run.candidates.some(c=>c.id===stale.id),
+		'the contradicted record must be offered, or it can never be retired and both versions stay active');
+}));

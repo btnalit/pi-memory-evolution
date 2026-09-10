@@ -113,7 +113,7 @@ test('progress evidence can retire old pending state but cannot add preferences 
 test('progress cannot relabel a fact even if a caller accidentally widens nominated candidates',()=>using((s)=>{
  s.capture(source('s','## Critical Context\n- Database uses SQLite.'));const fact=s.readMemories()[0];
  s.capture(source('p','tool result',{kind:'progress',targets:[fact.id]}));const run=s.beginEvolution('p')!;
- assert.equal(run.memories.length,0);run.memories=[fact];
+ assert.equal(run.memories.length,0);run.candidates=[fact];
  assert.throws(()=>s.finishEvolution(run,[{kind:'project_state',content:'Database migration completed.',replaces:fact.id}],'mock'));
  assert.equal(s.readMemories()[0].status,'provisional');
 }));

@@ -1,4 +1,6 @@
 import { openDatabase, type Database } from "./sqlite.ts";
+import { features, mentions } from "./search.ts";
+import { MAX_CANDIDATES, RELATED_CONTAINMENT } from "./limits.ts";
 import { chmodSync, closeSync, lstatSync, mkdirSync, openSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -52,7 +54,11 @@ export interface EvolutionRun {
 	source: Source;
 	attempt: number;
 	generation: number;
+	/** Everything the host may reason about locally: duplicate detection and alias enrichment. */
 	memories: DurableMemory[];
+	/** The subset actually shown to the model, and therefore the only records it may name in
+	 * `replaces`. Naming anything else means it invented an ID it was never given. */
+	candidates: DurableMemory[];
 	outputFailures: number;
 	previousError: FailureCode | '';
 	previousDiagnostic: Diagnostic;
@@ -338,10 +344,18 @@ export class MemoryStore {
 			if (source.id !== id) throw new Error("Invalid source identity");
 			const memories = this.readMemories(source.scope).filter((m) => m.scope === source.scope && active(m)
 				&& (source.kind !== "progress" || (m.kind === "project_state" && source.targets!.includes(m.id))))
-				.sort((a,b) => Date.parse(b.updatedAt)-Date.parse(a.updatedAt)).slice(0, 32);
+				.sort((a,b) => Date.parse(b.updatedAt)-Date.parse(a.updatedAt)).slice(0, MAX_CANDIDATES);
+			// A progress source arrives with its targets already nominated, so those are its candidates.
+			// For everything else the host drops records this source never mentions: it cannot supersede
+			// a fact it does not talk about, and retrieval is the host's job — deterministic and free —
+			// not something to pay a model to do by handing it every recent record to search through.
+			// Order is left alone deliberately. Containment filters; it must never rank. See limits.ts.
+			const vocabulary = source.kind === "progress" ? undefined : features(source.content);
+			const candidates = vocabulary === undefined ? memories
+				: memories.filter((m) => mentions(vocabulary, m.content, m.searchTerms) >= RELATED_CONTAINMENT);
 			// The stored diagnostic explains the last completed outcome. Claiming an attempt must not erase it:
 			// a cancelled or interrupted run would otherwise leave a paused source with no recorded reason.
-			return { source, attempt: Number(row.attempt) + 1, generation: this.generation(source.scope), memories, timeoutMs, correctOutput,
+			return { source, attempt: Number(row.attempt) + 1, generation: this.generation(source.scope), memories, candidates, timeoutMs, correctOutput,
 				outputFailures: Number(row.output_failures), previousDiagnostic: parseDiagnostic(row.diagnostic),
 				previousError: FAILURE_CODES.includes(row.last_error as FailureCode) ? row.last_error as FailureCode : '' };
 		});
@@ -370,7 +384,7 @@ export class MemoryStore {
 				if (run.source.kind === "progress" && (claim.kind !== "project_state" || !claim.replaces || !run.source.targets!.includes(claim.replaces)))
 					throw new Error("Progress observations may only update nominated project-state records");
 				if (claim.replaces) {
-					const old = run.memories.find((m) => m.id === claim.replaces);
+					const old = run.candidates.find((m) => m.id === claim.replaces);
 					if (!old || old.scope !== run.source.scope || targets.has(old.id) || old.layer === "pinned"
 						|| (run.source.kind === "progress" && old.kind !== "project_state")
 						|| Date.parse(old.updatedAt) > Date.parse(run.source.createdAt)) throw new Error("Invalid replacement target");

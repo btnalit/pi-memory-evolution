@@ -25,6 +25,21 @@ export const MAX_SEARCH_TERMS = 8;
 export const MIN_SEARCH_TERM_CHARS = 2;
 export const MAX_SEARCH_TERM_CHARS = 64;
 
+/** Which existing records may be offered to the model as replacement candidates.
+ * A record qualifies when the source mentions this share of its vocabulary — containment,
+ * not Jaccard, because a source is orders of magnitude longer than a claim and would score
+ * near zero against every one of them. Measured on a live 186-memory store: at 0.4 a short
+ * user cue separates its true subject (0.67-0.80) sharply from everything else (<=0.22).
+ *
+ * This is a FILTER and must never become a ranking. Containment is highest for records the
+ * source merely restates and lower for the one it contradicts — the changed value is exactly
+ * the term that is missing — so ordering by it drops the record that most needs superseding.
+ * IDF weighting makes that worse, not better: the missing term is the rare one. Qualifying
+ * records therefore keep the original recency order, and the cap only bounds the payload. */
+export const RELATED_CONTAINMENT = 0.4;
+/** Unchanged from the recency-only selection this filter narrows, so nothing once shown is cut. */
+export const MAX_CANDIDATES = 32;
+
 /** What a reply may cost us, derived from the contract above rather than invented. These are
  * reserved locally — for context arithmetic and cost estimation — and are never sent as a ceiling.
  * The ceiling on the wire is the active model's own `maxTokens` (see `adapter/pi-api.ts`): a
