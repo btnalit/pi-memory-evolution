@@ -1,5 +1,5 @@
 import { openDatabase, type Database } from "./sqlite.ts";
-import { containment, features } from "./search.ts";
+import { features, mentions } from "./search.ts";
 import { MAX_CANDIDATES, RELATED_CONTAINMENT } from "./limits.ts";
 import { chmodSync, closeSync, lstatSync, mkdirSync, openSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -344,17 +344,15 @@ export class MemoryStore {
 			if (source.id !== id) throw new Error("Invalid source identity");
 			const memories = this.readMemories(source.scope).filter((m) => m.scope === source.scope && active(m)
 				&& (source.kind !== "progress" || (m.kind === "project_state" && source.targets!.includes(m.id))))
-				.sort((a,b) => Date.parse(b.updatedAt)-Date.parse(a.updatedAt)).slice(0, 32);
-			// A progress source already arrives with its targets nominated, so its candidates are exactly
-			// those. Everything else is narrowed here instead of handing the model a pile of recent records
-			// and asking it to search: retrieval is the host's job and it is deterministic, free and better
-			// at it. Records the source never mentions cannot be superseded by it, so they are not shown.
+				.sort((a,b) => Date.parse(b.updatedAt)-Date.parse(a.updatedAt)).slice(0, MAX_CANDIDATES);
+			// A progress source arrives with its targets already nominated, so those are its candidates.
+			// For everything else the host drops records this source never mentions: it cannot supersede
+			// a fact it does not talk about, and retrieval is the host's job — deterministic and free —
+			// not something to pay a model to do by handing it every recent record to search through.
+			// Order is left alone deliberately. Containment filters; it must never rank. See limits.ts.
 			const vocabulary = source.kind === "progress" ? undefined : features(source.content);
 			const candidates = vocabulary === undefined ? memories
-				: memories.map((memory) => ({ memory, score: containment(vocabulary, features(memory.content)) }))
-					.filter(({ score }) => score >= RELATED_CONTAINMENT)
-					// Recency breaks ties, and a long summary mentioning most of the scope produces many.
-					.sort((a, b) => b.score - a.score).slice(0, MAX_CANDIDATES).map(({ memory }) => memory);
+				: memories.filter((m) => mentions(vocabulary, m.content, m.searchTerms) >= RELATED_CONTAINMENT);
 			// The stored diagnostic explains the last completed outcome. Claiming an attempt must not erase it:
 			// a cancelled or interrupted run would otherwise leave a paused source with no recorded reason.
 			return { source, attempt: Number(row.attempt) + 1, generation: this.generation(source.scope), memories, candidates, timeoutMs, correctOutput,

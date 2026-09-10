@@ -170,12 +170,18 @@ may refresh an unchanged pending state's evidence date. Alias-only enrichment ca
 resolution. Model identity is captured before awaiting completion, so switching models
 or invalidating a context cannot mislabel provenance. No credentials are copied to state.
 
-Each input contains a sanitized source (at most 32,000 bytes) and **at most 8 existing claims that
-the source actually mentions**, from that source origin, each capped at 2,400 bytes (`MAX_CLAIM_BYTES`,
-i.e. `MAX_CLAIM_CHARS * 3`). Candidates are chosen by the host, not searched for by the model: a
-record qualifies when the source mentions at least 0.4 of its vocabulary (containment, not Jaccard —
-a source is orders of magnitude longer than a claim), ranked by that share with recency breaking
-ties. A progress source instead uses exactly the records nominated in `targets`.
+Each input contains a sanitized source (at most 32,000 bytes) and up to 32 existing active claims
+**from that source origin that the source actually mentions**, each capped at 2,400 bytes
+(`MAX_CLAIM_BYTES`, i.e. `MAX_CLAIM_CHARS * 3`). A record qualifies when the source mentions at
+least 0.4 of its vocabulary, or of the aliases stored to widen its recall — containment, not
+Jaccard, because a source is orders of magnitude longer than a claim. A progress source instead
+uses exactly the records nominated in `targets`.
+
+This is a **filter, never a ranking**, and the qualifying records keep the original recency order.
+Containment is highest for a record the source merely restates and lower for the one it
+contradicts, because the changed value is exactly the term that is missing; ordering by it and
+cutting to a small cap would drop the record that most needed superseding, and both versions
+would stay active forever. IDF weighting is worse rather than better, for the same reason.
 
 The set shown is the set that may be named: **a source cannot replace a record it never mentions**,
 because it is never offered one. This deliberately

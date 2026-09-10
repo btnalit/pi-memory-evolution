@@ -109,7 +109,9 @@ rename the tool to hide the conflict; an old installation would still run its ho
   A mixed requirement/work turn can create **two separate serialized sources/calls**,
   preserving statement versus tool authority instead of silently discarding the work.
 - Each processing attempt makes at most one background model call, using up to 32
-  recently updated active memories from that source's capture origin. This is a
+  recently updated active memories from that source's capture origin **that the source
+  actually mentions** — the host filters the rest out, so a source cannot replace a
+  record it never talks about. This is a
   conservative automatic-replacement safeguard, **not a recall restriction**.
   It defaults to **the current Pi session model and Pi's own provider/auth resolution**.
   With no session override, this is Pi's configured default. Quota/rate limits or repeated

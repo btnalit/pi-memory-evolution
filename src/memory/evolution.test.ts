@@ -7,7 +7,6 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { MemoryStore } from './memory-store.ts';
 import { evolve, parseClaims } from './evolution.ts';
 import { MAX_CLAIM_CHARS, MIN_CLAIM_CHARS } from './extractor.ts';
-import { MAX_CANDIDATES } from './limits.ts';
 import { MAX_OUTPUT_TOKENS } from './limits.ts';
 import type { CompleteMemory } from '../adapter/pi-api.ts';
 
@@ -128,12 +127,22 @@ test('a source cannot replace a record it never mentions, because it is never sh
 	assert.throws(()=>store.finishEvolution(run,[{kind:'fact',content:'Database uses PostgreSQL.',replaces:printer.id}],'fake/model'));
 }));
 
-test('the shown set stays bounded even when a long source mentions the whole scope',()=>using(async(store)=>{
-	const many=Array.from({length:MAX_CANDIDATES+4},(_,i)=>({kind:'fact' as const,content:`Atlas service ${i} listens on port ${9000+i}.`}));
-	await evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),
-		async()=>({model:'fake/model',text:JSON.stringify({memories:many})}));
-	store.capture({id:'s2',scope:'/project',kind:'summary',
-		content:'## Critical Context\n'+many.map(m=>`- ${m.content}`).join('\n'),createdAt:new Date().toISOString()});
+// Containment is a filter and must never become a ranking. A source that restates many records
+// verbatim scores 1.0 against each, while the single record it CONTRADICTS scores lower — the
+// changed value is precisely the term that is missing. Ranking by it and cutting to a small cap
+// therefore drops the one record that needed superseding, and the store keeps both versions alive
+// forever. IDF weighting is worse, not better: the missing term is the rare one.
+test('a record the source contradicts survives beside the many it merely restates',()=>using(async(store)=>{
+	// Enough restated records to fill any plausible small cap ahead of the contradicted one, while
+	// staying inside MAX_CLAIMS so the seeding reply is itself valid.
+	const restated=Array.from({length:10},(_,i)=>({kind:'fact' as const,content:`Atlas service ${i} listens on port ${9000+i}.`}));
+	await evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+		text:JSON.stringify({memories:[...restated,{kind:'fact',content:'Database uses SQLite.'}]})}));
+	const stale=store.readMemories().find(m=>m.content.includes('SQLite'))!;
+
+	store.capture({id:'s2',scope:'/project',kind:'summary',createdAt:new Date().toISOString(),
+		content:'## Critical Context\n'+restated.map(m=>`- ${m.content}`).join('\n')+'\n- Database now uses PostgreSQL.'});
 	const run=store.beginEvolution('s2')!;
-	assert.equal(run.candidates.length,MAX_CANDIDATES);
+	assert.ok(run.candidates.some(c=>c.id===stale.id),
+		'the contradicted record must be offered, or it can never be retired and both versions stay active');
 }));

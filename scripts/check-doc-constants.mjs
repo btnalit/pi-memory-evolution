@@ -68,8 +68,9 @@ const BOUNDS = [
 	['docs/usage.md', /literal replacement, (\d+)–(\d+) characters/, [MIN_CLAIM_CHARS, MAX_CLAIM_CHARS], 'correct command bounds'],
 	['docs/design.md', /and (\d+) claims of (\d+)–(\d+) UTF-16 code units/, [MAX_CLAIMS, MIN_CLAIM_CHARS, MAX_CLAIM_CHARS], 'claim shape'],
 	['docs/design.md', /each capped at ([\d,]+) bytes/, [group(MAX_CLAIM_BYTES)], 'existing-claim clip'],
-	['docs/design.md', /at most (\d+) existing claims that/, [MAX_CANDIDATES], 'candidate cap'],
-	['docs/design.md', /at least ([\d.]+) of its vocabulary/, [RELATED_CONTAINMENT], 'candidate threshold'],
+	['docs/design.md', /up to (\d+) existing active claims/, [MAX_CANDIDATES], 'candidate cap'],
+	['docs/usage.md', /using up to (\d+)\n  recently updated active memories/, [MAX_CANDIDATES], 'candidate cap'],
+	['docs/design.md', /mentions at\nleast ([\d.]+) of its vocabulary/, [RELATED_CONTAINMENT], 'candidate threshold'],
 	['docs/design.md', /validated JSON \(an outer Markdown fence is tolerated\), at most ([\d,]+) bytes/, [group(MAX_OUTPUT_BYTES)], 'output size guard'],
 	['docs/design.md', /declaring no limit is reserved ([\d,]+) tokens/, [group(MAX_OUTPUT_TOKENS)], 'reserved answer budget'],
 ];
@@ -120,6 +121,11 @@ assert.ok(/run\.candidates\.find\(\(m\) => m\.id === claim\.replaces\)/u.test(re
 	'finishEvolution must resolve replaces against run.candidates: the records shown are the records nameable');
 assert.ok(/existing: run\.candidates\.map\(/u.test(readFileSync('src/memory/evolution.ts', 'utf8')),
 	'the payload must be built from run.candidates, or the shown set stops matching the nameable set');
+// Containment ranks a restated record above the contradicted one, so sorting by it and cutting to a
+// small cap drops exactly the record that needed superseding. It filters; it must never order.
+assert.ok(!/mentions\([\s\S]{0,200}?\.sort\(/u.test(readFileSync('src/memory/memory-store.ts', 'utf8')),
+	'candidate selection must not sort by containment: it scores agreement above contradiction, so\n'
+	+ '    ranking by it drops the record the source actually changed. Filter only.');
 assert.ok(MAX_OUTPUT_BYTES >= MAX_CLAIMS * (MAX_CLAIM_BYTES + 1024),
 	'MAX_OUTPUT_BYTES must still admit the worst reply the claim and alias caps allow');
 assert.ok(MAX_OUTPUT_TOKENS === MAX_CLAIMS * MAX_CLAIM_CHARS, 'MAX_OUTPUT_TOKENS must stay derived from the claim contract');

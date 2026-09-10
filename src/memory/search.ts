@@ -95,6 +95,15 @@ export function containment(source: Set<string>, memory: Set<string>): number {
 	return shared / memory.size;
 }
 
+/** How much a source talks about one record, counting the aliases stored to widen its recall.
+ * Content and aliases are scored separately and the better one wins, rather than unioned: a
+ * union would enlarge the denominator and let a record with many aliases fall below the bar it
+ * used to clear. Aliases may only bring a record into consideration, never push one out. */
+export function mentions(source: Set<string>, content: string, searchTerms?: readonly string[]): number {
+	return Math.max(containment(source, features(content)),
+		searchTerms?.length ? containment(source, features(searchTerms.join(" "))) : 0);
+}
+
 export function featureOffset(text: string, feature: string): number {
 	// Preserve offsets while applying the same literal/prose boundary as indexing.
 	const prose = feature.startsWith("literal:") ? text : text.replace(LITERALS, (literal) => " ".repeat(literal.length));

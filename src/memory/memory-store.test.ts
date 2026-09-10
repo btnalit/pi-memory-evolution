@@ -80,7 +80,7 @@ test("global recall does not grant automatic cross-origin replacement authority"
 	assert.ok(!run.memories.some(m=>m.id===original.id));
 	assert.throws(()=>s.finishEvolution(run,[{kind:'fact',content:'Database port is 7777.',replaces:original.id}],'model'));
 	// Even a future caller accidentally widening candidates cannot bypass the write guard.
-	run.memories.push(original);
+	run.candidates.push(original);
 	assert.throws(()=>s.finishEvolution(run,[{kind:'fact',content:'Database port is 7777.',replaces:original.id}],'model'));
 	assert.equal(s.readMemories()[0].status,'provisional');
 }));
