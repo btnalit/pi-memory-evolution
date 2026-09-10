@@ -1,5 +1,5 @@
 import { type Claim } from './extractor.ts';
-import { MAX_CLAIMS, MAX_CLAIM_CHARS, MIN_CLAIM_CHARS } from './limits.ts';
+import { MAX_CLAIMS, MAX_CLAIM_CHARS, MAX_OUTPUT_BYTES, MIN_CLAIM_CHARS } from './limits.ts';
 import { MEMORY_KINDS } from './memory-store.ts';
 import { EvolutionError } from './recovery.ts';
 import { OUTPUT_PROTOCOL_VERSION, type Diagnostic, type DiagnosticReason } from './diagnostics.ts';
@@ -51,7 +51,7 @@ export function parseMemoryOutput(text: string): { claims: Claim[]; diagnostic: 
  const fail = (reason: DiagnosticReason, field = 'result', actual?: number): never => {
   throw new EvolutionError('invalid_output', { ...diagnostic, reason, field, ...(actual === undefined ? {} : { actual }) });
  };
- if (diagnostic.outputBytes! > 64_000) fail('output_too_large');
+ if (diagnostic.outputBytes! > MAX_OUTPUT_BYTES) fail('output_too_large');
  const value = jsonValue(text, fail);
  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('result_shape');
  const root = value as Record<string, unknown>;

@@ -1,7 +1,8 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import { EVOLUTION_MAX_TOKENS, EvolutionError, type FailureCode } from "../memory/recovery.ts";
+import { EvolutionError, type FailureCode } from "../memory/recovery.ts";
 import { modelLabel, OUTPUT_PROTOCOL_VERSION, type Diagnostic } from '../memory/diagnostics.ts';
+import { answerCeiling } from '../memory/limits.ts';
 import { diagnosticFetch, httpFailure, observeStatus, observeStructuredError, OBSERVABLE_HTTP_APIS } from './http-diagnostics.ts';
 
 export interface Completion { text: string; model: string; diagnostic?: Diagnostic }
@@ -39,13 +40,16 @@ export const completeMemory: CompleteMemory = async (ctx, systemPrompt, input, s
 	// Feature check allows old Pi to fall back to local extraction.
 	const registry = ctx.modelRegistry;
 	if (typeof registry.complete !== "function") throw new EvolutionError("unavailable");
-	const maxTokens = Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0
-		? Math.min(EVOLUTION_MAX_TOKENS, model.maxTokens) : EVOLUTION_MAX_TOKENS;
+	// The model's own ceiling, never a smaller number of ours. A caller cap is spent on reasoning
+	// before any answer is written, so an invented ceiling can leave a thinking model with no room
+	// to answer at all. This one cannot: it is the most the model could ever emit. Not every adapter
+	// substitutes a default when the field is omitted, so it is sent explicitly rather than left out.
+	const maxTokens = answerCeiling(model.maxTokens);
 	try {
 		const response = await registry.complete(model, {
 			systemPrompt,
 			messages: [{ role: "user", content: input, timestamp: Date.now() }],
-		}, { signal, maxTokens, timeoutMs: 120_000, maxRetries: 0, cacheRetention: "none", sessionId: randomUUID(),
+		}, { signal, ...(maxTokens === undefined ? {} : { maxTokens }), timeoutMs: 120_000, maxRetries: 0, cacheRetention: "none", sessionId: randomUUID(),
 			...(OBSERVABLE_HTTP_APIS.has(model.api) ? { fetch: diagnosticFetch(diagnostic, signal) } : {}),
 			// A request-local HTTP path exposes failed statuses; the foreground transport is unchanged.
 			...(model.api === 'openai-codex-responses' ? { transport: 'sse' as const } : {}),
@@ -55,6 +59,9 @@ export const completeMemory: CompleteMemory = async (ctx, systemPrompt, input, s
 			&& usage.input + usage.output + usage.cacheRead + usage.cacheWrite > 0) {
 			diagnostic.inputTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 			diagnostic.outputTokens = usage.output;
+			// A subset of output, when the provider breaks it out: the one signal that says an empty
+			// or truncated reply was thinking, not a broken model.
+			if (Number.isSafeInteger(usage.reasoning) && usage.reasoning! >= 0) diagnostic.reasoningTokens = usage.reasoning;
 			if (Number.isFinite(usage.cost?.total) && usage.cost.total >= 0) diagnostic.reportedUsd = usage.cost.total;
 		}
 		if (['refusal', 'sensitive', 'content_filter', 'incomplete.content_filter', 'SAFETY', 'RECITATION', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII'].includes(response.rawStopReason ?? ''))

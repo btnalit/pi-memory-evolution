@@ -2,7 +2,6 @@ import { validDiagnostic, type Diagnostic } from './diagnostics.ts';
 
 /** Bounded background work; retries are persisted by MemoryStore, not session timers. */
 export const EVOLUTION_TIMEOUT_MS = 120_000;
-export const EVOLUTION_MAX_TOKENS = 8192;
 export const RECOVERY_POLL_MS = 15_000;
 export const LEASE_GRACE_MS = 30_000;
 export const MAX_FAILURES = 5;

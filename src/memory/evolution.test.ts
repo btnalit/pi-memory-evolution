@@ -7,6 +7,7 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { MemoryStore } from './memory-store.ts';
 import { evolve, parseClaims } from './evolution.ts';
 import { MAX_CLAIM_CHARS, MIN_CLAIM_CHARS } from './extractor.ts';
+import { MAX_OUTPUT_TOKENS } from './limits.ts';
 import type { CompleteMemory } from '../adapter/pi-api.ts';
 
 test('valid JSON claims; rejects extra actions, excessive output and unsupported kinds',()=>{
@@ -66,4 +67,30 @@ test('the output correction note follows the actual previous failure, not a cumu
 	await assert.rejects(evolve(store,'s1',ctx,signal(),async()=>{throw new Error('offline');},true));
 	await evolve(store,'s1',ctx,signal(),ok,true);
 	assert.ok(!prompts.at(-1)!.includes('OUTPUT CORRECTION'),'a provider error is not an output-validation failure');
+}));
+
+// The reviewer defect this pins: reserving less than the request permits lets a payload be packed
+// that leaves no room for the reply the provider was asked to allow, so the provider rejects the whole
+// call and cools the route for an hour; and it admits a call under `dailyEstimatedUsd` as cheaper than
+// it may actually bill. Whatever ceiling the adapter sends, the caller must reserve the same number.
+test('the reply budget reserved locally is exactly the ceiling the request will carry',()=>using(async(store)=>{
+	const seen:(undefined|{outputTokens?:number})[]=[];
+	const begin=store.beginEvolution.bind(store);
+	(store as unknown as {beginEvolution:unknown}).beginEvolution=(...args:Parameters<typeof begin>)=>{seen.push(args[5]);return begin(...args);};
+	const complete:CompleteMemory=async()=>({model:'active/model',text:'{"memories":[]}'});
+	const cost={input:1,output:2,cacheRead:1,cacheWrite:1};
+	const ctx=(maxTokens?:number,contextWindow=400000)=>({model:{provider:'p',id:'m',cost,contextWindow,...(maxTokens===undefined?{}:{maxTokens})}}) as unknown as ExtensionContext;
+
+	await evolve(store,'s1',ctx(64000),AbortSignal.timeout(1000),complete);
+	assert.equal(seen.at(-1)?.outputTokens,64000,'a declared ceiling must be reserved in full, not clamped');
+
+	store.capture({id:'s2',scope:'/project',kind:'summary',content:'## Critical Context\n- Cache uses Redis.',createdAt:new Date().toISOString()});
+	await evolve(store,'s2',ctx(undefined),AbortSignal.timeout(1000),complete);
+	assert.equal(seen.at(-1)?.outputTokens,MAX_OUTPUT_TOKENS,'a model declaring no ceiling falls back to the contract worst case');
+
+	// The same number must bound the payload: a ceiling that cannot fit beside the input is refused
+	// here, before a paid call, instead of by the provider afterwards.
+	store.capture({id:'s3',scope:'/project',kind:'summary',content:'## Critical Context\n- Queue uses NATS.',createdAt:new Date().toISOString()});
+	await assert.rejects(evolve(store,'s3',ctx(19000,20000),AbortSignal.timeout(1000),complete),
+		(error:{code?:string})=>error.code==='context_limit');
 }));

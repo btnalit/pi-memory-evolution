@@ -192,8 +192,16 @@ A fresh explicit user statement or linked project-state tool observation can sti
 older evidence. Unsupported semantic contradictions without a model `replaces` link are
 not detected globally.
 
-Each attempt uses at most one model call, no tools, an 8,192-output-token cap (clamped
-against a smaller model limit), a fresh request session ID and `cacheRetention: "none"`.
+Each attempt uses at most one model call, no tools, a fresh request session ID and
+`cacheRetention: "none"`. The output ceiling sent is **the active model's own `maxTokens`**,
+never a smaller number of the extension's: a ceiling is spent on reasoning before any answer
+is written, so an invented one can leave a thinking model with no room to answer, returning
+`length` with zero bytes. A model declaring no limit is sent none. Reported `reasoning`
+usage is recorded, so a starved reply is distinguishable from a broken one. Spend stays
+governed per call, per source and per day by the routing policy. Context reservation and the
+spend estimate reserve **exactly the ceiling that will be sent**, so neither can admit a payload
+that leaves no room for the reply the request permits, nor admit a call as cheaper than it may
+bill. A model declaring no limit is reserved 12,800 tokens, this contract's worst legal reply.
 A 120-second per-attempt deadline bounds waiting even when a provider ignores abort;
 remote computation/billing cannot be guaranteed to stop. A backup has a fresh deadline,
 clamped by the source's remaining 300-second cumulative allowance. Failed calls retain local summary claims. User-cue prose is saved but needs a

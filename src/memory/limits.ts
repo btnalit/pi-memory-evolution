@@ -24,3 +24,24 @@ export const MAX_CLAIMS = 16;
 export const MAX_SEARCH_TERMS = 8;
 export const MIN_SEARCH_TERM_CHARS = 2;
 export const MAX_SEARCH_TERM_CHARS = 64;
+
+/** What a reply may cost us, derived from the contract above rather than invented. These are
+ * reserved locally — for context arithmetic and cost estimation — and are never sent as a ceiling.
+ * The ceiling on the wire is the active model's own `maxTokens` (see `adapter/pi-api.ts`): a
+ * ceiling is spent on reasoning before any answer is written, so a smaller number of ours can
+ * leave a thinking model with no room to answer. How long a model thinks is the provider's
+ * business; spend is governed per call, per source and per day by the routing policy. */
+// Every claim at its character cap. CJK costs roughly one token per character, so characters
+// are the conservative token unit; JSON punctuation and aliases fit in the caller's slack term.
+export const MAX_OUTPUT_TOKENS = MAX_CLAIMS * MAX_CLAIM_CHARS;
+/** The output ceiling for one call: the model's own limit, or nothing when it declares none.
+ * Defined once because the number sent to the provider and the number reserved locally for
+ * context arithmetic and spend MUST be the same. Reserving less than is asked for lets a payload
+ * be packed that leaves no room for the reply the request permits — the provider then rejects the
+ * whole call, and a cost ceiling can be overshot by a call that was admitted as cheaper. */
+export function answerCeiling(modelMaxTokens: unknown): number | undefined {
+	return Number.isSafeInteger(modelMaxTokens) && (modelMaxTokens as number) > 0 ? modelMaxTokens as number : undefined;
+}
+// Worst legal reply on the wire (~56.8 KB: MAX_CLAIMS x (MAX_CLAIM_BYTES + the 1024-byte alias
+// budget) plus punctuation), rounded up so pretty-printed but legal output is not rejected.
+export const MAX_OUTPUT_BYTES = 64_000;
