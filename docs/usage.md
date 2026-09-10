@@ -221,8 +221,10 @@ history, correction, pinning and undo rather than treating generated claims as v
   revives or retires it without you doing anything. Dormancy governs what is pushed into a
   session unprompted; it never makes a record unfindable for someone looking for it.
   Project states keep the seven-day cap; no upgrade revives old states. Read/search/injection,
-  pinning, alias enrichment, feedback and conflict resolution do not reset the evidence clock;
-  only a later source that re-derives a record, or mentions it and leaves it standing, does.
+  pinning, alias enrichment, feedback and conflict resolution never move the evidence date,
+  and nothing does except a replacement. The separate decay clock is moved only by a later
+  source that mentions a record and either leaves it standing or reaffirms it outright — never
+  for project states, whose seven-day cap nothing resets.
 - Ranking keeps **relevance, evidence, freshness and feedback separate**. Quality cannot
   rescue an unrelated/weak lexical match. `useful` is not `accurate`; neither is independent
   verification. Repeated retrieval or repeated positive feedback earns no cumulative boost.

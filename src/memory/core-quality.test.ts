@@ -309,7 +309,7 @@ test("quality metadata is copied, not a mutable alias into the store cache", () 
 	assert.equal(s.readMemories()[0].evidence!.basis, "summary"); assert.equal(s.readMemories()[0].feedback!.utility!.verdict, "useful");
 }));
 
-test("digest exposes evidence limits and aging within the byte budget; diagnostics explain expiry", () => {
+test("digest exposes evidence limits and aging within the byte budget; diagnostics explain dormancy", () => {
 	const records = [memory("a", { updatedAt: iso(150) }), memory("b"), memory("c")];
 	const digest = buildRuntimeDigest(records, "Atlas database port", now)!;
 	assert.ok(Buffer.byteLength(digest) <= 2048); assert.match(digest, /not verification/); assert.match(digest, /unknown\/unknown/); assert.match(digest, /"aging":true/);
@@ -318,6 +318,13 @@ test("digest exposes evidence limits and aging within the byte budget; diagnosti
 	// Dormancy is about being offered, not about existing: the record is still stored and still
 	// recallable on request, so a later source can revive or supersede it.
 	assert.equal(retrieveMemories([stale], "Atlas database", 3, now, { includeDormant: true }).selected.length, 1);
+	// `aging` is relative to that kind's own horizon, not a fixed freshness number. A 45-day fact sits
+	// below the old 0.85 threshold (0.797) but is nowhere near its 180-day horizon, so calling it
+	// aging would tell the model a current claim is stale; the floors make a fixed number meaningless.
+	const middling = memory("mid", { kind: "fact", updatedAt: iso(45) });
+	assert.ok(memoryQuality(middling, now).freshness < 0.85);
+	assert.equal(memoryQuality(middling, now).aging, false);
+	assert.equal(memoryQuality(memory("old", { kind: "fact", updatedAt: iso(120) }), now).aging, true);
 	// Confirmation moves the freshness anchor without moving the edit date, and the digest says so.
 	const revived = buildRuntimeDigest([{ ...stale, reinforcedAt: iso(0) }], "Atlas database", now)!;
 	assert.match(revived, /"confirmed":/); assert.match(revived, /"aging":false/);

@@ -418,6 +418,7 @@ export class MemoryStore {
 			const after = new Map<string, DurableMemory>();
 			const targets = new Set<string>();
 			const confirmed = new Set<string>();
+			const reaffirmed = new Set<string>();
 			let weakerConflicts = 0;
 			const incoming = sourceEvidence(run.source, "model");
 			// Two different things used to throw the same bare Error and land on write_rejected, which
@@ -463,6 +464,11 @@ export class MemoryStore {
 					targets.add(old.id);
 					if (claim.kind !== old.kind) broke('replaces_kind', index, 'kind');
 					if (fingerprint(old.content) === fingerprint(claim.content)) {
+						// Naming a record and replacing it with itself is an explicit "this still holds", so it
+						// must count at least as much as leaving it standing silently. Without this, a summary
+						// source that reaffirms a record outright moves nothing while one that says nothing
+						// about it confirms it - the stronger signal worth less than the weaker one.
+						reaffirmed.add(old.id);
 						if (run.source.kind !== "summary" && mayReplace(old, incoming)) after.set(old.id, { ...old, sourceEntryId: run.source.id,
 							updatedAt: run.source.createdAt, evidence: incoming, status: "provisional", revision: old.revision + 1 });
 						annotate(old, claim); continue;
@@ -495,21 +501,17 @@ export class MemoryStore {
 				} else {
 					const next = this.claim(run.source, claim, "model");
 					if (next) stage(next);
-					else {
-						// The model produced content this origin already holds, so nothing is stored - but it
-						// re-derived that record independently from new evidence, which is the strongest
-						// confirmation available here. `run.memories` holds only active records, so a match
-						// cannot be a superseded or blocked variant the model regressed to.
-						const same = run.memories.find((m) => m.kind === claim.kind && fingerprint(m.content) === fingerprint(claim.content));
-						if (same) confirmed.add(same.id);
-						annotate(same, claim);
-					}
+					else annotate(run.memories.find((m) => m.kind === claim.kind && fingerprint(m.content) === fingerprint(claim.content)), claim);
 				}
 			}
-			// Shown, measured to be mentioned by this source, and left standing: the model saw the record
-			// beside fresh evidence about the same terms and did not contradict it. That is "not disputed
-			// by evidence that mentioned it", not "verified" - enough to keep a record out of dormancy,
-			// never enough to raise its authority, so it feeds `reinforcedAt` only.
+			// Shown, measured to be mentioned by this source, and either left standing or explicitly
+			// replaced by identical content: the model saw the record beside fresh evidence about the same
+			// terms and did not contradict it. That is "not disputed by evidence that mentioned it", not
+			// "verified" - enough to keep a record out of dormancy, never enough to raise its authority.
+			//
+			// The model producing content the store already holds is deliberately NOT a signal. The whole
+			// content of every candidate is in front of it and the prompt asks for aliases on unchanged
+			// records, so re-emitting one is the cheapest move available, not independent re-derivation.
 			// Progress sources are excluded because their candidates are host-nominated targets, not
 			// records measured to be mentioned. Today that guard is subsumed by the project_state rule
 			// below - `selectCandidates` only ever nominates project_state for a progress source - so it
@@ -518,7 +520,7 @@ export class MemoryStore {
 			// project_state is excluded for the same reason - states go stale silently, and silence is far
 			// too weak to keep resetting the one seven-day safety cap that actually does work.
 			if (run.source.kind !== "progress") for (const shown of run.candidates)
-				if (shown.kind !== "project_state" && !targets.has(shown.id)) confirmed.add(shown.id);
+				if (shown.kind !== "project_state" && (!targets.has(shown.id) || reaffirmed.has(shown.id))) confirmed.add(shown.id);
 			const event = this.record("model", `${model}: ${run.source.id}${weakerConflicts ? `; weaker replacements withheld=${weakerConflicts}` : ""}`, [...after.values()], run.source.scope);
 			// After `record`, so a record this batch also changed is confirmed on top of that change.
 			this.reinforce(confirmed, run.source.createdAt);

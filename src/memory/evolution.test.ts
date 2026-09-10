@@ -249,30 +249,61 @@ test('the cap bounds what is shown, and the host may only write through what was
 // neither costs a request: the model re-deriving content the origin already holds, and a record the
 // host measured this source to mention being left standing beside it. Neither is proof of truth;
 // both are enough to keep a record out of dormancy, which is the only thing they feed.
-// Deliberately a project_state, the one kind silence never confirms: if this record is confirmed,
-// it can only be because the model re-derived it, so the test isolates that signal instead of
-// passing on the strength of the other one.
-test('re-derived content confirms the record it duplicates, where silence never would',()=>using(async(store)=>{
+// The model is shown the full content of every candidate and the prompt asks for aliases even on
+// unchanged records, so re-emitting one is the cheapest move available - never evidence. Counting
+// it would let any weekly summary that mentions a migration restate it verbatim and restart the
+// seven-day cap, so a finished migration would be injected as in-flight work indefinitely.
+test('restating a project state, however exactly, never resets its seven-day cap',()=>using(async(store)=>{
 	const at=(i:number)=>new Date(Date.parse('2026-03-01T00:00:00.000Z')+i*86400_000).toISOString();
+	const say=(text:string)=>async()=>({model:'fake/model',text:JSON.stringify({memories:[{kind:'project_state',content:text}]})});
 	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:at(0),
 		content:'## Critical Context\n- The Atlas rollout runbook lives in docs.'});
-	const say=(text:string)=>async()=>({model:'fake/model',text:JSON.stringify({memories:[{kind:'project_state',content:text}]})});
 	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),say('[pending] The Atlas rollout is still running on port 9999.'));
 	const before=store.readMemories().find(m=>m.kind==='project_state')!;
 	assert.equal(before.reinforcedAt,undefined);
 
 	store.capture({id:'s2',scope:'/project',kind:'summary',createdAt:at(30),
 		content:'## Critical Context\n- The Atlas rollout is still running on port 9999.'});
-	// Counted after capture, so only what the learning call itself does is measured.
 	const count=store.readMemories().length, events=store.history().length;
 	await evolve(store,'s2',{} as ExtensionContext,AbortSignal.timeout(1000),say('[pending] The Atlas rollout is still running on port 9999.'));
 	const after=store.readMemories().find(m=>m.id===before.id)!;
-	assert.equal(after.reinforcedAt,at(30),'the record the model re-derived must be confirmed');
-	assert.equal(after.updatedAt,before.updatedAt,
-		'confirmation must not move updatedAt: it is the replacement authority gate');
-	assert.equal(after.revision,before.revision,'confirmation is not a revision');
-	assert.equal(store.readMemories().length,count,'re-derived content must not be stored twice');
-	assert.equal(store.history().length,events+1,'confirmation must not add an undo point of its own');
+	assert.equal(after.reinforcedAt,undefined,
+		'a restated state must not be confirmed: the cap is the only thing stopping finished work being injected forever');
+	assert.equal(after.updatedAt,before.updatedAt);
+	assert.equal(store.readMemories().length,count,'re-emitted content must not be stored twice');
+	assert.equal(store.history().length,events+1);
+}));
+
+// Replacing a record with identical content is an explicit "this still holds". It must be worth at
+// least as much as saying nothing about it, or the stronger signal counts for less than the weaker.
+test('a record the model reaffirms outright is confirmed, not only one it leaves alone',()=>using(async(store)=>{
+	const at=(i:number)=>new Date(Date.parse('2026-05-01T00:00:00.000Z')+i*86400_000).toISOString();
+	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:at(0),
+		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
+	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+		text:JSON.stringify({memories:[{kind:'fact',content:'The Atlas service listens on port 9999.'}]})}));
+	const target=store.readMemories().find(m=>m.content.includes('9999'))!;
+
+	store.capture({id:'s2',scope:'/project',kind:'summary',createdAt:at(30),
+		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
+	const run=store.beginEvolution('s2')!;
+	assert.ok(run.candidates.some(c=>c.id===target.id),'fixture: the record must be shown');
+	store.finishEvolution(run,[{kind:'fact',content:'The Atlas service listens on port 9999.',replaces:target.id}],'fake/model');
+	const after=store.readMemories().find(m=>m.id===target.id)!;
+	assert.equal(after.reinforcedAt,at(30),'an outright reaffirmation must move the decay anchor');
+	assert.equal(after.updatedAt,target.updatedAt,'but not the replacement authority gate');
+	assert.equal(after.status,'provisional','and it must not retire the record it reaffirms');
+
+	// A pinned record is already fixed at freshness 1 and can never go dormant, so confirming it is
+	// pure write churn on a record the store has been told to leave alone.
+	store.act(after.id,'pin');
+	store.capture({id:'s3',scope:'/project',kind:'summary',createdAt:at(60),
+		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
+	const pinned=store.beginEvolution('s3')!;
+	assert.ok(pinned.candidates.some(c=>c.id===after.id),'fixture: the pinned record must still be shown');
+	store.finishEvolution(pinned,[],'fake/model');
+	assert.equal(store.readMemories().find(m=>m.id===after.id)!.reinforcedAt,at(30),
+		'a pinned record must not be re-stamped: its freshness is already fixed at 1');
 }));
 
 test('confirmation moves the decay anchor but never the replacement authority gate',()=>using(async(store)=>{
@@ -301,7 +332,7 @@ test('confirmation moves the decay anchor but never the replacement authority ga
 		'a source older than the confirmation must still be able to supersede the record');
 }));
 
-test('a progress source confirms nothing, and no source confirms a project state by silence',()=>using(async(store)=>{
+test('no source confirms a project state, by silence or otherwise',()=>using(async(store)=>{
 	const at=(i:number)=>new Date(Date.parse('2026-03-01T00:00:00.000Z')+i*86400_000).toISOString();
 	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:at(0),
 		content:'## Critical Context\n- The Atlas migration runbook lives in docs.'});
