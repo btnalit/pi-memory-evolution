@@ -2,6 +2,13 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
+## [0.4.0](https://github.com/btnalit/pi-memory-evolution/compare/v0.3.2...v0.4.0) (2026-09-10)
+
+
+### Features
+
+* confirm memories from evidence already in hand, and let every kind go dormant ([#28](https://github.com/btnalit/pi-memory-evolution/issues/28)) ([150bdbd](https://github.com/btnalit/pi-memory-evolution/commit/150bdbd82a86b57eb43d1197251411d2bba35b3c))
+
 ## [0.3.2](https://github.com/btnalit/pi-memory-evolution/compare/v0.3.1...v0.3.2) (2026-09-10)
 
 
