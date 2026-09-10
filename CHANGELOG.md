@@ -2,6 +2,18 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
+## [0.3.0](https://github.com/btnalit/pi-memory-evolution/compare/v0.2.7...v0.3.0) (2026-09-10)
+
+
+### Features
+
+* let the host choose which records the model may replace ([#23](https://github.com/btnalit/pi-memory-evolution/issues/23)) ([5d4c868](https://github.com/btnalit/pi-memory-evolution/commit/5d4c868da2348e3ac1e205fc4166e2beaffbc2e1))
+
+
+### Bug Fixes
+
+* give the answer the model's own ceiling instead of one we invented ([#21](https://github.com/btnalit/pi-memory-evolution/issues/21)) ([3eba18a](https://github.com/btnalit/pi-memory-evolution/commit/3eba18a5f49136e5c9581c46b92f54cdee6ee6aa))
+
 ## [0.2.7](https://github.com/btnalit/pi-memory-evolution/compare/v0.2.6...v0.2.7) (2026-09-09)
 
 

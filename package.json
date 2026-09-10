@@ -1,6 +1,6 @@
 {
 	"name": "pi-memory-evolution",
-	"version": "0.2.7",
+	"version": "0.3.0",
 	"description": "Memory that maintains itself. Pi learns what matters, injects what this session needs, and recalls the rest — nothing to configure, no commands to learn.",
 	"license": "MIT",
 	"publishConfig": {
