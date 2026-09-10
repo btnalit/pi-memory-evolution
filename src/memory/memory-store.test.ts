@@ -120,7 +120,7 @@ test("cyclic model replacements cannot retire both facts", () => using((s) => {
 	assert.throws(() => s.finishEvolution(s.beginEvolution("s2")!, [
 		{kind: "fact", content: b.content, replaces: a.id},
 		{kind: "fact", content: a.content, replaces: b.id},
-	], "model"), /Cyclic/);
+	], "model"), (error: any) => error.code === 'invalid_output' && error.diagnostic.reason === 'cyclic_replaces');
 	assert.deepEqual(s.readMemories(), before);
 }));
 test("job lease prevents duplicate model execution; failed job can retry explicitly", () => using((s) => {

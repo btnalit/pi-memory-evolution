@@ -30,10 +30,16 @@ test('large valid bilingual output fits the new byte budget while oversized outp
 	assert.throws(()=>parseClaims(' '.repeat(64001)),(e:any)=>e.code==='invalid_output'&&e.diagnostic.reason==='output_too_large');
 });
 test('provider, parse and transaction failures have distinct persisted categories',()=>using(async(store)=>{
+	// A pinned record refuses this evidence however often it is offered, so the write is rejected
+	// and the source stops. Naming a record that was never shown is the model's own mistake and
+	// stays correctable — that case is covered separately below.
+	const pinned=store.readMemories()[0];store.act(pinned.id,'pin');
+	const replacePinned=async(_ctx:unknown,_system:unknown,input:string)=>({model:'test',
+		text:JSON.stringify({memories:[{kind:'fact',content:'Database uses PostgreSQL.',replaces:JSON.parse(input).existing[0]?.id??'unknown'}]})});
 	for(const [complete,code] of [
 		[async()=>{throw new Error('private-secret');},'provider'],
 		[async()=>({model:'test',text:'bad JSON'}),'invalid_output'],
-		[async()=>({model:'test',text:'{"memories":[{"kind":"fact","content":"Valid but unauthorized fact.","replaces":"unknown"}]}'}),'write_rejected'],
+		[replacePinned,'write_rejected'],
 	] as const){
 		await assert.rejects(evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),complete,true),(error:any)=>error.code===code);
 		assert.match(store.status(),new RegExp(code));assert.ok(!store.status().includes('private-secret'));
@@ -145,4 +151,53 @@ test('a record the source contradicts survives beside the many it merely restate
 	const run=store.beginEvolution('s2')!;
 	assert.ok(run.candidates.some(c=>c.id===stale.id),
 		'the contradicted record must be offered, or it can never be retired and both versions stay active');
+}));
+
+// The reported failure, end to end: a weak model returns valid JSON but ignores the progress
+// contract. That used to throw a bare Error, land on write_rejected, and stop the source for good
+// without ever telling the model what it broke — one formatting mistake destroyed a source.
+test('a broken output contract is correctable, not a permanent stop',()=>using(async(store)=>{
+	store.capture({id:'st',scope:'/project',kind:'summary',content:'## Progress\n- Atlas push pending.',createdAt:new Date().toISOString()});
+	const target=store.readMemories().find(m=>m.kind==='project_state')!;
+	store.capture({id:'p1',scope:'/project',kind:'progress',targets:[target.id],content:'tool result',createdAt:new Date().toISOString()});
+
+	await assert.rejects(evolve(store,'p1',{} as ExtensionContext,AbortSignal.timeout(1000),
+		async()=>({model:'test',text:'{"memories":[{"kind":"fact","content":"Atlas push completed."}]}'})),
+		(error:any)=>error.code==='invalid_output'&&error.diagnostic.reason==='progress_contract');
+	assert.match(store.status(),/paused=0/,'a contract mistake must not pause the source');
+
+	// The retry is told which rule it broke, instead of having the whole schema repeated at it.
+	let corrected='';
+	await evolve(store,'p1',{} as ExtensionContext,AbortSignal.timeout(1000),async(_ctx,system)=>{corrected=system;
+		return {model:'test',text:JSON.stringify({memories:[{kind:'project_state',content:'Atlas push completed.',replaces:target.id}]})};},true);
+	assert.match(corrected,/OUTPUT CORRECTION[\s\S]*progress_contract/);
+	assert.equal(store.readMemories().find(m=>m.id===target.id)!.status,'forgotten');
+}));
+
+// The other half of the split: a refusal the store makes on its own authority is not correctable,
+// because the same evidence is refused however many times it is offered. Those still stop.
+test('a refusal on the store\'s own authority still stops the source',()=>using(async(store)=>{
+	const pinned=store.readMemories()[0];store.act(pinned.id,'pin');
+	await assert.rejects(evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),
+		async(_ctx,_system,input)=>({model:'test',text:JSON.stringify({memories:[{kind:'fact',
+			content:'Database uses PostgreSQL.',replaces:JSON.parse(input).existing[0]?.id??'unknown'}]})})),
+		(error:any)=>error.code==='write_rejected');
+	assert.match(store.status(),/paused=1/);
+	assert.equal(store.readMemories().find(m=>m.id===pinned.id)!.layer,'pinned');
+}));
+
+// The store's last barrier: the model's own output still redacts to a placeholder, meaning it
+// echoed something credential-shaped that the source-side redaction missed. Making this correctable
+// would resend the same unredacted source to another call and — invalid_output being
+// sibling-eligible — to another provider. One exposure and a stop is the cheaper outcome.
+test('model output that redacts to a placeholder stops the source instead of being retried',()=>using(async(store)=>{
+	let calls=0;
+	await assert.rejects(evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>{calls++;
+		return {model:'test',text:'{"memories":[{"kind":"fact","content":"Database password: hunter2 is stored in the vault."}]}'};}),
+		(error:{code?:string})=>error.code==='write_rejected');
+	assert.equal(calls,1,'the source must not be sent to the model again');
+	assert.match(store.status(),/paused=1/);
+	assert.ok(!store.readMemories().some(m=>m.content.includes('hunter2')));
+	// Nothing about the masked content may reach the persisted diagnostic either.
+	assert.ok(!store.status().includes('hunter2'));
 }));

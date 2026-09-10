@@ -4,6 +4,10 @@ export const OUTPUT_PROTOCOL_VERSION = 2;
 export const DIAGNOSTIC_REASONS = ['empty_text', 'missing_final', 'ambiguous_final', 'unexpected_tool',
  'json_syntax', 'ambiguous_json', 'output_too_large', 'result_shape', 'too_many_claims', 'claim_shape',
  'unknown_field', 'invalid_kind', 'content_type', 'content_length', 'invalid_replaces',
+ // Output-contract violations the store finds, not the parser. They name the rule the model broke
+ // so a correction can say which one, instead of repeating the whole schema back at it.
+ 'progress_contract', 'unknown_replaces', 'duplicate_replaces', 'replaces_kind', 'cyclic_replaces',
+ 'invalid_aliases',
  'http_error', 'abnormal_stop', 'request_failed', 'legacy_import_failed'] as const;
 export type DiagnosticReason = typeof DIAGNOSTIC_REASONS[number];
 /** Structural metadata only. Never add output snippets, arbitrary keys, headers or exception messages. */

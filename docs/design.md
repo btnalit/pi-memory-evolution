@@ -272,8 +272,11 @@ cooldowns never contaminate a source's retry_at. Generic runtime backoff is 1 mi
 5 minutes, 15 minutes, then 1 hour with up to 20% jitter; quota/auth/rate-limit errors can
 immediately use an allowed other provider. Two recent transport failures pause a model.
 Defaults allow 4 reserved calls / 2 models / 300 seconds per source, one format correction,
-and 20 reservations/hour shared across providers and processes. Unsafe writes/refusals
-pause immediately. Three output failures or five generic failures also pause work.
+and 20 reservations/hour shared across providers and processes. A write refused on the store's own authority — pinned,
+cross-origin, or a record already newer than the source — pauses immediately, because the same
+evidence would be refused again. A model that breaks the output contract is not the same thing:
+it is reported as `invalid_output` carrying the rule it broke, and is corrected and retried.
+Three output failures or five generic failures also pause work.
 Shutdown adds no failures, but an already reserved request may still cost money.
 `/memory evolve` overrides source delay/caps for one attempt, never shared ceilings.
 Completed/retired jobs are never forced to run again. A source resumed in another directory

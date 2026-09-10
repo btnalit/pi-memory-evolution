@@ -1,6 +1,6 @@
 import { openDatabase, type Database } from "./sqlite.ts";
 import { features, mentions } from "./search.ts";
-import { MAX_CANDIDATES, RELATED_CONTAINMENT } from "./limits.ts";
+import { MAX_CANDIDATES, MAX_CLAIMS, RELATED_CONTAINMENT } from "./limits.ts";
 import { chmodSync, closeSync, lstatSync, mkdirSync, openSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -11,7 +11,7 @@ import { clipBytes, fingerprint, redact } from "./privacy.ts";
 import { validSearchTerms } from "./search.ts";
 import { sourceEvidence, validEvidence, validFeedback, mayReplace, FEEDBACK_VERDICTS, type Evidence, type MemoryFeedback, type FeedbackVerdict } from "./quality.ts";
 import { EVOLUTION_TIMEOUT_MS, LEASE_GRACE_MS, MAX_FAILURES, MAX_OUTPUT_FAILURES, PAUSED_SQL, FAILURE_CODES, EvolutionError, retryAt, type FailureCode } from "./recovery.ts";
-import { modelLabel, OUTPUT_PROTOCOL_VERSION, parseDiagnostic, validDiagnostic, type Diagnostic } from './diagnostics.ts';
+import { modelLabel, OUTPUT_PROTOCOL_VERSION, parseDiagnostic, validDiagnostic, type Diagnostic, type DiagnosticReason } from './diagnostics.ts';
 import { SCHEMA_VERSION, SUPPORTED_SCHEMAS } from './limits.ts';
 import { budgetUntil, reserveCall, finishCall, takeNotice, routeUntil, estimatedCost, type CallOptions } from './processing-state.ts';
 import { loadRoutingPolicy, type RoutingPolicy } from './routing-policy.ts';
@@ -369,9 +369,25 @@ export class MemoryStore {
 			const targets = new Set<string>();
 			let weakerConflicts = 0;
 			const incoming = sourceEvidence(run.source, "model");
+			// Two different things used to throw the same bare Error and land on write_rejected, which
+			// pauses a source for good and never even tells the model what it got wrong. They are not the
+			// same: a broken output contract is the model's mistake, correctable and worth another model;
+			// a refusal grounded in the store's own authority is not, because the same evidence will be
+			// refused again. Only the first becomes invalid_output. The second keeps write_rejected below.
+			const broke: (reason: DiagnosticReason, index: number, field?: string) => never = (reason, index, field) => {
+				// The diagnostic field path only admits the contract's own indices; anything else stays 'result'.
+				const at = index <= MAX_CLAIMS - 1 ? `memories[${index}]${field ? `.${field}` : ''}` : 'result';
+				throw new EvolutionError('invalid_output', { ...diagnostic, reason, field: at });
+			};
 			const stage = (memory: DurableMemory) => {
 				if (![...after.values()].some((m) => active(m) && fingerprint(m.content) === fingerprint(memory.content))) after.set(memory.id, memory);
 			};
+			// `claim()` below throws when the model's own output still redacts to a placeholder, meaning
+			// it echoed something credential-shaped that the source-side redaction did not catch. Do NOT
+			// wrap that in a correctable error: retrying resends the same unredacted source to another
+			// call and, since invalid_output is sibling-eligible, to another provider. One exposure then
+			// a stop is the cheap outcome; re-sending a secret to a second vendor is not. It stays a bare
+			// Error, and therefore write_rejected, deliberately.
 			const annotate = (memory: DurableMemory | undefined, claim: Claim) => {
 				if (!memory || !claim.searchTerms || memory.layer === "pinned") return;
 				const current = after.get(memory.id) ?? memory;
@@ -379,17 +395,22 @@ export class MemoryStore {
 				if (active(current) && JSON.stringify(current.searchTerms) !== JSON.stringify(searchTerms))
 					after.set(memory.id, { ...current, searchTerms, revision: memory.revision + 1 });
 			};
-			for (const claim of claims) {
-				if (!validSearchTerms(claim.searchTerms)) throw new Error("Invalid search terms");
+			for (const [index, claim] of claims.entries()) {
+				if (!validSearchTerms(claim.searchTerms)) broke('invalid_aliases', index, 'searchTerms');
 				if (run.source.kind === "progress" && (claim.kind !== "project_state" || !claim.replaces || !run.source.targets!.includes(claim.replaces)))
-					throw new Error("Progress observations may only update nominated project-state records");
+					broke('progress_contract', index);
 				if (claim.replaces) {
 					const old = run.candidates.find((m) => m.id === claim.replaces);
-					if (!old || old.scope !== run.source.scope || targets.has(old.id) || old.layer === "pinned"
-						|| (run.source.kind === "progress" && old.kind !== "project_state")
+					// The model is shown exactly the records it may name, so naming another is its own error.
+					if (!old) broke('unknown_replaces', index, 'replaces');
+					if (targets.has(old.id)) broke('duplicate_replaces', index, 'replaces');
+					if (run.source.kind === "progress" && old.kind !== "project_state") broke('replaces_kind', index, 'replaces');
+					// Authority, not shape: a pinned record, another origin's record, or one already newer
+					// than this source will refuse the same evidence however many times it is offered.
+					if (old.scope !== run.source.scope || old.layer === "pinned"
 						|| Date.parse(old.updatedAt) > Date.parse(run.source.createdAt)) throw new Error("Invalid replacement target");
 					targets.add(old.id);
-					if (claim.kind !== old.kind) throw new Error("Replacement cannot change evidence kind");
+					if (claim.kind !== old.kind) broke('replaces_kind', index, 'kind');
 					if (fingerprint(old.content) === fingerprint(claim.content)) {
 						if (run.source.kind !== "summary" && mayReplace(old, incoming)) after.set(old.id, { ...old, sourceEntryId: run.source.id,
 							updatedAt: run.source.createdAt, evidence: incoming, status: "provisional", revision: old.revision + 1 });
@@ -399,7 +420,7 @@ export class MemoryStore {
 					// Local extraction may already have added the replacement from this source.
 					const existing = run.memories.find((m) => m.id !== old.id && m.kind === claim.kind && fingerprint(m.content) === fingerprint(claim.content));
 					if ((!next && !existing) || (existing && !active(after.get(existing.id) ?? existing))) continue;
-					if (existing && claims.some((c) => c.replaces === existing.id)) throw new Error("Cyclic memory replacement");
+					if (existing && claims.some((c) => c.replaces === existing.id)) broke('cyclic_replaces', index, 'replaces');
 					if (!mayReplace(old, incoming)) {
 						// Quarantine only this source's weaker variant; preserve stronger evidence.
 						const weaker = next ?? (existing?.sourceEntryId === run.source.id ? existing : undefined);
