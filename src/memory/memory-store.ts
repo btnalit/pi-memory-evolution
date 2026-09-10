@@ -37,6 +37,11 @@ export interface DurableMemory {
 	/** Exact superseded content, carried across explicit legacy adoption. */
 	suppressedHashes?: string[];
 	searchTerms?: string[];
+	/** When this record was last confirmed by later evidence, as distinct from last changed. Decay
+	 * and dormancy run from it; `updatedAt` does not move, because it is the replacement authority
+	 * gate and moving it would make a refreshed record refuse a legitimately older queued source.
+	 * Missing on records nothing has reconfirmed, which simply means decay runs from `updatedAt`. */
+	reinforcedAt?: string;
 	/** Host-assigned provenance; missing on old records means unknown, never verified. */
 	evidence?: Evidence;
 	feedback?: MemoryFeedback;
@@ -245,6 +250,25 @@ export class MemoryStore {
 	private generation(scope: string): number {
 		return Number(this.db.prepare("SELECT COALESCE(MAX(rowid),0) AS n FROM events WHERE scope=?").get(scope)!.n);
 	}
+	/** Confirmation is not a change: no content, evidence, status or `updatedAt` moves, so it writes
+	 * no event and creates no undo point - there is nothing to undo about having been mentioned. Only
+	 * `reinforcedAt` moves, and only forward, so replay or an out-of-order source cannot roll it back.
+	 * Pinned records are skipped because their freshness is already fixed at 1. */
+	private reinforce(ids: Iterable<string>, at: string): void {
+		const stamp = Date.parse(at);
+		if (!Number.isFinite(stamp)) return;
+		let touched = false;
+		for (const id of ids) {
+			const memory = this.get(id);
+			if (!memory || !active(memory) || memory.layer === "pinned") continue;
+			if (stamp <= Math.max(Date.parse(memory.updatedAt), Date.parse(memory.reinforcedAt ?? "") || 0)) continue;
+			const next = { ...memory, reinforcedAt: new Date(stamp).toISOString() };
+			if (!isMemory(next)) throw new Error("Invalid memory update");
+			this.db.prepare("UPDATE memories SET data=? WHERE id=?").run(JSON.stringify(next), id);
+			touched = true;
+		}
+		if (touched) this.cache.clear();
+	}
 	private record(actor: string, reason: string, after: DurableMemory[], scope: string): string {
 		const before = after.map((m) => this.get(m.id) ?? null);
 		const at = new Date().toISOString();
@@ -393,6 +417,7 @@ export class MemoryStore {
 			if (job?.state !== "running" || job.attempt !== run.attempt || this.generation(run.source.scope) !== run.generation) throw new EvolutionError("stale");
 			const after = new Map<string, DurableMemory>();
 			const targets = new Set<string>();
+			const confirmed = new Set<string>();
 			let weakerConflicts = 0;
 			const incoming = sourceEvidence(run.source, "model");
 			// Two different things used to throw the same bare Error and land on write_rejected, which
@@ -470,10 +495,30 @@ export class MemoryStore {
 				} else {
 					const next = this.claim(run.source, claim, "model");
 					if (next) stage(next);
-					else annotate(run.memories.find((m) => m.kind === claim.kind && fingerprint(m.content) === fingerprint(claim.content)), claim);
+					else {
+						// The model produced content this origin already holds, so nothing is stored - but it
+						// re-derived that record independently from new evidence, which is the strongest
+						// confirmation available here. `run.memories` holds only active records, so a match
+						// cannot be a superseded or blocked variant the model regressed to.
+						const same = run.memories.find((m) => m.kind === claim.kind && fingerprint(m.content) === fingerprint(claim.content));
+						if (same) confirmed.add(same.id);
+						annotate(same, claim);
+					}
 				}
 			}
+			// Shown, measured to be mentioned by this source, and left standing: the model saw the record
+			// beside fresh evidence about the same terms and did not contradict it. That is "not disputed
+			// by evidence that mentioned it", not "verified" - enough to keep a record out of dormancy,
+			// never enough to raise its authority, so it feeds `reinforcedAt` only.
+			// Progress sources are excluded: their candidates are host-nominated targets, not records the
+			// source was measured to be about, so every progress source would refresh all of them.
+			// project_state is excluded for the same reason - states go stale silently, and silence is far
+			// too weak to keep resetting the one seven-day safety cap that actually does work.
+			if (run.source.kind !== "progress") for (const shown of run.candidates)
+				if (shown.kind !== "project_state" && !targets.has(shown.id)) confirmed.add(shown.id);
 			const event = this.record("model", `${model}: ${run.source.id}${weakerConflicts ? `; weaker replacements withheld=${weakerConflicts}` : ""}`, [...after.values()], run.source.scope);
+			// After `record`, so a record this batch also changed is confirmed on top of that change.
+			this.reinforce(confirmed, run.source.createdAt);
 			this.db.prepare("UPDATE sources SET state='done',lease=0,failures=0,output_failures=0,retry_at=0,failed_at=0,last_error='',diagnostic=? WHERE id=?")
 				.run(JSON.stringify(diagnostic), run.source.id);
 			finishCall(this.db, run.source.id, run.attempt, 'done', Date.now(), '', diagnostic);
@@ -737,6 +782,7 @@ function isMemory(value: unknown): value is DurableMemory {
 		&& (m.suppressedHashes === undefined || (Array.isArray(m.suppressedHashes) && m.suppressedHashes.every((h) => typeof h === "string" && /^[a-f0-9]{24}$/u.test(h))))
 		&& typeof m.createdAt === "string" && typeof m.updatedAt === "string"
 		&& Number.isFinite(Date.parse(m.createdAt)) && Number.isFinite(Date.parse(m.updatedAt))
+		&& (m.reinforcedAt === undefined || (typeof m.reinforcedAt === "string" && Number.isFinite(Date.parse(m.reinforcedAt))))
 		&& Number.isInteger(m.revision) && m.revision > 0 && ["durable", "pinned"].includes(m.layer)
 		&& ["provisional", "confirmed", "forgotten", "conflicted"].includes(m.status);
 }

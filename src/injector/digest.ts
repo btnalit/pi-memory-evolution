@@ -16,7 +16,9 @@ export function buildRuntimeDigest(memories: readonly DurableMemory[], prompt: R
 		const text = excerpt(memory.content, prompt, 400);
 		const line = JSON.stringify({ id: label(memory.id), kind: memory.kind, status: memory.status,
 			origin: label(memory.scope), source: label(memory.evidence?.sourceId ?? memory.sourceEntryId), updated: memory.updatedAt.slice(0,10),
-			evidence: `${quality.basis}/${quality.method}`, aging: quality.freshness < 0.85,
+			// The freshness anchor, shown only when later evidence actually moved it past the edit date.
+			...(quality.confirmedAt.slice(0,10) > memory.updatedAt.slice(0,10) ? { confirmed: quality.confirmedAt.slice(0,10) } : {}),
+			evidence: `${quality.basis}/${quality.method}`, aging: quality.aging,
 			...(memory.feedback?.accuracy ? { assessment: memory.feedback.accuracy.verdict } : {}), text }) + "\n";
 		if (Buffer.byteLength(digest + line) <= MAX_BYTES) digest += line;
 	}

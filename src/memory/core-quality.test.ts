@@ -130,7 +130,9 @@ test("typed decay is gradual, bounded and does not erase stable knowledge", () =
 		const aged = memoryQuality(memory(kind, { kind, updatedAt: iso(3) }), now);
 		const ancient = memoryQuality(memory(kind, { kind, updatedAt: iso(3650) }), now);
 		assert.equal(fresh.freshness, 1); assert.ok(aged.freshness < fresh.freshness); assert.ok(ancient.freshness >= AGING[kind].floor);
-		assert.equal(ancient.expired, kind === "project_state");
+		// Every kind now goes dormant, at a horizon reasoned from how long that kind stays believable.
+		assert.equal(ancient.dormant, true);
+		assert.equal(memoryQuality(memory(kind, { kind, updatedAt: iso(AGING[kind].dormantDays - 1) }), now).dormant, false);
 	}
 	assert.ok(memoryQuality(memory("p", { kind: "preference", updatedAt: iso(3) }), now).freshness > memoryQuality(memory("s", { kind: "project_state", updatedAt: iso(3) }), now).freshness);
 	assert.equal(memoryQuality(memory("future", { updatedAt: iso(-5) }), now).freshness, 1);
@@ -138,7 +140,7 @@ test("typed decay is gradual, bounded and does not erase stable knowledge", () =
 
 test("pinning exempts age only, never invents evidence or rescues an unrelated memory", () => {
 	const old = memory("old", { kind: "project_state", updatedAt: iso(100), layer: "pinned" });
-	const quality = memoryQuality(old, now); assert.equal(quality.freshness, 1); assert.equal(quality.expired, false); assert.equal(quality.basis, "unknown");
+	const quality = memoryQuality(old, now); assert.equal(quality.freshness, 1); assert.equal(quality.dormant, false); assert.equal(quality.basis, "unknown");
 	assert.deepEqual(selectRelevantMemories([old], "Bluetooth audio", 3, now), []);
 });
 
@@ -312,5 +314,11 @@ test("digest exposes evidence limits and aging within the byte budget; diagnosti
 	const digest = buildRuntimeDigest(records, "Atlas database port", now)!;
 	assert.ok(Buffer.byteLength(digest) <= 2048); assert.match(digest, /not verification/); assert.match(digest, /unknown\/unknown/); assert.match(digest, /"aging":true/);
 	const stale = memory("stale", { kind: "project_state", updatedAt: iso(8) });
-	assert.equal(retrieveMemories([stale], "Atlas database", 3, now).diagnostics.exclusions![0].reason, "expired-project-state");
+	assert.equal(retrieveMemories([stale], "Atlas database", 3, now).diagnostics.exclusions![0].reason, "dormant");
+	// Dormancy is about being offered, not about existing: the record is still stored and still
+	// recallable on request, so a later source can revive or supersede it.
+	assert.equal(retrieveMemories([stale], "Atlas database", 3, now, { includeDormant: true }).selected.length, 1);
+	// Confirmation moves the freshness anchor without moving the edit date, and the digest says so.
+	const revived = buildRuntimeDigest([{ ...stale, reinforcedAt: iso(0) }], "Atlas database", now)!;
+	assert.match(revived, /"confirmed":/); assert.match(revived, /"aging":false/);
 });

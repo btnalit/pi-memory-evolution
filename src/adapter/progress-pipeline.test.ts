@@ -117,7 +117,7 @@ test('update nomination reaches project-name states without weakening ordinary p
  const resources=operationResources('bash','cd /work/atlas-memory-engine && npm test','/work');
  const result=nominateProgress([old],{scope:'/work',query:'继续',resources});
  assert.deepEqual(result.targets,['old']);assert.equal(result.diagnostics.candidates[0].reason,'explicit-project-name');
- assert.deepEqual(selectRelevantMemories([old],'/work/atlas-memory-engine',3,now,{includeExpiredProjectState:true}),[]);
+ assert.deepEqual(selectRelevantMemories([old],'/work/atlas-memory-engine',3,now,{includeDormant:true}),[]);
 });
 
 test('affected pending states outrank historical done notes without a per-path top-2 gate',()=>{

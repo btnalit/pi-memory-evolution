@@ -9,6 +9,8 @@ import { evolve, parseClaims } from './evolution.ts';
 import { MAX_CLAIM_CHARS, MIN_CLAIM_CHARS } from './extractor.ts';
 import { MAX_CANDIDATES, MAX_OUTPUT_TOKENS, RELATED_CONTAINMENT } from './limits.ts';
 import { features, mentions } from './search.ts';
+import { memoryQuality } from './quality.ts';
+import { retrieveMemories } from './retriever.ts';
 import type { CompleteMemory } from '../adapter/pi-api.ts';
 
 test('valid JSON claims; rejects extra actions, excessive output and unsupported kinds',()=>{
@@ -241,6 +243,112 @@ test('the cap bounds what is shown, and the host may only write through what was
 	assert.ok(!run.candidates.some(c=>c.id===oldest.id),'fixture: the oldest must lose the cap race');
 	assert.ok(!run.memories.some(m=>m.id===oldest.id),
 		'a record that was neither recent nor shown must not be writable: the model never saw it');
+}));
+
+// Time metadata with no human step. Two signals already flow through a learning call for free, so
+// neither costs a request: the model re-deriving content the origin already holds, and a record the
+// host measured this source to mention being left standing beside it. Neither is proof of truth;
+// both are enough to keep a record out of dormancy, which is the only thing they feed.
+// Deliberately a project_state, the one kind silence never confirms: if this record is confirmed,
+// it can only be because the model re-derived it, so the test isolates that signal instead of
+// passing on the strength of the other one.
+test('re-derived content confirms the record it duplicates, where silence never would',()=>using(async(store)=>{
+	const at=(i:number)=>new Date(Date.parse('2026-03-01T00:00:00.000Z')+i*86400_000).toISOString();
+	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:at(0),
+		content:'## Critical Context\n- The Atlas rollout runbook lives in docs.'});
+	const say=(text:string)=>async()=>({model:'fake/model',text:JSON.stringify({memories:[{kind:'project_state',content:text}]})});
+	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),say('[pending] The Atlas rollout is still running on port 9999.'));
+	const before=store.readMemories().find(m=>m.kind==='project_state')!;
+	assert.equal(before.reinforcedAt,undefined);
+
+	store.capture({id:'s2',scope:'/project',kind:'summary',createdAt:at(30),
+		content:'## Critical Context\n- The Atlas rollout is still running on port 9999.'});
+	// Counted after capture, so only what the learning call itself does is measured.
+	const count=store.readMemories().length, events=store.history().length;
+	await evolve(store,'s2',{} as ExtensionContext,AbortSignal.timeout(1000),say('[pending] The Atlas rollout is still running on port 9999.'));
+	const after=store.readMemories().find(m=>m.id===before.id)!;
+	assert.equal(after.reinforcedAt,at(30),'the record the model re-derived must be confirmed');
+	assert.equal(after.updatedAt,before.updatedAt,
+		'confirmation must not move updatedAt: it is the replacement authority gate');
+	assert.equal(after.revision,before.revision,'confirmation is not a revision');
+	assert.equal(store.readMemories().length,count,'re-derived content must not be stored twice');
+	assert.equal(store.history().length,events+1,'confirmation must not add an undo point of its own');
+}));
+
+test('confirmation moves the decay anchor but never the replacement authority gate',()=>using(async(store)=>{
+	const at=(i:number)=>new Date(Date.parse('2026-03-01T00:00:00.000Z')+i*86400_000).toISOString();
+	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:at(0),
+		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
+	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+		text:JSON.stringify({memories:[{kind:'fact',content:'The Atlas service listens on port 9999.'}]})}));
+	const target=store.readMemories().find(m=>m.content.includes('9999'))!;
+
+	// A later source mentions it and leaves it standing, so it is confirmed at day 30.
+	store.capture({id:'s2',scope:'/project',kind:'summary',createdAt:at(30),
+		content:'## Critical Context\n- The Atlas service listens on port 9999 and is healthy.'});
+	const shown=store.beginEvolution('s2')!;
+	assert.ok(shown.candidates.some(c=>c.id===target.id),'fixture: the record must be shown');
+	store.finishEvolution(shown,[],'fake/model');
+	assert.equal(store.readMemories().find(m=>m.id===target.id)!.reinforcedAt,at(30));
+
+	// A source queued BEFORE that confirmation must still be able to replace it. If confirmation had
+	// moved updatedAt, mayReplace would refuse this as already newer than its own evidence.
+	store.capture({id:'s3',scope:'/project',kind:'user',createdAt:at(10),
+		content:'The Atlas service listens on port 7777 now, not 9999.'});
+	const run=store.beginEvolution('s3')!;
+	store.finishEvolution(run,[{kind:'fact',content:'The Atlas service listens on port 7777.',replaces:target.id}],'fake/model');
+	assert.equal(store.readMemories().find(m=>m.id===target.id)!.status,'forgotten',
+		'a source older than the confirmation must still be able to supersede the record');
+}));
+
+test('a progress source confirms nothing, and no source confirms a project state by silence',()=>using(async(store)=>{
+	const at=(i:number)=>new Date(Date.parse('2026-03-01T00:00:00.000Z')+i*86400_000).toISOString();
+	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:at(0),
+		content:'## Critical Context\n- The Atlas migration runbook lives in docs.'});
+	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+		text:JSON.stringify({memories:[{kind:'project_state',content:'[pending] The Atlas migration is still running.'}]})}));
+	const state=store.readMemories().find(m=>m.kind==='project_state')!;
+
+	// Progress candidates are host-nominated targets, not records measured to be mentioned.
+	store.capture({id:'p1',scope:'/project',kind:'progress',targets:[state.id],content:'tool result',createdAt:at(30)});
+	const progress=store.beginEvolution('p1')!;
+	assert.ok(progress.candidates.some(c=>c.id===state.id),'fixture: the nominated target is its candidate');
+	store.finishEvolution(progress,[],'fake/model');
+	assert.equal(store.readMemories().find(m=>m.id===state.id)!.reinforcedAt,undefined,
+		'a nomination is not evidence the state still holds; confirming it would reset the seven-day cap');
+
+	// Nor does a summary that merely mentions it without contradicting it.
+	store.capture({id:'s2',scope:'/project',kind:'summary',createdAt:at(31),
+		content:'## Critical Context\n- The Atlas migration is still running and still pending.'});
+	const run=store.beginEvolution('s2')!;
+	assert.ok(run.candidates.some(c=>c.id===state.id),'fixture: the state must be shown');
+	store.finishEvolution(run,[],'fake/model');
+	assert.equal(store.readMemories().find(m=>m.id===state.id)!.reinforcedAt,undefined,
+		'project states go stale silently, so silence must never keep resetting their expiry');
+}));
+
+// Dormancy is the whole point of the time metadata, so it must never become silent deletion: a
+// dormant record stops being offered for injection but stays stored, stays recallable on request
+// and stays a learning candidate, which is the only channel through which anything can revive it.
+test('a dormant record is still a candidate, so later evidence can revive or retire it',()=>using(async(store)=>{
+	const ago=(d:number)=>new Date(Date.now()-d*86400_000).toISOString();
+	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:ago(300),
+		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
+	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+		text:JSON.stringify({memories:[{kind:'fact',content:'The Atlas service listens on port 9999.'}]})}));
+	const target=store.readMemories().find(m=>m.content.includes('9999'))!;
+	assert.equal(memoryQuality(target).dormant,true,'fixture: the record must be past its horizon');
+	assert.equal(retrieveMemories([target],'Atlas port',3).selected.length,0,'a dormant record is not offered');
+	assert.equal(retrieveMemories([target],'Atlas port',3,undefined,{includeDormant:true}).selected.length,1,
+		'but it is still there, and still recallable on request');
+
+	store.capture({id:'s2',scope:'/project',kind:'user',createdAt:new Date().toISOString(),
+		content:'The Atlas service listens on port 7777 now, not 9999.'});
+	const run=store.beginEvolution('s2')!;
+	assert.ok(run.candidates.some(c=>c.id===target.id),
+		'a dormant record must still be nameable, or dormancy is silent deletion and nothing can revive it');
+	store.finishEvolution(run,[{kind:'fact',content:'The Atlas service listens on port 7777.',replaces:target.id}],'fake/model');
+	assert.equal(store.readMemories().find(m=>m.id===target.id)!.status,'forgotten');
 }));
 
 // The reported failure, end to end: a weak model returns valid JSON but ignores the progress

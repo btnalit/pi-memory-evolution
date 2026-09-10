@@ -83,18 +83,38 @@ refresh is required. All times are numeric and negative ages clamp to zero.
 freshness = floor + (1 - floor) * 2 ** (-ageDays / halfLifeDays)
 ```
 
-| Kind | Half-life of the decaying portion | Floor | Hard recall expiry |
+| Kind | Half-life of the decaying portion | Floor | Dormant after |
 |---|---:|---:|---|
-| project_state | 3 days | 0.50 | after 7 days |
-| fact | 90 days | 0.75 | none |
-| decision | 180 days | 0.85 | none |
-| preference | 365 days | 0.95 | none |
+| project_state | 3 days | 0.50 | 7 days |
+| fact | 60 days | 0.50 | 180 days |
+| decision | 120 days | 0.60 | 365 days |
+| preference | 240 days | 0.70 | 730 days |
 
-Pinning sets freshness to 1 and exempts age expiry, but adds no credibility, cannot
-revive a conflict, and cannot bypass relevance. Facts/decisions/preferences never vanish
-just because they are old. The project-state cap remains unchanged so upgrading does not
-revive already expired project claims. This first step classifies by memory kind, not
-semantic subtypes such as completed/blocked tasks or volatile configuration facts.
+Age is not evidence of falsity, so time never deletes anything: only contradicting evidence
+does, through `replaces`. **Dormant means no longer offered, not gone.** A dormant record is
+still stored, still returned by an explicit recall that asks for it, and still shown to the
+model as a replacement candidate — which is the channel that revives it, with no human step.
+
+Decay and dormancy run from the last time a record was **confirmed**, not the last time it was
+edited. Two signals already present in a learning call supply that, so neither costs a request:
+the model re-deriving content this origin already holds, and a record the host measured the
+source to mention being left standing beside it. The second means *not disputed by evidence
+that mentioned it* — never *verified* — so it feeds the clock and nothing else, and it is not
+counted for `project_state`, whose states go stale silently, nor for `progress` sources, whose
+candidates are host-nominated rather than measured. Confirmation never moves `updatedAt`: that
+is the replacement authority gate, and moving it would make a refreshed record refuse a
+legitimately older queued source. A known residual: a weak model that fails to supersede a
+false record keeps its clock alive by leaving it standing. That is the existing supersession
+failure, not a new one.
+
+The floors used to be high because nothing could refresh a record, which left decay nearly
+inert — a preference could lose at most 5 percentage points in its entire life. Reinforcement
+is that missing mechanism, so the floors come down and freshness does real ranking work.
+
+Pinning sets freshness to 1 and exempts a record from dormancy, but adds no credibility, cannot
+revive a conflict, and cannot bypass relevance. The project-state horizon is unchanged, so
+upgrading does not revive already dormant project claims. This first step classifies by memory
+kind, not semantic subtypes such as completed/blocked tasks or volatile configuration facts.
 
 The existing lexical score and subject/literal/coverage/relative-cutoff gates run first.
 The 75% relative cutoff is based on **raw relevance**, not quality-adjusted scores.
