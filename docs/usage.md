@@ -112,7 +112,8 @@ rename the tool to hide the conflict; an old installation would still run its ho
   recently updated active memories from that source's capture origin **that the source
   actually mentions** — the host filters the rest out, so a source cannot replace a
   record it never talks about. The filter runs **before** the cap, so an older record the
-  source is squarely about is still shown rather than crowded out by newer ones. This is a
+  source is squarely about is no longer hidden behind newer unrelated ones; reach is still
+  bounded by the 32 most recent records that qualify. This is a
   conservative automatic-replacement safeguard, **not a recall restriction**.
   It defaults to **the current Pi session model and Pi's own provider/auth resolution**.
   With no session override, this is Pi's configured default. Quota/rate limits or repeated

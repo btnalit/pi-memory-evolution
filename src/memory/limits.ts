@@ -35,7 +35,7 @@ export const MAX_SEARCH_TERM_CHARS = 64;
  * source merely restates and lower for the one it contradicts — the changed value is exactly
  * the term that is missing — so ordering by it drops the record that most needs superseding.
  * IDF weighting makes that worse, not better: the missing term is the rare one. Qualifying
- * records therefore keep the original recency order, and the cap below only bounds the payload. */
+ * records therefore keep the original recency order, and the cap below takes the most recent. */
 export const RELATED_CONTAINMENT = 0.4;
 /** How many qualifying records may be sent. Applied AFTER the containment filter, never before:
  * capping by recency first meant a scope with more than 32 records could never show an older one

@@ -163,9 +163,22 @@ assert.ok(/existing: run\.candidates\.map\(/u.test(readFileSync('src/memory/evol
 	'the payload must be built from run.candidates, or the shown set stops matching the nameable set');
 // Containment ranks a restated record above the contradicted one, so sorting by it and cutting to a
 // small cap drops exactly the record that needed superseding. It filters; it must never order.
-assert.ok(!/mentions\([\s\S]{0,200}?\.sort\(/u.test(readFileSync('src/memory/memory-store.ts', 'utf8')),
-	'candidate selection must not sort by containment: it scores agreement above contradiction, so\n'
-	+ '    ranking by it drops the record the source actually changed. Filter only.');
+const RANKING = 'candidate selection must not sort by containment: it scores agreement above contradiction, so\n'
+	+ '    ranking by it drops the record the source actually changed. Filter only.';
+assert.ok(!/mentions\([\s\S]{0,200}?\.sort\(/u.test(readFileSync('src/memory/memory-store.ts', 'utf8')), RANKING);
+// The regex above only catches a sort inserted AFTER a mentions() call. Ranking is just as easily
+// written into the comparator itself, where mentions() comes second - that shape passed every gate
+// and every test until it was found in review. Check the selection structurally instead: one sort,
+// and that sort is recency.
+{
+	const store = readFileSync('src/memory/memory-store.ts', 'utf8');
+	const start = store.indexOf('private selectCandidates');
+	assert.ok(start > 0, 'selectCandidates must remain the single definition of what a source is shown');
+	const body = store.slice(start, store.indexOf('\n\t}', start));
+	assert.equal((body.match(/\.sort\(/gu) ?? []).length, 1, `${RANKING}\n    Candidate selection must contain exactly one sort.`);
+	assert.ok(/\.sort\(\(a,b\) => Date\.parse\(b\.updatedAt\)-Date\.parse\(a\.updatedAt\)\)/u.test(body),
+		`${RANKING}\n    The one sort must be exactly the recency comparator, with nothing else in it.`);
+}
 assert.ok(MAX_OUTPUT_BYTES >= MAX_CLAIMS * (MAX_CLAIM_BYTES + 1024),
 	'MAX_OUTPUT_BYTES must still admit the worst reply the claim and alias caps allow');
 assert.ok(MAX_OUTPUT_TOKENS === MAX_CLAIMS * MAX_CLAIM_CHARS, 'MAX_OUTPUT_TOKENS must stay derived from the claim contract');

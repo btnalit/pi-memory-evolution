@@ -323,10 +323,15 @@ export class MemoryStore {
 	 * a fact it does not talk about, and retrieval is the host's job — deterministic and free —
 	 * not something to pay a model to do by handing it every recent record to search through.
 	 *
-	 * `memories` is host-local only (duplicate detection, alias enrichment) and therefore uncapped;
-	 * only `candidates` is sent, so only `candidates` carries the payload bound. */
+	 * `memories` is NOT read-only: `finishEvolution` writes through it, replacing `searchTerms`
+	 * wholesale on an exact-content match and refreshing a duplicate's evidence. Those writes were
+	 * always bounded by the recency window, and must stay bounded, or model output would rewrite
+	 * records the model was never shown — losing aliases it could not have preserved and resetting
+	 * the aging clock on records it never named. So `memories` is the recency window plus whatever
+	 * was actually shown, and nothing else: `candidates` stays a subset, and every record the host
+	 * may write through is one that was either recent or in front of the model. */
 	private selectCandidates(source: Source): { memories: DurableMemory[]; candidates: DurableMemory[] } {
-		const memories = this.readMemories(source.scope).filter((m) => m.scope === source.scope && active(m)
+		const scoped = this.readMemories(source.scope).filter((m) => m.scope === source.scope && active(m)
 			&& (source.kind !== "progress" || (m.kind === "project_state" && source.targets!.includes(m.id))))
 			.sort((a,b) => Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
 		// Order is left alone deliberately. Containment filters; it must never rank. See limits.ts.
@@ -334,9 +339,12 @@ export class MemoryStore {
 		// past the 32 most recent, so in any scope with more than 32 records an older one could never
 		// be shown again, and therefore never superseded — only accumulated alongside.
 		const vocabulary = source.kind === "progress" ? undefined : features(source.content);
-		const candidates = (vocabulary === undefined ? memories
-			: memories.filter((m) => mentions(vocabulary, m.content, m.searchTerms) >= RELATED_CONTAINMENT)).slice(0, MAX_CANDIDATES);
-		return { memories, candidates };
+		const candidates = (vocabulary === undefined ? scoped
+			: scoped.filter((m) => mentions(vocabulary, m.content, m.searchTerms) >= RELATED_CONTAINMENT)).slice(0, MAX_CANDIDATES);
+		const recent = scoped.slice(0, MAX_CANDIDATES);
+		const known = new Set(recent.map((m) => m.id));
+		// Older shown records follow the recency window in age order, so this stays recency-ordered.
+		return { memories: [...recent, ...candidates.filter((m) => !known.has(m.id))], candidates };
 	}
 
 	beginEvolution(id: string, retry: RetryMode = false, timeoutMs = EVOLUTION_TIMEOUT_MS, now = Date.now(), model?: string, call?: CallOptions): EvolutionRun | undefined {
@@ -349,13 +357,18 @@ export class MemoryStore {
 			this.db.prepare('UPDATE sources SET last_checked=? WHERE id=?').run(now, id);
 			const priorModels = parseModels(row.call_models);
 			const correctOutput = Number(row.corrections) === 0 && Number(row.output_failures) === 1 && ['invalid_output','output_limit'].includes(String(row.last_error));
+			const source = parseSource(row.data);
+			// Selecting candidates scans the whole scope; this transaction holds the write lock, so it is
+			// computed at most once per attempt and only once a route is actually available. The estimate
+			// and the run must see the same set anyway — a cheaper estimate authorizes a larger payload.
+			let selected: { memories: DurableMemory[]; candidates: DurableMemory[] } | undefined;
+			const select = () => (selected ??= this.selectCandidates(source));
 			if (model !== undefined) {
 				model = modelLabel(model);
 				if (retry !== true && !priorModels.includes(model) && priorModels.length >= this.policy.sourceModels) return undefined;
 				const provider = modelLabel(call?.provider ?? model.split('/')[0]);
 				if (retry !== true && routeUntil(this.db, model, provider, now) > now) return undefined;
-				const source = parseSource(row.data);
-				const bytes = Buffer.byteLength(JSON.stringify(source)) + this.selectCandidates(source).candidates
+				const bytes = Buffer.byteLength(JSON.stringify(source)) + select().candidates
 					.reduce((sum,m) => sum + Buffer.byteLength(JSON.stringify(m)), 0);
 				const reserve = estimatedCost(bytes, call);
 				if (budgetUntil(this.db, model, now, this.policy, reserve) > now) return undefined;
@@ -364,9 +377,8 @@ export class MemoryStore {
 			}
 			timeoutMs = Math.min(timeoutMs, this.policy.timeoutMs, retry === true ? timeoutMs : Math.max(1, this.policy.sourceTimeMs - Number(row.call_ms)));
 			this.db.prepare(`UPDATE sources SET state='running', attempt=attempt+1, lease=? WHERE id=?`).run(now + timeoutMs + LEASE_GRACE_MS, id);
-			const source = parseSource(row.data);
 			if (source.id !== id) throw new Error("Invalid source identity");
-			const { memories, candidates } = this.selectCandidates(source);
+			const { memories, candidates } = select();
 			// The stored diagnostic explains the last completed outcome. Claiming an attempt must not erase it:
 			// a cancelled or interrupted run would otherwise leave a paused source with no recorded reason.
 			return { source, attempt: Number(row.attempt) + 1, generation: this.generation(source.scope), memories, candidates, timeoutMs, correctOutput,
