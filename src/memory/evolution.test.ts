@@ -185,3 +185,19 @@ test('a refusal on the store\'s own authority still stops the source',()=>using(
 	assert.match(store.status(),/paused=1/);
 	assert.equal(store.readMemories().find(m=>m.id===pinned.id)!.layer,'pinned');
 }));
+
+// The store's last barrier: the model's own output still redacts to a placeholder, meaning it
+// echoed something credential-shaped that the source-side redaction missed. Making this correctable
+// would resend the same unredacted source to another call and — invalid_output being
+// sibling-eligible — to another provider. One exposure and a stop is the cheaper outcome.
+test('model output that redacts to a placeholder stops the source instead of being retried',()=>using(async(store)=>{
+	let calls=0;
+	await assert.rejects(evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>{calls++;
+		return {model:'test',text:'{"memories":[{"kind":"fact","content":"Database password: hunter2 is stored in the vault."}]}'};}),
+		(error:{code?:string})=>error.code==='write_rejected');
+	assert.equal(calls,1,'the source must not be sent to the model again');
+	assert.match(store.status(),/paused=1/);
+	assert.ok(!store.readMemories().some(m=>m.content.includes('hunter2')));
+	// Nothing about the masked content may reach the persisted diagnostic either.
+	assert.ok(!store.status().includes('hunter2'));
+}));

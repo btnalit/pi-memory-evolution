@@ -7,7 +7,7 @@ export const DIAGNOSTIC_REASONS = ['empty_text', 'missing_final', 'ambiguous_fin
  // Output-contract violations the store finds, not the parser. They name the rule the model broke
  // so a correction can say which one, instead of repeating the whole schema back at it.
  'progress_contract', 'unknown_replaces', 'duplicate_replaces', 'replaces_kind', 'cyclic_replaces',
- 'invalid_aliases', 'unstorable_claim',
+ 'invalid_aliases',
  'http_error', 'abnormal_stop', 'request_failed', 'legacy_import_failed'] as const;
 export type DiagnosticReason = typeof DIAGNOSTIC_REASONS[number];
 /** Structural metadata only. Never add output snippets, arbitrary keys, headers or exception messages. */

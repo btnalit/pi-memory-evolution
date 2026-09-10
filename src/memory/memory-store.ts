@@ -382,13 +382,12 @@ export class MemoryStore {
 			const stage = (memory: DurableMemory) => {
 				if (![...after.values()].some((m) => active(m) && fingerprint(m.content) === fingerprint(memory.content))) after.set(memory.id, memory);
 			};
-			// A claim the store cannot hold — wrong kind or length, or content that redacted to a
-			// placeholder because the model echoed a credential — is bad output, not a refused write.
-			// The raw reason is never surfaced: it would carry the very content that was masked.
-			const modelClaim = (claim: Claim, index: number) => {
-				try { return this.claim(run.source, claim, "model"); }
-				catch { return broke('unstorable_claim', index, 'content'); }
-			};
+			// `claim()` below throws when the model's own output still redacts to a placeholder, meaning
+			// it echoed something credential-shaped that the source-side redaction did not catch. Do NOT
+			// wrap that in a correctable error: retrying resends the same unredacted source to another
+			// call and, since invalid_output is sibling-eligible, to another provider. One exposure then
+			// a stop is the cheap outcome; re-sending a secret to a second vendor is not. It stays a bare
+			// Error, and therefore write_rejected, deliberately.
 			const annotate = (memory: DurableMemory | undefined, claim: Claim) => {
 				if (!memory || !claim.searchTerms || memory.layer === "pinned") return;
 				const current = after.get(memory.id) ?? memory;
@@ -417,7 +416,7 @@ export class MemoryStore {
 							updatedAt: run.source.createdAt, evidence: incoming, status: "provisional", revision: old.revision + 1 });
 						annotate(old, claim); continue;
 					}
-					const next = modelClaim(claim, index);
+					const next = this.claim(run.source, claim, "model");
 					// Local extraction may already have added the replacement from this source.
 					const existing = run.memories.find((m) => m.id !== old.id && m.kind === claim.kind && fingerprint(m.content) === fingerprint(claim.content));
 					if ((!next && !existing) || (existing && !active(after.get(existing.id) ?? existing))) continue;
@@ -443,7 +442,7 @@ export class MemoryStore {
 						annotate(existing, claim);
 					} else annotate(existing, claim);
 				} else {
-					const next = modelClaim(claim, index);
+					const next = this.claim(run.source, claim, "model");
 					if (next) stage(next);
 					else annotate(run.memories.find((m) => m.kind === claim.kind && fingerprint(m.content) === fingerprint(claim.content)), claim);
 				}
