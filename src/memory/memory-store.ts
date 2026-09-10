@@ -510,8 +510,11 @@ export class MemoryStore {
 			// beside fresh evidence about the same terms and did not contradict it. That is "not disputed
 			// by evidence that mentioned it", not "verified" - enough to keep a record out of dormancy,
 			// never enough to raise its authority, so it feeds `reinforcedAt` only.
-			// Progress sources are excluded: their candidates are host-nominated targets, not records the
-			// source was measured to be about, so every progress source would refresh all of them.
+			// Progress sources are excluded because their candidates are host-nominated targets, not
+			// records measured to be mentioned. Today that guard is subsumed by the project_state rule
+			// below - `selectCandidates` only ever nominates project_state for a progress source - so it
+			// has no test of its own. It stays because the two rules answer different questions, and
+			// dropping it would make project_state's rule silently load-bearing for both.
 			// project_state is excluded for the same reason - states go stale silently, and silence is far
 			// too weak to keep resetting the one seven-day safety cap that actually does work.
 			if (run.source.kind !== "progress") for (const shown of run.candidates)
@@ -701,10 +704,18 @@ export class MemoryStore {
 			if (!row) throw new Error("Unknown event id");
 			const event = parseEvent(row.data, id, row.scope);
 			if (!event.after.length) throw new Error("Event has no memory changes");
+			// `reinforcedAt` is deliberately outside this comparison. Confirmation writes no event, so an
+			// event's snapshot can never carry a stamp written after it; comparing it would make every
+			// confirmed record permanently un-undoable. It is also not part of what an undo restores -
+			// there is nothing to undo about having been mentioned - so the current stamp is carried
+			// forward onto the restored record rather than reverted with it.
+			const settled = (memory: DurableMemory | undefined) => memory && JSON.stringify({ ...memory, reinforcedAt: undefined });
 			const restored = event.after.map((after, i) => {
-				if (JSON.stringify(this.get(after.id)) !== JSON.stringify(after)) throw new Error("Memory changed since this event; undo refused");
+				const current = this.get(after.id);
+				if (settled(current) !== settled(after)) throw new Error("Memory changed since this event; undo refused");
 				this.block(after);
 				return { ...(event.before[i] ?? { ...after, status: "forgotten" as const }), revision: after.revision + 1,
+					...(current?.reinforcedAt ? { reinforcedAt: current.reinforcedAt } : {}),
 					suppressedHashes: [...new Set([...(event.before[i]?.suppressedHashes ?? []), ...(after.suppressedHashes ?? []), fingerprint(after.content)])] };
 			});
 			return this.record("manual", `Undo ${id}`, restored, event.scope);

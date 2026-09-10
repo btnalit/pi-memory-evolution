@@ -121,7 +121,11 @@ with separate half-lives/floors and pin exemption. Decay and dormancy run from t
 confirmation rather than the last edit; `updatedAt`, the replacement authority gate, never moves
 for a confirmation.
 Pin/unpin, legacy annotation, explicit feedback and conflict resolution preserve the evidence
-date, and undo restores the prior date. Event history separately records when an operation occurred.
+date, and undo restores the prior date. Undo also ignores the confirmation stamp when deciding
+whether a record changed, and carries it forward rather than reverting it: confirmation writes no
+event, so an event snapshot can never carry a later stamp, and comparing it would make every
+confirmed record permanently un-undoable. Event history separately records when an operation
+occurred.
 
 See [core-quality.md](core-quality.md) for the evidence contract, exact ranking policy,
 weaker-replacement guard, replay-safe feedback and read-only mid-task `memory_recall` tool.

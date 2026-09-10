@@ -351,6 +351,32 @@ test('a dormant record is still a candidate, so later evidence can revive or ret
 	assert.equal(store.readMemories().find(m=>m.id===target.id)!.status,'forgotten');
 }));
 
+// Confirmation writes no event, so an event's snapshot can never carry a stamp written after it.
+// `undo` compares snapshots exactly, so unless it ignores the stamp, confirming a record makes the
+// last event that wrote it permanently un-undoable - and the model's own alias rewrite, which IS an
+// undoable change, would be stuck. Both happen in the same call below.
+test('confirmation never costs the ability to undo the change it accompanied',()=>using(async(store)=>{
+	const at=(i:number)=>new Date(Date.parse('2026-04-01T00:00:00.000Z')+i*86400_000).toISOString();
+	const reply=(searchTerms?:string[])=>async()=>({model:'fake/model',text:JSON.stringify({memories:[
+		{kind:'fact',content:'The Atlas service listens on port 9999.',...(searchTerms?{searchTerms}:{})}]})});
+	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:at(0),
+		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
+	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),reply());
+	const target=store.readMemories().find(m=>m.content.includes('9999'))!;
+
+	store.capture({id:'s2',scope:'/project',kind:'summary',createdAt:at(30),
+		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
+	await evolve(store,'s2',{} as ExtensionContext,AbortSignal.timeout(1000),reply(['atlas','port']));
+	const annotated=store.readMemories().find(m=>m.id===target.id)!;
+	assert.deepEqual(annotated.searchTerms,['atlas','port'],'fixture: the aliases must have been written');
+	assert.equal(annotated.reinforcedAt,at(30),'fixture: and the record confirmed in the same call');
+
+	store.undo(store.history()[0]!.id);
+	const undone=store.readMemories().find(m=>m.id===target.id)!;
+	assert.equal(undone.searchTerms,undefined,'the alias rewrite must still be undoable after confirmation');
+	assert.equal(undone.reinforcedAt,at(30),'but the stamp survives: there is nothing to undo about having been mentioned');
+}));
+
 // The reported failure, end to end: a weak model returns valid JSON but ignores the progress
 // contract. That used to throw a bare Error, land on write_rejected, and stop the source for good
 // without ever telling the model what it broke — one formatting mistake destroyed a source.

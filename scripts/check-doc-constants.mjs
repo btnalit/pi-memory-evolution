@@ -218,6 +218,22 @@ assert.ok(MAX_SEARCH_TERM_CHARS > MIN_SEARCH_TERM_CHARS && MAX_CLAIM_CHARS > MIN
 		+ '    status, so it must not create an undo point or an event snapshot per mentioned record.');
 }
 
+// Dormancy is documented four times as "still recallable on request". That is only true while the
+// explicit surfaces actually ask for dormant records: `includeDormant` has a default of false, so
+// forgetting it turns dormancy into silent deletion for anyone trying to find their own record.
+{
+	const index = readFileSync('src/index.ts', 'utf8');
+	const asked = (index.match(/includeDormant: true/gu) ?? []).length;
+	assert.ok(asked >= 2,
+		'the explicit recall surfaces (the memory_recall tool and `/memory search`) must pass\n'
+		+ `    includeDormant: true, or dormancy silently deletes records from search; found ${asked}.`);
+	const start = index.indexOf('before_agent_start');
+	const injection = index.slice(start, index.indexOf('buildRuntimeDigest', start));
+	assert.ok(start > 0 && !/includeDormant/u.test(injection),
+		'automatic injection must NOT include dormant records: not being pushed unprompted is the\n'
+		+ '    entire meaning of dormancy.');
+}
+
 if (failures.length) {
 	console.error(`FAIL: ${failures.length} documented constant(s) disagree with the code:\n\n` + failures.join('\n\n') + '\n');
 	process.exit(1);

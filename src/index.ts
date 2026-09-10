@@ -195,7 +195,9 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 			if (lifetime.signal.aborted || signal?.aborted) throw new Error("Memory recall cancelled");
 			try {
 				const query = resolveRecallQuery(redact(params.query));
-				const result = retrieveMemories(query.query ? getStore().readMemories() : [], query);
+				// Asked for explicitly, so dormancy does not apply: it governs what is pushed into a session
+				// unprompted, not what can be found. Dormant records come back marked `aging`.
+				const result = retrieveMemories(query.query ? getStore().readMemories() : [], query, 3, Date.now(), { includeDormant: true });
 				const text = buildRuntimeDigest(result.selected, query) ?? "No matching recallable memory. This is not proof the subject was never stored; try a specific subject or known alias, not arbitrary recent records.";
 				return { content: [{ type: "text" as const, text }], details: { matches: text.split('\n').filter(line => line.startsWith('{')).length } };
 			} catch { throw new Error("Memory recall failed; inspect /memory status. No memory update was performed."); }
@@ -249,7 +251,9 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 						: operation === "list" && id === "here" ? scope : undefined);
 					let pageInfo = "";
 					if (operation === "show") memories = memories.filter((m) => m.id === id);
-					else if (operation === "search") memories = selectRelevantMemories(memories, recallQuery([id, value].filter(Boolean).join(" ")), 10);
+					// An explicit search must find what is stored, including dormant records: dormancy stops a
+					// record being offered unprompted, and must never make it unfindable for someone looking.
+					else if (operation === "search") memories = selectRelevantMemories(memories, recallQuery([id, value].filter(Boolean).join(" ")), 10, Date.now(), { includeDormant: true });
 					else {
 						const filtered = id === "all" || id === "legacy" || id === "here";
 						const pageText = (filtered ? value : id) || "1";
