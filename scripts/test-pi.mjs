@@ -166,6 +166,11 @@ try {
 	assert.match(await ask('继续'), /7777/, 'chained followups must retain the subject and focus');
 	assert.equal(await ask('What do you remember about narwhals?'), '');
 	assert.equal(await ask('继续'), '', 'an unknown subject must not fall back to the previous matched topic');
+	// The way work is actually asked for: a task, not a question aimed at the memory. Relevance used to
+	// be the share of the prompt one record explained, so describing the task at all sank every record
+	// below the floor and a real session never saw an injection.
+	assert.match(await ask('Please wire up the new reporting job: it opens a database connection to the staging service, retries on failure, and logs which port it used.'),
+		/7777/, 'an ordinary task prompt must recall the record it engages, not only a short question');
 	send({ type: 'prompt', message: '/memory explain' });
 	await waitFor(() => output.includes('Last automatic recall snapshot'), "/memory explain output containing 'Last automatic recall snapshot'");
 	assert.equal(await ask('Kubernetes networking'), '');
@@ -176,7 +181,7 @@ try {
 	await waitFor(() => store.readMemories().every((m) => m.status === 'forgotten'), '/memory forget to retire all memories');
 	assert.equal(await ask('What is the database port?'), '');
 	assert.equal(requests.filter((r) => r.semantic).length, 2);
-	assert.equal(requests.filter((r) => !r.semantic).length, 16);
+	assert.equal(requests.filter((r) => !r.semantic).length, 17);
 
 	// Real local Git commit + intentionally failed push, not an assistant-only success claim.
 	execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'init', '-b', 'main'], { cwd: projectB, env: { ...fixtureEnv, HOME: dir }, stdio: 'pipe' });
@@ -191,7 +196,7 @@ try {
 	assert.match(progressDigest, /commit created; push pending/);
 	assert.ok(!progressDigest.includes('are not committed'));
 	assert.equal(requests.filter((r) => r.semantic).length, 3);
-	assert.equal(requests.filter((r) => !r.semantic).length, 19);
+	assert.equal(requests.filter((r) => !r.semantic).length, 20);
 	store.capture({ id: 'facet-fixture', scope: '/synthetic-other-origin', kind: 'summary', content: '## Critical Context\n- SQLite 数据库认证使用本地凭据。\n- SQLite 数据库超时是 10 秒。\n- PostgreSQL 数据库认证使用独立账户。', createdAt: new Date().toISOString() });
 	store.finishEvolution(store.beginEvolution('facet-fixture'), [], 'fixture-seed');
 	await ask('SQLite 数据库');

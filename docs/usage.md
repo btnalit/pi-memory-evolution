@@ -89,7 +89,11 @@ rename the tool to hide the conflict; an old installation would still run its ho
   facts, preferences, decisions or project-state claims using recognizable headings.
 - Explicit user statements containing cues such as `remember`, `prefer`, `记住`,
   `偏好`, `纠正`, `不对`, `以后`, or `不要` also trigger learning, without waiting for
-  another compaction. Natural declarations such as `我比较在意的三大功能…`,
+  another compaction. The English counterparts of `以后`/`不要` count the same way:
+  `from now on`, `going forward`, `in future`, and a sentence-*initial* `always`,
+  `never`, `don't` or `do not`. The anchor is what separates a standing rule from a
+  question about one — `Always run the tests.` states a rule, `Do you always run the
+  tests?` stays a question and is not learned. Natural declarations such as `我比较在意的三大功能…`,
   `我们的核心需求是…` or `Our priorities are…` also trigger learning, even if followed
   by a question asking for feedback. This is bounded intent recognition, not universal
   understanding. Quotes, ordinary recall questions and one-off commands are not requirements.
@@ -171,7 +175,12 @@ rename the tool to hide the conflict; an old installation would still run its ho
   does not immediately lose its subject. Bounds and compaction still limit recall.
   A fresh session saying only `继续` injects nothing; naming a topic enables cross-session
   recall regardless of its original directory.
-- Query coverage, evidence-based document frequency, field weights, mild length
+- Recall works from an ordinary task prompt, not only from a question aimed at the memory:
+  a record qualifies either when it accounts for enough of what was asked **or** when the
+  prompt engages enough of that record's own wording. The second measure does not shrink as
+  the request gets longer, so describing a task in full no longer suppresses the background
+  it is about. A prompt that engages nothing stored still injects nothing.
+- Query coverage, subject coverage, evidence-based document frequency, field weights, mild length
   normalization and a relative cutoff reject weak secondary matches. Unseen query words
   no longer receive the highest rarity weight. Exact paths must match, including case; `/srv/Atlas` and `/srv/atlas` are distinct. A quoted
   question in a replay/incident note is weaker than evidence answering it. Redundancy
@@ -340,7 +349,8 @@ lists/search or 8,000 bytes in `show`, with an ellipsis when truncated.
 Commands that take exact IDs can address records outside the current cwd. `search` and
 `explain <query>` use only their explicit query, whereas automatic recall can resolve
 follow-ups from recent user context. `explain` without arguments shows the last automatic
-snapshot: normalized focus/context features, eligible/excluded counts, scores, coverage,
+snapshot: normalized focus/context features, eligible/excluded counts, scores, query and
+subject coverage,
 up to 10 candidate IDs and rejection/selection reasons, plus actual injected count/bytes.
 It retains at most 8,000 bytes (+ truncation marker) in memory, not a database/session log;
 no memory bodies or provider errors are included. It resets on reload and is not proof

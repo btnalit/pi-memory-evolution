@@ -72,7 +72,18 @@ a replay note repeating a user's question is not evidence of its answer. Other q
 facts remain ordinary evidence. Concept words in origins are excluded. Source IDs, legacy
 labels and cwd have no authority bonus.
 
-Current-focus coverage must be >=45%; at least 3 focus features still require 2 matches.
+A record must clear one of two relevance floors, because the two describe different asks.
+Current-focus coverage — the share of what was just asked that this record accounts for — must
+be **>=0.45**; that is the right measure for a recall question, where the prompt *is* the subject.
+Alternatively, subject coverage — the share of **this record's own** vocabulary, or of its
+aliases, that the prompt engages — must be **>=0.25**. That is the measure a task prompt needs:
+query coverage is a fraction of everything said, so describing a task in two sentences rather than
+three words divides a relevant record's score by the length of the description, and automatic
+injection effectively only worked for short questions. Subject coverage is unaffected by whatever
+else the prompt says. Origin identifiers are excluded from it: a directory name is capture context,
+not part of the claim. Neither floor is the no-filler safeguard by itself — the gates below run
+first and are unchanged, and the relative cutoff, three-claim limit and digest byte cap run after.
+At least 3 focus features still require 2 matches.
 A single match cannot qualify alongside unknown non-attribute words. All explicit literal
 constraints must match, including qualified paths rather than only shared basenames.
 Supporting context contributes at 0.35 weight and cannot replace current-focus evidence.

@@ -1,7 +1,8 @@
 import type { DurableMemory } from "./memory-store.ts";
 import { clipBytes, fingerprint, redact } from "./privacy.ts";
-import { features, featureOffset } from "./search.ts";
+import { containment, features, featureOffset } from "./search.ts";
 import { memoryQuality } from "./quality.ts";
+import { MIN_FOCUS_COVERAGE, MIN_SUBJECT_COVERAGE } from "./limits.ts";
 import { FACETS, queryFeatures, resolveRecallQuery, type RecallInput } from "./query.ts";
 export { recallQuery, resolveRecallQuery } from "./query.ts";
 
@@ -13,7 +14,7 @@ function overlap(text: string, query: Set<string>): number {
 /** Relevance scores are NOT confidence/truth scores. No authority bonus for cwd,
  * legacy labels, source IDs or dates. Metadata can only help an explicit origin query. */
 type RecallOptions = { includeDormant?: boolean };
-type RankedMemory = { memory: DurableMemory; score: number; rankScore: number; quality: ReturnType<typeof memoryQuality>; coverage: number; matches: string[]; reason?: string };
+type RankedMemory = { memory: DurableMemory; score: number; rankScore: number; quality: ReturnType<typeof memoryQuality>; coverage: number; subject: number; matches: string[]; reason?: string };
 export interface RecallDiagnostics {
 	mode: string;
 	query: string[];
@@ -22,7 +23,7 @@ export interface RecallDiagnostics {
 	excluded: number;
 	matched: number;
 	selected: string[];
-	candidates: { id: string; score: number; rankScore: number; quality: ReturnType<typeof memoryQuality>; coverage: number; matches: string[]; reason: string }[];
+	candidates: { id: string; score: number; rankScore: number; quality: ReturnType<typeof memoryQuality>; coverage: number; subject: number; matches: string[]; reason: string }[];
 	exclusions?: { id: string; reason: string }[];
 }
 
@@ -74,6 +75,12 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 	const directNames = [...query].filter(word => !word.startsWith('concept:') && !word.startsWith('literal:') && !/^\d/u.test(word) && !FACETS.has(word));
 	const directFacets = [...query].filter(word => FACETS.has(word) && !['concept:status', 'concept:progress', 'error', '错误'].includes(word));
 	const focusedDirect = !context.size && query.size <= 4 && directNames.length === 1 && directFacets.length > 0;
+	// The subject side of relevance: how much of THIS record the prompt engages, rather than how
+	// much of the prompt this record accounts for. Origin identifiers are excluded — a directory
+	// name is capture context, not part of the claim — and aliases are scored separately and the
+	// better one wins, exactly as `mentions()` does at capture time, so a record with many aliases
+	// cannot be pushed below a bar it would otherwise clear.
+	const topic = new Set([...query, ...context]);
 	const evaluated: RankedMemory[] = documents.map(({ memory, body, mentions, aliases, origin }) => {
 		let score = 0, covered = 0, focusMatches = 0, evidenceMatches = 0;
 		const matches: string[] = [];
@@ -92,6 +99,7 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 		// long claims or letting brevity overcome a missing subject/constraint.
 		score *= 0.8 + 0.2 * Math.min(1, 12 / Math.max(1, body.size));
 		const coverage = covered / total;
+		const subject = Math.max(containment(topic, body), containment(topic, aliases));
 		const reason = literals.some(word => !matches.includes(word)) ? 'resource-mismatch'
 			: !focusMatches ? 'no-focus-match'
 			: !evidenceMatches ? 'question-only'
@@ -99,11 +107,14 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 				|| directFacets.some(word => !body.has(word) && !aliases.has(word))) ? 'subject-attribute-mismatch'
 			: (namedSubjects.length ? namedSubjects.some(word => !matches.includes(word))
 				: subjects.length && subjects.filter(word => matches.includes(word)).reduce((sum, word) => sum + weights.get(word)!, 0) / subjectWeight < 0.6) ? 'context-mismatch'
-			: coverage < 0.45 ? 'low-coverage'
+			// Either side may carry a record: the prompt is mostly about it, or it is mostly about
+			// the prompt. Requiring the query side alone made injection fail precisely as a user
+			// said more, which is the normal shape of a task prompt. See limits.ts.
+			: coverage < MIN_FOCUS_COVERAGE && subject < MIN_SUBJECT_COVERAGE ? 'low-coverage'
 			: (query.size >= 3 && focusMatches < 2) || (focusMatches === 1 && [...query].some(word => unknown.has(word) && !FACETS.has(word))) ? 'thin-match'
 			: undefined;
 		const quality = qualities.get(memory.id)!;
-		return { memory, score, rankScore: score * quality.factor, quality, coverage, matches, reason };
+		return { memory, score, rankScore: score * quality.factor, quality, coverage, subject, matches, reason };
 	});
 	const best = evaluated.reduce((best, r) => !r.reason ? Math.max(best, r.score) : best, 0);
 	// Quality only orders already-relevant evidence. It cannot rescue weak matches.
@@ -114,7 +125,8 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 	diagnostics.matched = ranked.length;
 	diagnostics.candidates = evaluated.filter(r => r.score > 0).slice(0, 10).map(r => ({ id: clipBytes(redact(r.memory.id), 120),
 		score: Number(r.score.toFixed(3)), rankScore: Number(r.rankScore.toFixed(3)), quality: r.quality,
-		coverage: Number(r.coverage.toFixed(3)), matches: r.matches.slice(0, 16), reason: r.reason ?? 'eligible' }));
+		coverage: Number(r.coverage.toFixed(3)), subject: Number(r.subject.toFixed(3)),
+		matches: r.matches.slice(0, 16), reason: r.reason ?? 'eligible' }));
 	return { ranked, diagnostics };
 }
 

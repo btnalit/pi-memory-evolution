@@ -72,3 +72,31 @@ export function answerCeiling(modelMaxTokens: unknown): number | undefined {
 // Worst legal reply on the wire (~56.8 KB: MAX_CLAIMS x (MAX_CLAIM_BYTES + the 1024-byte alias
 // budget) plus punctuation), rounded up so pretty-printed but legal output is not rejected.
 export const MAX_OUTPUT_BYTES = 64_000;
+
+/**
+ * What makes a stored claim relevant enough to be injected unprompted. A record qualifies on
+ * EITHER floor, because the two measure different asks and only one of them can answer each.
+ *
+ * `MIN_FOCUS_COVERAGE` is query-side: the share of the current focus this record accounts for.
+ * It is the right question for a recall question ("what is the database port?"), where the whole
+ * prompt IS the subject. It is the wrong question for a task prompt, and wrong in a way that gets
+ * worse the more the user says: coverage is a fraction of everything asked, so describing the task
+ * in two sentences instead of three words divides a relevant record's score by the length of the
+ * description. Measured against a realistic store, a 13-word task naming a stored preference by
+ * name scored 0.41 and a 57-word one 0.14 — both rejected, while "install dependencies" passed.
+ * That is the whole reason automatic injection looked dead outside short questions.
+ *
+ * `MIN_SUBJECT_COVERAGE` is the memory-side counterpart, the same asymmetric containment the store
+ * already uses to pick replacement candidates (`RELATED_CONTAINMENT`): the share of THIS record's
+ * own vocabulary the prompt engages. It is invariant to everything else the prompt says, so the
+ * same record scores 0.25 against both of those prompts. It is lower than the candidate threshold
+ * because a recall prompt is a sentence, not a whole conversation turn, so it can restate far less
+ * of a claim before the claim stops being what is being talked about.
+ *
+ * Neither floor is the no-filler safeguard on its own. The literal, focus, question-only,
+ * subject-attribute, context and thin-match gates run FIRST and are unchanged; the relative cutoff,
+ * the three-claim limit and the digest byte cap run after. These two only decide whether a record
+ * is about the ask at all.
+ */
+export const MIN_FOCUS_COVERAGE = 0.45;
+export const MIN_SUBJECT_COVERAGE = 0.25;

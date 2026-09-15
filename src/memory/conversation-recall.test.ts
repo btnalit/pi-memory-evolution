@@ -148,3 +148,50 @@ test('lifecycle gates and digest trust/size limits survive conversational matchi
  assert.match(digest, /other-origin/);
 });
 
+
+// A task prompt is the normal way a coding session starts, and it is longer than a recall question
+// by nature. Relevance was measured only as the share of the prompt a record accounted for, so the
+// same record that matched "install dependencies" stopped matching once the same request was
+// written as a sentence. Nothing here is newly stored; it is what was already stored being offered.
+const project = [
+ memory('deps', 'The user prefers pnpm over npm for installing dependencies in all projects.', { kind: 'preference', searchTerms: ['pnpm', 'npm', 'package manager'] }),
+ memory('billing', 'We decided to use Postgres instead of MySQL for the billing service.', { kind: 'decision', searchTerms: ['postgres', 'mysql', 'billing'] }),
+ memory('staging', 'The staging database listens on port 7777 and requires TLS.', { searchTerms: ['database', 'port', 'staging'] }),
+ memory('style', 'The user wants concise answers with no filler and code that matches the surrounding style.', { kind: 'preference', searchTerms: ['concise', 'style'] }),
+];
+const task = 'I want to add a new endpoint to the API server for exporting invoices as CSV. It should stream the\n'
+ + 'response so large exports do not blow up memory, and it needs to respect the existing authentication\n'
+ + 'middleware. Please also add tests. Before you start, install the dependencies in this repo so the test\n'
+ + 'suite can run.';
+
+test('a record the task engages is injected however long the task description is', () => {
+ for (const prompt of ['install dependencies', 'Add a CSV export endpoint to the API server and install dependencies first.', task])
+  assert.deepEqual(ids(prompt, project), ['deps'], prompt);
+ assert.deepEqual(ids('Can you help me set up the database connection for the staging environment?', project), ['staging']);
+ assert.deepEqual(ids('Let us continue working on the billing service migration. Which database did we settle on?', project), ['billing']);
+});
+
+test('length-invariant relevance does not turn a long task prompt into unrelated filler', () => {
+ for (const prompt of ['Please review this pull request and tell me whether the approach is sound.',
+  'Refactor the payment retry loop to use exponential backoff.', 'What is the weather like in Oslo today?',
+  'Rewrite this function so it reads better.'])
+  assert.deepEqual(ids(prompt, project), [], prompt);
+ // The subject floor admits one record from the task above; the other three never reach the digest,
+ // so a longer prompt buys reach into what it is actually about and nothing else.
+ const diagnostics = retrieveMemories(project, resolveRecallQuery(task), 3, now).diagnostics;
+ assert.deepEqual(diagnostics.selected, ['deps']);
+ assert.deepEqual(diagnostics.candidates.map(c => c.id), ['deps']);
+ const digest = buildRuntimeDigest(selectRelevantMemories(project, resolveRecallQuery(task), 3, now), resolveRecallQuery(task), now)!;
+ assert.match(digest, /pnpm/);
+ assert.ok(!/Postgres|7777|concise/u.test(digest));
+ assert.ok(Buffer.byteLength(digest) <= 2048);
+});
+
+test('subject coverage is measured against the record, not against how much else was asked', () => {
+ const candidate = (prompt: string) => retrieveMemories(project, resolveRecallQuery(prompt), 3, now)
+  .diagnostics.candidates.find(c => c.id === 'deps')!;
+ const short = candidate('Add a CSV export endpoint to the API server and install dependencies first.');
+ const long = candidate(task);
+ assert.equal(short.subject, long.subject);
+ assert.ok(long.coverage < short.coverage, 'the query-side share must still shrink as the prompt grows');
+});

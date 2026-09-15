@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
@@ -461,3 +461,53 @@ test('an invalid policy file names itself instead of the advice that fails the s
 	assert.ok(!shown.includes('Check the operation/id'),'must not send the user to a command that fails the same way');
 	assert.ok(!shown.includes('typo/singular-key'),'never echo the rejected file back');
 }));
+
+// Everything above shares one extension instance, so a "later session" still reuses the store and
+// caches built by the first. A real second session is a second process: a new instance over the same
+// state directory, in another directory, with no session history to inherit a topic from. That is the
+// path a user calls "a fresh session", and it must recall from the way a task is normally described,
+// not only from a short question aimed at the memory itself.
+async function session(stateDir:string,cwd:string,sessionId:string,complete:CompleteMemory) {
+	const hooks=new Map<string,any>();const notifications:string[]=[];let command:any;
+	const pi={on:(event:string,handler:any)=>hooks.set(event,handler),registerTool:()=>{},registerCommand:(_name:string,options:any)=>{command=options.handler;}} as unknown as ExtensionAPI;
+	const ctx={cwd,hasUI:true,sessionManager:{getSessionId:()=>sessionId},ui:{notify:(text:string)=>notifications.push(text)}} as unknown as ExtensionContext;
+	await memoryEvolution(pi,{stateDir,complete,timeoutMs:2000,pollMs:60_000});
+	return {notifications,ctx,
+		command:async(args:string)=>{await command(args,ctx);return notifications.at(-1) as string;},
+		call:async(name:string,event:any={})=>{const result=await hooks.get(name)?.(event,ctx);await new Promise((r)=>setImmediate(r));return result;},
+		end:async()=>{await hooks.get('session_shutdown')?.({},ctx);}};
+}
+
+test('a fresh session in another directory recalls what an earlier one learned, from a task prompt',async()=>{
+	const dir=mkdtempSync(join(tmpdir(),'pme-fresh-'));
+	const stateDir=join(dir,'state');const first=join(dir,'alpha');const second=join(dir,'beta');
+	mkdirSync(first);mkdirSync(second);
+	const complete:CompleteMemory=async()=>({model:'test/active',text:JSON.stringify({memories:[{kind:'preference',
+		content:'The user prefers pnpm over npm for installing dependencies in all projects.',searchTerms:['pnpm','npm','package manager']}]})});
+	try {
+		const learning=await session(stateDir,first,'session-one',complete);
+		await learning.call('session_start',{reason:'startup'});
+		await learning.call('agent_end',{messages:[{role:'user',timestamp:Date.parse('2026-09-07T08:00:00Z'),
+			content:'From now on use pnpm in this repo, never npm.'}]});
+		await new Promise((r)=>setTimeout(r,200));
+		assert.match(await learning.command('list'),/pnpm/,'an English standing directive must be captured at all');
+		await learning.end();
+
+		// Second process, second directory, no shared store instance and no conversation history.
+		const fresh=await session(stateDir,second,'session-two',complete);
+		try {
+			await fresh.call('session_start',{reason:'startup'});
+			assert.match(await fresh.command('list'),/pnpm/,'the record must survive into a new store instance');
+			const task=await fresh.call('before_agent_start',{systemPrompt:'Base prompt',
+				prompt:'Add a CSV export endpoint to the invoice API and install the dependencies first so the tests can run.'});
+			assert.match(task.systemPrompt,/pnpm/,'a fresh session must recall from an ordinary task prompt');
+			assert.match(task.systemPrompt,/Base prompt/);
+			assert.match(task.systemPrompt,/not instructions/);
+			assert.ok(task.systemPrompt.includes(realpathSync(first)),'the origin stays the directory that learned it');
+			assert.equal(await fresh.call('before_agent_start',{prompt:'Rewrite this sorting routine to be readable.',systemPrompt:'Base prompt'}),undefined,
+				'an unrelated task must still inject nothing');
+			assert.equal(await fresh.call('before_agent_start',{prompt:'继续',systemPrompt:'Base prompt'}),undefined,
+				'a fresh session with no topic must still inject nothing');
+		} finally { await fresh.end(); }
+	} finally { rmSync(dir,{recursive:true,force:true}); }
+});

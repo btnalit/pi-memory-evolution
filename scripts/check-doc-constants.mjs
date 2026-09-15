@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
 	MAX_CANDIDATES, MAX_CLAIMS, MAX_CLAIM_BYTES, MAX_CLAIM_CHARS, MIN_CLAIM_CHARS, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS, RELATED_CONTAINMENT,
-	MAX_SEARCH_TERMS, MAX_SEARCH_TERM_CHARS, MIN_SEARCH_TERM_CHARS, SCHEMA_VERSION,
+	MAX_SEARCH_TERMS, MAX_SEARCH_TERM_CHARS, MIN_SEARCH_TERM_CHARS, MIN_FOCUS_COVERAGE, MIN_SUBJECT_COVERAGE, SCHEMA_VERSION,
 } from '../src/memory/limits.ts';
 import { AGING } from '../src/memory/quality.ts';
 
@@ -72,6 +72,8 @@ const BOUNDS = [
 	['docs/design.md', /up to (\d+) existing active claims/, [MAX_CANDIDATES], 'candidate cap'],
 	['docs/usage.md', /using up to (\d+)\n  recently updated active memories/, [MAX_CANDIDATES], 'candidate cap'],
 	['docs/design.md', /mentions at\nleast ([\d.]+) of its vocabulary/, [RELATED_CONTAINMENT], 'candidate threshold'],
+	['docs/design.md', /be \*\*>=([\d.]+)\*\*; that is the right measure for a recall question/, [MIN_FOCUS_COVERAGE], 'focus coverage floor'],
+	['docs/design.md', /aliases, that the prompt engages — must be \*\*>=([\d.]+)\*\*/, [MIN_SUBJECT_COVERAGE], 'subject coverage floor'],
 	['docs/design.md', /validated JSON \(an outer Markdown fence is tolerated\), at most ([\d,]+) bytes/, [group(MAX_OUTPUT_BYTES)], 'output size guard'],
 	['docs/design.md', /declaring no limit is reserved ([\d,]+) tokens/, [group(MAX_OUTPUT_TOKENS)], 'reserved answer budget'],
 ];
@@ -238,6 +240,28 @@ assert.ok(MAX_SEARCH_TERM_CHARS > MIN_SEARCH_TERM_CHARS && MAX_CLAIM_CHARS > MIN
 	assert.ok(start > 0 && !/includeDormant/u.test(injection),
 		'automatic injection must NOT include dormant records: not being pushed unprompted is the\n'
 		+ '    entire meaning of dormancy.');
+}
+
+// Injection relevance has two floors on purpose, and only one of them survives a long prompt. Asking
+// the query side alone is what made automatic injection look dead outside short questions: coverage is
+// a fraction of everything asked, so it falls as the user says more about the very task the record is
+// about. Anchor both the pairing and its order, so restoring a single-sided gate fails here.
+{
+	const retriever = readFileSync('src/memory/retriever.ts', 'utf8');
+	assert.ok(/coverage < MIN_FOCUS_COVERAGE && subject < MIN_SUBJECT_COVERAGE \? 'low-coverage'/u.test(retriever),
+		"retriever.ts must reject a record only when BOTH relevance floors fail. Requiring query-side\n"
+		+ '    coverage alone makes a relevant record unreachable in proportion to how fully the user\n'
+		+ '    described the task, which is the normal shape of a session-opening prompt.');
+	// The floors decide aboutness; the gates before them are what keep unrelated records out. If the
+	// pair were moved ahead of those, a record could clear a floor the subject gates would have refused.
+	const chain = ['resource-mismatch', 'no-focus-match', 'question-only', 'subject-attribute-mismatch', 'context-mismatch', 'low-coverage', 'thin-match']
+		.map(reason => retriever.indexOf(`'${reason}'`));
+	chain.forEach((at, i) => assert.ok(at > 0 && (i === 0 || at > chain[i - 1]),
+		'the relevance gates must stay in order, with the coverage floors after the literal, focus and\n'
+		+ '    subject gates: those decide relatedness, the floors only decide aboutness.'));
+	assert.ok(MIN_SUBJECT_COVERAGE < RELATED_CONTAINMENT,
+		'the recall-time subject floor must stay below the capture-time candidate threshold: a prompt is a\n'
+		+ '    sentence and a learning source is a whole turn, so it can restate far less of a claim.');
 }
 
 if (failures.length) {

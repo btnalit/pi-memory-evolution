@@ -147,11 +147,19 @@ test('natural requirements and priorities learn without a magic remember keyword
   '我们的核心需求是跨会话记忆和自动更新。','我希望系统每次都能自动召回相关背景。','我喜欢简洁的解释。',
   'Our priorities are automatic evolution, relevant injection and automatic recall. What do you think?',
   'Our project must preserve provenance and update stale progress.','我喜欢茶。','我们决定采用 SQLite 数据库。','We decided to use SQLite.',
+  // 以后 and 不要 had no English counterpart, so the same standing rule was learned in Chinese and dropped in English.
+  'From now on use conventional commits.','Going forward, tag every release with a signed tag.','In the future, prefer pnpm in this repo.',
+  'Always run the test suite before committing.','Never commit generated build artifacts.','Do not add comments unless they explain why.',
+  "Don't use sed on TypeScript sources.",
  ])assert.equal(learningIntent(text).learn,true,text);
 });
 
 test('questions, vague continuations, quoted examples and one-off commands are not durable requirements',()=>{
  for(const text of ['请接着继续','你还知道我们项目要实现的需求吧？','我需要你运行测试。','我的要求是什么？','我在意什么？',
   'What do you remember about my project requirements?','例如：我喜欢简洁的解释。','"Our priorities are automatic memory."',
-  'Suppose our project must preserve provenance.','你觉得这个偏好怎么设置？','当前偏好设置在哪里？','Do I prefer tea?'])assert.equal(learningIntent(text).learn,false,text);
+  'Suppose our project must preserve provenance.','你觉得这个偏好怎么设置？','当前偏好设置在哪里？','Do I prefer tea?',
+  // A standing rule is stated at the start of a sentence; mid-sentence the same words ask about one.
+  'Do you always run the test suite?','Should we never use sed here?','Can you check whether the tests always pass on macOS?',
+  'Never mind, do you remember the port?','"Always run the tests." is what the guide says.','Suppose we always run tests.',
+ ])assert.equal(learningIntent(text).learn,false,text);
 });
