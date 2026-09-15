@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
 	MAX_CANDIDATES, MAX_CLAIMS, MAX_CLAIM_BYTES, MAX_CLAIM_CHARS, MIN_CLAIM_CHARS, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS, RELATED_CONTAINMENT,
-	MAX_SEARCH_TERMS, MAX_SEARCH_TERM_CHARS, MIN_SEARCH_TERM_CHARS, MIN_FOCUS_COVERAGE, MIN_SUBJECT_COVERAGE, SCHEMA_VERSION,
+	MAX_SEARCH_TERMS, MAX_SEARCH_TERM_CHARS, MIN_SEARCH_TERM_CHARS, MIN_FOCUS_COVERAGE, SCHEMA_VERSION,
 } from '../src/memory/limits.ts';
 import { AGING } from '../src/memory/quality.ts';
 
@@ -73,7 +73,7 @@ const BOUNDS = [
 	['docs/usage.md', /using up to (\d+)\n  recently updated active memories/, [MAX_CANDIDATES], 'candidate cap'],
 	['docs/design.md', /mentions at\nleast ([\d.]+) of its vocabulary/, [RELATED_CONTAINMENT], 'candidate threshold'],
 	['docs/design.md', /be \*\*>=([\d.]+)\*\*; that is the right measure for a recall question/, [MIN_FOCUS_COVERAGE], 'focus coverage floor'],
-	['docs/design.md', /aliases, that the prompt engages — must be \*\*>=([\d.]+)\*\*/, [MIN_SUBJECT_COVERAGE], 'subject coverage floor'],
+	['docs/design.md', /a claim may run to (\d+) characters and carry (\d+) bilingual aliases/, [MAX_CLAIM_CHARS, MAX_SEARCH_TERMS], 'why the subject side has no share floor'],
 	['docs/design.md', /validated JSON \(an outer Markdown fence is tolerated\), at most ([\d,]+) bytes/, [group(MAX_OUTPUT_BYTES)], 'output size guard'],
 	['docs/design.md', /declaring no limit is reserved ([\d,]+) tokens/, [group(MAX_OUTPUT_TOKENS)], 'reserved answer budget'],
 ];
@@ -242,39 +242,47 @@ assert.ok(MAX_SEARCH_TERM_CHARS > MIN_SEARCH_TERM_CHARS && MAX_CLAIM_CHARS > MIN
 		+ '    entire meaning of dormancy.');
 }
 
-// Injection relevance has two floors on purpose, and only one of them survives a long prompt. Asking
+// Injection relevance has two sides on purpose, and only one of them survives a long prompt. Asking
 // the query side alone is what made automatic injection look dead outside short questions: coverage is
 // a fraction of everything asked, so it falls as the user says more about the very task the record is
-// about. Anchor both the pairing and its order, so restoring a single-sided gate fails here.
+// about. Anchor the pairing, its order, and what the subject side is measured by.
 {
 	const retriever = readFileSync('src/memory/retriever.ts', 'utf8');
-	assert.ok(/coverage < MIN_FOCUS_COVERAGE && subject < MIN_SUBJECT_COVERAGE \? 'low-coverage'/u.test(retriever),
-		"retriever.ts must reject a record only when BOTH relevance floors fail. Requiring query-side\n"
-		+ '    coverage alone makes a relevant record unreachable in proportion to how fully the user\n'
-		+ '    described the task, which is the normal shape of a session-opening prompt.');
-	// The floors decide aboutness; the gates before them are what keep unrelated records out. If the
-	// pair were moved ahead of those, a record could clear a floor the subject gates would have refused.
-	const chain = ['resource-mismatch', 'no-focus-match', 'question-only', 'subject-attribute-mismatch', 'context-mismatch', 'low-coverage', 'incidental-overlap', 'thin-match']
+	// The subject side must be carried by naming, never by a share of the record's own vocabulary. The
+	// store's candidate containment was tried there and it made recall depend on claim length: a claim
+	// may run to MAX_CLAIM_CHARS characters and carry MAX_SEARCH_TERMS bilingual aliases, so the two
+	// matches that carried a one-line claim were rejected once it explained itself, and the aliases
+	// written to widen a record's recall narrowed it. Review reproduced both.
+	assert.ok(!/\bcontainment\(/u.test(retriever) && !/\bmentions\([^)]*searchTerms/u.test(retriever),
+		'retriever.ts must not measure relevance as a share of a record\'s own vocabulary (containment or\n'
+		+ '    mentions). Any such share makes a record harder to recall the more it says or the more aliases\n'
+		+ '    it carries; the subject side is carried by a match that names the topic, see limits.ts.');
+	// The gates before the floor are what keep unrelated records out. If the floor were moved ahead of
+	// those, a record could clear it that the subject gates would have refused.
+	const chain = ['resource-mismatch', 'no-focus-match', 'question-only', 'subject-attribute-mismatch', 'context-mismatch', 'incidental-overlap', 'thin-match']
 		.map(reason => retriever.indexOf(`'${reason}'`));
 	chain.forEach((at, i) => assert.ok(at > 0 && (i === 0 || at > chain[i - 1]),
-		'the relevance gates must stay in order, with the coverage floors after the literal, focus and\n'
-		+ '    subject gates: those decide relatedness, the floors only decide aboutness.'));
-	// The subject floor alone is crossed by coincidence: containment divides by a short claim's own
-	// feature count, so two everyday words shared with a long prompt score as high as the claim's real
-	// topic. Review reproduced an unrelated badge-access note being injected on an ordinary task
-	// prompt. Only a match that names a topic separates them, so the requirement is not optional.
+		'the relevance gates must stay in order, with the coverage floor after the literal, focus and\n'
+		+ '    subject gates: those decide relatedness, the floor only decides aboutness.'));
+	// The subject side is crossed by coincidence otherwise: two everyday words shared with a long prompt
+	// are as many matches as the claim's real topic, and score as high. Review reproduced an unrelated
+	// badge-access note being injected on an ordinary task prompt. Only a match that names a topic
+	// separates them, so the requirement is not optional — and it is the whole subject side now, so the
+	// query-side floor must stay paired with it: dropping either half restores a single-sided gate.
 	assert.ok(/coverage < MIN_FOCUS_COVERAGE && !topicMatches \? 'incidental-overlap'/u.test(retriever),
-		'a record admitted on the subject side alone must still match a concept, a literal or one of its\n'
-		+ '    own searchTerms. Without that, two coincidental everyday words inject an unrelated claim.');
+		'a record the prompt is not mostly about must still match a concept, a literal or one of its own\n'
+		+ '    searchTerms, and nothing else may reject it for being that. Requiring query-side coverage\n'
+		+ '    alone makes a relevant record unreachable in proportion to how fully the user described the\n'
+		+ '    task; without the topic match, two coincidental everyday words inject an unrelated claim.');
+	assert.ok(!/MIN_FOCUS_COVERAGE\s*&&(?!\s*!topicMatches)/u.test(retriever),
+		'the query-side floor may be paired only with the topic-match requirement: any second condition\n'
+		+ '    on the subject side is a floor on the record, and that is what made recall depend on claim length.');
 	// The whole statement, not a substring: an appended `|| body.has(word)` would otherwise pass. And
 	// exactly one increment, so the count cannot be widened by a second statement elsewhere.
 	assert.ok(/if \(word\.startsWith\('concept:'\) \|\| word\.startsWith\('literal:'\) \|\| aliases\.has\(word\)\) topicMatches\+\+;/u.test(retriever)
 		&& (retriever.match(/topicMatches\s*(?:\+\+|\+=|-=|--|=(?!=))/gu) ?? []).length === 2, // the `= 0` declaration and the one increment
 		'topicMatches must count only curated topic names: concepts, exact resources, or the aliases the\n'
 		+ '    model wrote for that claim, in one place. Counting bare prose words restores the defect it prevents.');
-	assert.ok(MIN_SUBJECT_COVERAGE < RELATED_CONTAINMENT,
-		'the recall-time subject floor must stay below the capture-time candidate threshold: a prompt is a\n'
-		+ '    sentence and a learning source is a whole turn, so it can restate far less of a claim.');
 }
 
 // docs/usage.md lists the English directive cues by name. That list is the feature's user-facing

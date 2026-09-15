@@ -75,7 +75,7 @@ export const MAX_OUTPUT_BYTES = 64_000;
 
 /**
  * What makes a stored claim relevant enough to be injected unprompted. A record qualifies on
- * EITHER floor, because the two measure different asks and only one of them can answer each.
+ * EITHER side, because the two describe different asks and only one of them can answer each.
  *
  * `MIN_FOCUS_COVERAGE` is query-side: the share of the current focus this record accounts for.
  * It is the right question for a recall question ("what is the database port?"), where the whole
@@ -86,17 +86,21 @@ export const MAX_OUTPUT_BYTES = 64_000;
  * name scored 0.41 and a 57-word one 0.14 — both rejected, while "install dependencies" passed.
  * That is the whole reason automatic injection looked dead outside short questions.
  *
- * `MIN_SUBJECT_COVERAGE` is the memory-side counterpart, the same asymmetric containment the store
- * already uses to pick replacement candidates (`RELATED_CONTAINMENT`): the share of THIS record's
- * own vocabulary the prompt engages. It is invariant to everything else the prompt says, so the
- * same record scores 0.25 against both of those prompts. It is lower than the candidate threshold
- * because a recall prompt is a sentence, not a whole conversation turn, so it can restate far less
- * of a claim before the claim stops being what is being talked about.
+ * The subject side has no share floor, and must not get one. It is carried by NAMING: at least one
+ * query feature that names this record's topic — a curated concept synonym, an exact path/filename,
+ * or one of the model-written `searchTerms` for the claim — plus the ordinary multi-match
+ * requirement (retriever.ts, 'incidental-overlap' and 'thin-match'). Its first version was the
+ * share of the record's own vocabulary the prompt engaged, the asymmetric containment the store uses
+ * to pick replacement candidates (`RELATED_CONTAINMENT`). That is invariant to the prompt and
+ * dependent on the claim, which the claim contract does not permit: a claim may run to
+ * MAX_CLAIM_CHARS characters and carry MAX_SEARCH_TERMS bilingual aliases, so the same two matches
+ * that carried a one-line claim were rejected once the claim explained itself, and a record with the
+ * full alias budget could not clear the bar on the very aliases written to widen its recall. Every
+ * count and share is fixed by what the prompt engages, never by what else the record says.
  *
- * Neither floor is the no-filler safeguard on its own. The literal, focus, question-only,
+ * Neither side is the no-filler safeguard on its own. The literal, focus, question-only,
  * subject-attribute, context and thin-match gates run FIRST and are unchanged; the relative cutoff,
- * the three-claim limit and the digest byte cap run after. These two only decide whether a record
+ * the three-claim limit and the digest byte cap run after. These only decide whether a record
  * is about the ask at all.
  */
 export const MIN_FOCUS_COVERAGE = 0.45;
-export const MIN_SUBJECT_COVERAGE = 0.25;

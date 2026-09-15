@@ -72,25 +72,29 @@ a replay note repeating a user's question is not evidence of its answer. Other q
 facts remain ordinary evidence. Concept words in origins are excluded. Source IDs, legacy
 labels and cwd have no authority bonus.
 
-A record must clear one of two relevance floors, because the two describe different asks.
+A record must qualify on one of two sides, because the two describe different asks.
 Current-focus coverage — the share of what was just asked that this record accounts for — must
 be **>=0.45**; that is the right measure for a recall question, where the prompt *is* the subject.
-Alternatively, subject coverage — the share of **this record's own** vocabulary, or of its
-aliases, that the prompt engages — must be **>=0.25**. That is the measure a task prompt needs:
-query coverage is a fraction of everything said, so describing a task in two sentences rather than
-three words divides a relevant record's score by the length of the description, and automatic
-injection effectively only worked for short questions. Subject coverage is unaffected by whatever
-else the prompt says. Origin identifiers are excluded from it: a directory name is capture context,
-not part of the claim. A record admitted on the subject side alone must additionally match at
-least one query feature that *names* a topic — a curated concept synonym, an exact path/filename,
-or one of the model-written `searchTerms` for that claim. Containment divides by a short claim's
-own feature count, so on a long prompt two coincidental everyday words clear the floor exactly as
-easily as the two that are the claim's actual subject, and score no lower; bare prose words
-therefore cannot carry a record the query is not otherwise about. The query side is unaffected.
-The price is paid by a record with no aliases whose subject is outside the concept vocabulary: it
-is reachable only when the prompt is mostly about it, until evolution — which asks for aliases even
-on unchanged facts — supplies one that names its topic.
-Neither floor is the no-filler safeguard by itself — the gates below run
+Alternatively, the prompt must *name* the record's topic: at least one query feature that is a
+curated concept synonym, an exact path/filename, or one of the model-written `searchTerms` for
+that claim, alongside the ordinary multi-match requirement below. That is what a task prompt
+needs: query coverage is a fraction of everything said, so describing a task in two sentences
+rather than three words divides a relevant record's score by the length of the description, and
+automatic injection effectively only worked for short questions. Naming is unaffected by whatever
+else the prompt says — and by whatever else the *record* says. The subject side has no share floor
+on purpose: its first version was the share of the record's own vocabulary, or of its aliases,
+that the prompt engaged, and a claim may run to 800 characters and carry 8 bilingual aliases, so
+the same two matches that carried a one-line claim were rejected once the claim explained itself,
+and a record with the full alias budget could not clear the bar on the very aliases written to
+widen its recall. Bare prose words cannot carry a record the query is not otherwise about: on a
+long prompt two coincidental everyday words are as many matches as the two that are a claim's
+actual subject, and score no lower. The query side is unaffected. The price is paid by a record
+with no aliases whose subject is outside the concept vocabulary: it is reachable only when the
+prompt is mostly about it, until evolution — which asks for aliases even on unchanged facts —
+supplies one that names its topic. A record that shares only a concept and everyday words with a
+long prompt is not separated by these gates; the relative cutoff and the three-claim limit below
+are what bound it.
+Neither side is the no-filler safeguard by itself — the gates below run
 first and are unchanged, and the relative cutoff, three-claim limit and digest byte cap run after.
 At least 3 focus features still require 2 matches.
 A single match cannot qualify alongside unknown non-attribute words. All explicit literal

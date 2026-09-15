@@ -181,10 +181,12 @@ rename the tool to hide the conflict; an old installation would still run its ho
   recall regardless of its original directory.
 - Recall works from an ordinary task prompt, not only from a question aimed at the memory:
   a record qualifies either when it accounts for enough of what was asked **or** when the
-  prompt engages enough of that record's own wording. The second measure does not shrink as
-  the request gets longer, so describing a task in full no longer suppresses the background
-  it is about. A prompt that engages nothing stored still injects nothing.
-- Query coverage, subject coverage, evidence-based document frequency, field weights, mild length
+  prompt names that record's topic — a known concept, an exact path/filename, or one of the
+  record's own aliases — and engages it more than once. Neither measure shrinks as the request
+  gets longer, nor as the stored claim gets longer or gains aliases, so describing a task in
+  full no longer suppresses the background it is about, and a claim that explains itself is
+  no harder to recall than a one-liner. A prompt that engages nothing stored still injects nothing.
+- Query coverage, topic naming, evidence-based document frequency, field weights, mild length
   normalization and a relative cutoff reject weak secondary matches. Unseen query words
   no longer receive the highest rarity weight. Exact paths must match, including case; `/srv/Atlas` and `/srv/atlas` are distinct. A quoted
   question in a replay/incident note is weaker than evidence answering it. Redundancy
@@ -353,8 +355,7 @@ lists/search or 8,000 bytes in `show`, with an ellipsis when truncated.
 Commands that take exact IDs can address records outside the current cwd. `search` and
 `explain <query>` use only their explicit query, whereas automatic recall can resolve
 follow-ups from recent user context. `explain` without arguments shows the last automatic
-snapshot: normalized focus/context features, eligible/excluded counts, scores, query and
-subject coverage,
+snapshot: normalized focus/context features, eligible/excluded counts, scores, query coverage,
 up to 10 candidate IDs and rejection/selection reasons, plus actual injected count/bytes.
 It retains at most 8,000 bytes (+ truncation marker) in memory, not a database/session log;
 no memory bodies or provider errors are included. It resets on reload and is not proof
