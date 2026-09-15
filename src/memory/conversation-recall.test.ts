@@ -219,6 +219,24 @@ test('an everyday word shared with a short claim is not a topic, in any store si
  assert.deepEqual(ids('Who approves access to the server room?', store).includes('badge'), true);
 });
 
+test('multilingual incidental overlap cannot displace a named subject', () => {
+ const relevant = memory('deps-bilingual', 'The user prefers pnpm over npm for installing dependencies in all projects.', {
+  kind: 'preference', searchTerms: ['pnpm', 'npm', 'package manager', '包管理器', '依赖安装'],
+ });
+ const unrelated = [
+  memory('ops-cn', '仓库中的服务需要运行，日志由值班人员查看。'),
+  memory('files-cn', '文件需要整理，模块名称要保持一致，仓库管理员负责记录。'),
+ ];
+ const prompt = '请在仓库中安装依赖并运行测试；before you start, install the dependencies in this repository and run the test suite.';
+ const result = retrieveMemories([relevant, ...unrelated], resolveRecallQuery(prompt), 3, now);
+ assert.deepEqual(result.diagnostics.selected, ['deps-bilingual']);
+ const reasons = new Map(result.diagnostics.candidates.map(candidate => [candidate.id, candidate.reason]));
+ for (const id of unrelated.map(record => record.id)) {
+  assert.equal(reasons.get(id), 'incidental-overlap', id);
+  assert.ok(!result.selected.some(record => record.id === id), id);
+ }
+});
+
 // The price of the topic-match requirement, pinned so it is paid knowingly. A record with no
 // aliases whose subject is not in the concept vocabulary has nothing that NAMES its topic, so on a
 // long prompt it is indistinguishable from the clutter above and is deliberately not reachable on
