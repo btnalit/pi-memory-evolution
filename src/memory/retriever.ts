@@ -82,7 +82,7 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 	// cannot be pushed below a bar it would otherwise clear.
 	const topic = new Set([...query, ...context]);
 	const evaluated: RankedMemory[] = documents.map(({ memory, body, mentions, aliases, origin }) => {
-		let score = 0, covered = 0, focusMatches = 0, evidenceMatches = 0;
+		let score = 0, covered = 0, focusMatches = 0, evidenceMatches = 0, topicMatches = 0;
 		const matches: string[] = [];
 		for (const [word, weight] of weights) {
 			const factor = body.has(word) ? 1 : aliases.has(word) ? 0.8 : mentions.has(word) ? 0.25 : origin.has(word) ? 0.2 : 0;
@@ -91,6 +91,10 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 				if (query.has(word)) {
 					covered += weight; focusMatches++;
 					if (body.has(word) || aliases.has(word) || origin.has(word)) evidenceMatches++;
+					// Something that names a topic, as opposed to a word that merely occurs in one:
+					// a curated concept synonym, an exact resource identity, or one of the aliases
+					// the model wrote for this very claim. See the subject gate below.
+					if (word.startsWith('concept:') || word.startsWith('literal:') || aliases.has(word)) topicMatches++;
 				}
 				matches.push(word);
 			}
@@ -111,6 +115,16 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 			// the prompt. Requiring the query side alone made injection fail precisely as a user
 			// said more, which is the normal shape of a task prompt. See limits.ts.
 			: coverage < MIN_FOCUS_COVERAGE && subject < MIN_SUBJECT_COVERAGE ? 'low-coverage'
+			// A record the query is NOT mostly about is carried by the subject side alone, and
+			// bare prose words cannot carry it: containment divides by a short claim's own feature
+			// count, so on a long prompt two coincidental everyday words ("server", "needs") clear
+			// the floor as easily as the two words that are the claim's actual topic, and score no
+			// lower. Measured on a 20-record store, an unrelated badge-access note and an unrelated
+			// onboarding note were both injected next to the correct preference on one ordinary
+			// task prompt. So require at least one match that NAMES a topic — a curated concept
+			// synonym, an exact path/filename, or one of the model-written aliases for this claim.
+			// The query side is unaffected: a prompt that really is about a record still needs none.
+			: coverage < MIN_FOCUS_COVERAGE && !topicMatches ? 'incidental-overlap'
 			: (query.size >= 3 && focusMatches < 2) || (focusMatches === 1 && [...query].some(word => unknown.has(word) && !FACETS.has(word))) ? 'thin-match'
 			: undefined;
 		const quality = qualities.get(memory.id)!;

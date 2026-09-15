@@ -81,7 +81,16 @@ query coverage is a fraction of everything said, so describing a task in two sen
 three words divides a relevant record's score by the length of the description, and automatic
 injection effectively only worked for short questions. Subject coverage is unaffected by whatever
 else the prompt says. Origin identifiers are excluded from it: a directory name is capture context,
-not part of the claim. Neither floor is the no-filler safeguard by itself — the gates below run
+not part of the claim. A record admitted on the subject side alone must additionally match at
+least one query feature that *names* a topic — a curated concept synonym, an exact path/filename,
+or one of the model-written `searchTerms` for that claim. Containment divides by a short claim's
+own feature count, so on a long prompt two coincidental everyday words clear the floor exactly as
+easily as the two that are the claim's actual subject, and score no lower; bare prose words
+therefore cannot carry a record the query is not otherwise about. The query side is unaffected.
+The price is paid by a record with no aliases whose subject is outside the concept vocabulary: it
+is reachable only when the prompt is mostly about it, until evolution — which asks for aliases even
+on unchanged facts — supplies one that names its topic.
+Neither floor is the no-filler safeguard by itself — the gates below run
 first and are unchanged, and the relative cutoff, three-claim limit and digest byte cap run after.
 At least 3 focus features still require 2 matches.
 A single match cannot qualify alongside unknown non-attribute words. All explicit literal

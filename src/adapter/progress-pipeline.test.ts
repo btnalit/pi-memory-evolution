@@ -148,9 +148,11 @@ test('natural requirements and priorities learn without a magic remember keyword
   'Our priorities are automatic evolution, relevant injection and automatic recall. What do you think?',
   'Our project must preserve provenance and update stale progress.','我喜欢茶。','我们决定采用 SQLite 数据库。','We decided to use SQLite.',
   // 以后 and 不要 had no English counterpart, so the same standing rule was learned in Chinese and dropped in English.
-  'From now on use conventional commits.','Going forward, tag every release with a signed tag.','In the future, prefer pnpm in this repo.',
+  // 'use', not 'prefer': the latter is already an EXPLICIT cue, and the case must prove the opener alone.
+  'From now on use conventional commits.','Going forward, tag every release with a signed tag.','In the future, use pnpm in this repo.',
+  'In future, use pnpm in this repo.','In the future, always run the tests before committing.',
   'Always run the test suite before committing.','Never commit generated build artifacts.','Do not add comments unless they explain why.',
-  "Don't use sed on TypeScript sources.",
+  "Don't use sed on TypeScript sources.",'Don\u2019t use sed on TypeScript sources.',
  ])assert.equal(learningIntent(text).learn,true,text);
 });
 
@@ -161,5 +163,12 @@ test('questions, vague continuations, quoted examples and one-off commands are n
   // A standing rule is stated at the start of a sentence; mid-sentence the same words ask about one.
   'Do you always run the test suite?','Should we never use sed here?','Can you check whether the tests always pass on macOS?',
   'Never mind, do you remember the port?','"Always run the tests." is what the guide says.','Suppose we always run tests.',
+  // A sentence-initial cue followed by a pronoun is a question wearing an imperative's clothes.
+  "Don't you think we should refactor this module?","Don't we need to update the changelog too?",
+  "Don't you remember the timeout value we picked?",
+  // 'from now on'/'going forward'/'in (the) future' are only directives as sentence openers;
+  // mid-sentence they are ordinary prose, and matching them would also override the recall-question gate above.
+  'Do you think this API will still work in the future?',"We'll deal with performance in future releases.",
+  'We might reconsider going forward with this vendor.','The docs say support will be dropped in future versions.',
  ])assert.equal(learningIntent(text).learn,false,text);
 });

@@ -254,14 +254,61 @@ assert.ok(MAX_SEARCH_TERM_CHARS > MIN_SEARCH_TERM_CHARS && MAX_CLAIM_CHARS > MIN
 		+ '    described the task, which is the normal shape of a session-opening prompt.');
 	// The floors decide aboutness; the gates before them are what keep unrelated records out. If the
 	// pair were moved ahead of those, a record could clear a floor the subject gates would have refused.
-	const chain = ['resource-mismatch', 'no-focus-match', 'question-only', 'subject-attribute-mismatch', 'context-mismatch', 'low-coverage', 'thin-match']
+	const chain = ['resource-mismatch', 'no-focus-match', 'question-only', 'subject-attribute-mismatch', 'context-mismatch', 'low-coverage', 'incidental-overlap', 'thin-match']
 		.map(reason => retriever.indexOf(`'${reason}'`));
 	chain.forEach((at, i) => assert.ok(at > 0 && (i === 0 || at > chain[i - 1]),
 		'the relevance gates must stay in order, with the coverage floors after the literal, focus and\n'
 		+ '    subject gates: those decide relatedness, the floors only decide aboutness.'));
+	// The subject floor alone is crossed by coincidence: containment divides by a short claim's own
+	// feature count, so two everyday words shared with a long prompt score as high as the claim's real
+	// topic. Review reproduced an unrelated badge-access note being injected on an ordinary task
+	// prompt. Only a match that names a topic separates them, so the requirement is not optional.
+	assert.ok(/coverage < MIN_FOCUS_COVERAGE && !topicMatches \? 'incidental-overlap'/u.test(retriever),
+		'a record admitted on the subject side alone must still match a concept, a literal or one of its\n'
+		+ '    own searchTerms. Without that, two coincidental everyday words inject an unrelated claim.');
+	// The whole statement, not a substring: an appended `|| body.has(word)` would otherwise pass. And
+	// exactly one increment, so the count cannot be widened by a second statement elsewhere.
+	assert.ok(/if \(word\.startsWith\('concept:'\) \|\| word\.startsWith\('literal:'\) \|\| aliases\.has\(word\)\) topicMatches\+\+;/u.test(retriever)
+		&& (retriever.match(/topicMatches\s*(?:\+\+|\+=|-=|--|=(?!=))/gu) ?? []).length === 2, // the `= 0` declaration and the one increment
+		'topicMatches must count only curated topic names: concepts, exact resources, or the aliases the\n'
+		+ '    model wrote for that claim, in one place. Counting bare prose words restores the defect it prevents.');
 	assert.ok(MIN_SUBJECT_COVERAGE < RELATED_CONTAINMENT,
 		'the recall-time subject floor must stay below the capture-time candidate threshold: a prompt is a\n'
 		+ '    sentence and a learning source is a whole turn, so it can restate far less of a claim.');
+}
+
+// docs/usage.md lists the English directive cues by name. That list is the feature's user-facing
+// contract and there is no number in it for the checks above to catch, so anchor the cues
+// themselves: dropping one, or dropping the sentence-start anchor that keeps "Do you always ...?"
+// a question, must fail here rather than leave the documentation quietly wrong.
+{
+	const learning = readFileSync('src/memory/learning.ts', 'utf8');
+	const directive = /^const DIRECTIVE = .*$/mu.exec(learning);
+	assert.ok(directive, 'learning.ts must declare DIRECTIVE in one statement; this check cannot verify it');
+	for (const cue of ['from now on', 'going forward', 'in (?:the )?future', 'always', 'never', "don['’]?t", 'do not'])
+		assert.ok(directive[0].includes(cue), `DIRECTIVE no longer contains the cue ${cue} that docs/usage.md promises`);
+	// One regex, one anchor: every alternative must sit inside the single group that follows the
+	// sentence-start anchor, so no cue can be appended as a top-level `|` alternative and thereby
+	// match mid-sentence. "in the future" is the case that was once unanchored: unanchored it turned
+	// "will this work in the future?" into a directive and overrode the recall-question gate. The
+	// walk below checks that the group opened right after the anchor closes only at the very end.
+	const prefix = "const DIRECTIVE = /(?:^|[.!?。！？\\n]\\s*)(?:please\\s+)?(?:";
+	const anchored = () => {
+		if (!directive[0].startsWith(prefix) || !directive[0].endsWith(')/iu;')) return false;
+		let depth = 1;
+		const inner = directive[0].slice(prefix.length, -'/iu;'.length);
+		for (let i = 0; i < inner.length - 1; i++) {
+			if (inner[i] === '\\') { i++; continue; }
+			if (inner[i] === '(') depth++; else if (inner[i] === ')' && --depth === 0) return false;
+		}
+		return depth === 1 && inner.at(-1) === ')';
+	};
+	assert.ok(anchored(),
+		'every DIRECTIVE alternative must stay behind the sentence-start anchor, inside the one group that\n'
+		+ '    follows it. Position is the only thing separating a standing rule from a question about one.');
+	const usage = read.get('docs/usage.md');
+	for (const cue of ['from now on', 'going forward', 'in the future', 'always', 'never', "don't", 'do not'])
+		assert.ok(usage.includes(`\`${cue}\``), `docs/usage.md no longer documents the ${cue} cue that learning.ts implements`);
 }
 
 if (failures.length) {

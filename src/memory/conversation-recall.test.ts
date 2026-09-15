@@ -171,20 +171,71 @@ test('a record the task engages is injected however long the task description is
  assert.deepEqual(ids('Let us continue working on the billing service migration. Which database did we settle on?', project), ['billing']);
 });
 
+// The records above are on disjoint topics, so they cannot show what the subject floor rejects —
+// only what it admits. A real store is full of unrelated short claims that share an everyday word
+// or two with any given task, and containment divides by a short claim's own feature count, so two
+// coincidental matches clear the floor exactly as easily as the two that are a claim's actual
+// topic, and score no lower. These are the records that must NOT come back.
+const clutter = [
+ memory('badge', 'Badge access to the server room needs security approval.'),
+ memory('onboarding', 'New hires get repo access on their first day.'),
+ memory('standup', 'Standup is at 9:15 and should run no longer than ten minutes.'),
+ memory('lunch', 'Lunch orders need to be submitted before eleven.'),
+ memory('keys', 'Spare keys are held by reception, not by the server room.'),
+ memory('bikes', 'Bike storage is in the basement and needs a fob.'),
+ memory('coffee-machine', 'The office coffee machine needs descaling every month.'),
+ memory('printer', 'The printer on the third floor jams with thick paper.'),
+ memory('recycling', 'Paper recycling goes in the blue bins on each floor.'),
+ memory('visitors', 'Visitors must be signed in at the front desk.'),
+];
+
 test('length-invariant relevance does not turn a long task prompt into unrelated filler', () => {
  for (const prompt of ['Please review this pull request and tell me whether the approach is sound.',
   'Refactor the payment retry loop to use exponential backoff.', 'What is the weather like in Oslo today?',
   'Rewrite this function so it reads better.'])
   assert.deepEqual(ids(prompt, project), [], prompt);
- // The subject floor admits one record from the task above; the other three never reach the digest,
- // so a longer prompt buys reach into what it is actually about and nothing else.
- const diagnostics = retrieveMemories(project, resolveRecallQuery(task), 3, now).diagnostics;
+ // Against clutter, the long task must still return exactly the record it is about. 'badge' and
+ // 'onboarding' are the two that clear the subject floor on coincidence alone — server+needs and
+ // new+repo — and they outscore nothing, so only a match that NAMES a topic can separate them.
+ const store = [...project, ...clutter];
+ const diagnostics = retrieveMemories(store, resolveRecallQuery(task), 3, now).diagnostics;
  assert.deepEqual(diagnostics.selected, ['deps']);
- assert.deepEqual(diagnostics.candidates.map(c => c.id), ['deps']);
- const digest = buildRuntimeDigest(selectRelevantMemories(project, resolveRecallQuery(task), 3, now), resolveRecallQuery(task), now)!;
+ const reasons = new Map(diagnostics.candidates.map(c => [c.id, c.reason]));
+ for (const id of ['badge', 'onboarding']) assert.equal(reasons.get(id), 'incidental-overlap', id);
+ // Their subject score is at or above the record that IS selected, so the floor alone cannot be
+ // what rejected them; only the topic-match requirement can be, and that is the point of the test.
+ const subject = new Map(diagnostics.candidates.map(c => [c.id, c.subject]));
+ for (const id of ['badge', 'onboarding']) assert.ok(subject.get(id)! >= subject.get('deps')!, id);
+ const digest = buildRuntimeDigest(selectRelevantMemories(store, resolveRecallQuery(task), 3, now), resolveRecallQuery(task), now)!;
  assert.match(digest, /pnpm/);
- assert.ok(!/Postgres|7777|concise/u.test(digest));
+ assert.ok(!/Postgres|7777|concise|Badge|hires/u.test(digest));
  assert.ok(Buffer.byteLength(digest) <= 2048);
+});
+
+test('an everyday word shared with a short claim is not a topic, in any store size', () => {
+ const store = [...project, ...clutter];
+ // Shorter prompts must not regress into the same coincidence, and a prompt about the clutter
+ // itself must still reach it: the requirement is about naming a topic, not about suppression.
+ assert.deepEqual(ids('Add a CSV export endpoint to the API server and install dependencies first.', store), ['deps']);
+ assert.deepEqual(ids('Who approves access to the server room?', store).includes('badge'), true);
+});
+
+// The price of the topic-match requirement, pinned so it is paid knowingly. A record with no
+// aliases whose subject is not in the concept vocabulary has nothing that NAMES its topic, so on a
+// long prompt it is indistinguishable from the clutter above and is deliberately not reachable on
+// the subject side. It stays reachable when the prompt is mostly about it, and evolution asks the
+// model for aliases even on unchanged facts, so the gap closes for any record that gets evolved.
+test('an alias-less record outside the concept vocabulary is reachable by query coverage, not by subject', () => {
+ const indent = memory('indent', 'The user prefers tabs over spaces for indentation.', { kind: 'preference' });
+ const store = [...project, ...clutter, indent];
+ const long = 'Reformat this module so it reads better, keep the public signatures as they are, and use tabs for\n'
+  + 'indentation like the rest of the tree. Then add a short comment above each exported function.';
+ const candidate = retrieveMemories(store, resolveRecallQuery(long), 3, now).diagnostics.candidates.find(c => c.id === 'indent')!;
+ assert.equal(candidate.reason, 'incidental-overlap');
+ assert.ok(candidate.subject >= 0.25 && candidate.coverage < 0.45, 'the subject floor alone would have admitted it');
+ assert.deepEqual(ids('tabs or spaces for indentation?', store), ['indent']);
+ // One model-written alias is enough to name the topic, which is what evolution supplies.
+ assert.deepEqual(ids(long, [...project, ...clutter, { ...indent, searchTerms: ['indentation', '缩进'] }]), ['indent']);
 });
 
 test('subject coverage is measured against the record, not against how much else was asked', () => {

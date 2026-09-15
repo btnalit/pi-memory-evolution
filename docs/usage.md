@@ -89,11 +89,15 @@ rename the tool to hide the conflict; an old installation would still run its ho
   facts, preferences, decisions or project-state claims using recognizable headings.
 - Explicit user statements containing cues such as `remember`, `prefer`, `记住`,
   `偏好`, `纠正`, `不对`, `以后`, or `不要` also trigger learning, without waiting for
-  another compaction. The English counterparts of `以后`/`不要` count the same way:
-  `from now on`, `going forward`, `in future`, and a sentence-*initial* `always`,
-  `never`, `don't` or `do not`. The anchor is what separates a standing rule from a
-  question about one — `Always run the tests.` states a rule, `Do you always run the
-  tests?` stays a question and is not learned. Natural declarations such as `我比较在意的三大功能…`,
+  another compaction. The English counterparts of `以后`/`不要` count the same way, and
+  all of them only at the *start of a sentence*: `from now on`, `going forward`,
+  `in the future` (or `in future`), `always`, `never`, `don't` or `do not`. Position is
+  what separates a standing rule from a question about one — `Always run the tests.` and
+  `In the future, always run the tests.` state a rule, while `Do you always run the
+  tests?`, `Don't you think we should refactor?` and `Will this work in the future?` stay
+  questions and are not learned. Both `'` and `’` are accepted.
+  A directive quoted from a pasted log or document is indistinguishable from your own
+  by position alone, so it is learned; this matches the existing `以后`/`不要` behavior. Natural declarations such as `我比较在意的三大功能…`,
   `我们的核心需求是…` or `Our priorities are…` also trigger learning, even if followed
   by a question asking for feedback. This is bounded intent recognition, not universal
   understanding. Quotes, ordinary recall questions and one-off commands are not requirements.

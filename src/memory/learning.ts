@@ -4,12 +4,26 @@ const EXPLICIT = /记住|偏好|更正|纠正|应该改成|改为|不对|以后|
 const IMPERATIVE = /(?:^|[.!?。！？]\s*)(?:please\s+)?remember\b|记住|更正|纠正|以后|不要/iu;
 /** The English counterparts of the 以后 / 不要 cues above, which had none: a user writing
  * "From now on use conventional commits." or "Never commit generated files." was stating exactly
- * what 以后 / 不要 state, and nothing was captured. The bare imperatives are anchored to a sentence
- * start, which is what separates a standing rule from a question about one — "Always run the tests."
- * states a rule, "Do you always run the tests?" asks about a habit and must stay a question. This
- * widens which sentences are recognized, not what is stored: every capture still goes through the
- * same extraction, quality and privacy path. */
-const DIRECTIVE = /(?:^|[.!?。！？\n]\s*)(?:please\s+)?(?:always|never(?!\s+mind\b)|don'?t|do not)\b|\b(?:from now on|going forward|in (?:the )?future)\b/iu;
+ * what 以后 / 不要 state, and nothing was captured.
+ *
+ * EVERY alternative is anchored to a sentence start, because position is the only thing separating
+ * a standing rule from a question about one, and an unanchored phrase is a question in disguise:
+ * "Do you think this API will work in the future?" and "We'll deal with it in future releases."
+ * state no rule, and matching them would spend a paid call AND override the recall-question gate.
+ * "in (the) future" stays, behind the same anchor: as a sentence opener it is the plain-English
+ * 以后 ("In the future, always run the tests before committing."), and mid-sentence it is ordinary
+ * prose ("in future versions"), so the anchor is what decides, not the phrase. A trailing
+ * "…from now on" is therefore missed rather than guessed at; that is the same direction the rest
+ * of this recognizer errs in.
+ *
+ * The bare imperatives additionally refuse a following pronoun: "Don't use sed." is a rule,
+ * "Don't you think we should refactor?" and "Don't we need a changelog?" are questions that merely
+ * start with the same word. Both apostrophes are accepted, because a phone or editor autocorrects
+ * "don't" to "don’t" and dropping that would silently lose exactly what this cue exists to catch.
+ *
+ * This widens which sentences are recognized, not what is stored: every capture still goes through
+ * the same extraction, quality and privacy path. */
+const DIRECTIVE = /(?:^|[.!?。！？\n]\s*)(?:please\s+)?(?:(?:always|never(?!\s+mind\b)|don['’]?t|do not)(?!\s*[,，]?\s*(?:you|we|i|they|he|she|it)\b)\b|(?:from now on|going forward|in (?:the )?future)\b)/iu;
 
 /** A bounded intent recognizer, not a general semantic classifier. A stated preference
  * or project requirement may precede a question asking for feedback. Mere questions,
