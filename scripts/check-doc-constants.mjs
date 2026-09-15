@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
 	MAX_CANDIDATES, MAX_CLAIMS, MAX_CLAIM_BYTES, MAX_CLAIM_CHARS, MIN_CLAIM_CHARS, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS, RELATED_CONTAINMENT,
-	MAX_SEARCH_TERMS, MAX_SEARCH_TERM_CHARS, MIN_SEARCH_TERM_CHARS, MIN_FOCUS_COVERAGE, SCHEMA_VERSION,
+	MAX_SEARCH_TERMS, MAX_SEARCH_TERM_CHARS, MIN_SEARCH_TERM_CHARS, MIN_FOCUS_COVERAGE, MAX_HISTORY_TURN_BYTES, MAX_QUERY_BYTES, SCHEMA_VERSION,
 } from '../src/memory/limits.ts';
 import { AGING } from '../src/memory/quality.ts';
 
@@ -76,6 +76,12 @@ const BOUNDS = [
 	['docs/design.md', /a claim may run to (\d+) characters and carry (\d+) bilingual aliases/, [MAX_CLAIM_CHARS, MAX_SEARCH_TERMS], 'why the subject side has no share floor'],
 	['docs/design.md', /validated JSON \(an outer Markdown fence is tolerated\), at most ([\d,]+) bytes/, [group(MAX_OUTPUT_BYTES)], 'output size guard'],
 	['docs/design.md', /declaring no limit is reserved ([\d,]+) tokens/, [group(MAX_OUTPUT_TOKENS)], 'reserved answer budget'],
+	['docs/design.md', /up to\s+([\d,]+) UTF-8 bytes reach feature extraction, not the ([\d,]+)-byte-per-turn budget/,
+		[group(MAX_QUERY_BYTES), group(MAX_HISTORY_TURN_BYTES)], 'live-prompt vs replayed-history query budgets'],
+	['docs/usage.md', /run up to ([\d,]+) UTF-8 bytes before feature extraction/, [group(MAX_QUERY_BYTES)], 'live-prompt query budget'],
+	['docs/usage.md', /keeps the smaller\n  ([\d,]+)-byte-per-turn budget/, [group(MAX_HISTORY_TURN_BYTES)], 'replayed-history query budget'],
+	['docs/design.md', /selecting at most 6 user\ntexts of ([\d,]+) UTF-8 bytes each/, [group(MAX_HISTORY_TURN_BYTES)], 'per-turn history scan budget'],
+	['docs/progress-pipeline.md', /retaining at most six sanitized user\ntexts of ([\d,]+) bytes each/, [group(MAX_HISTORY_TURN_BYTES)], 'per-turn history scan budget'],
 ];
 for (const [file, pattern, expected, what] of BOUNDS) {
 	const body = read.get(file);
@@ -187,6 +193,7 @@ assert.ok(MAX_OUTPUT_BYTES >= MAX_CLAIMS * (MAX_CLAIM_BYTES + 1024),
 assert.ok(MAX_OUTPUT_TOKENS === MAX_CLAIMS * MAX_CLAIM_CHARS, 'MAX_OUTPUT_TOKENS must stay derived from the claim contract');
 assert.ok(MAX_CLAIM_BYTES === MAX_CLAIM_CHARS * 3, 'MAX_CLAIM_BYTES must stay worst-case UTF-8 for MAX_CLAIM_CHARS');
 assert.ok(MAX_SEARCH_TERM_CHARS > MIN_SEARCH_TERM_CHARS && MAX_CLAIM_CHARS > MIN_CLAIM_CHARS, 'bounds inverted');
+assert.ok(MAX_QUERY_BYTES > MAX_HISTORY_TURN_BYTES, 'the live-prompt budget must stay larger than the replayed-history budget, or the live prompt is clipped back down to one turn\'s bound');
 
 // The aging table has never been gated, and constant drift has shipped before. Each kind states a
 // half-life, a floor and a dormancy horizon, and all three change ranking or what gets injected.
@@ -283,6 +290,20 @@ assert.ok(MAX_SEARCH_TERM_CHARS > MIN_SEARCH_TERM_CHARS && MAX_CLAIM_CHARS > MIN
 		&& (retriever.match(/topicMatches\s*(?:\+\+|\+=|-=|--|=(?!=))/gu) ?? []).length === 2, // the `= 0` declaration and the one increment
 		'topicMatches must count only curated topic names: concepts, exact resources, or the aliases the\n'
 		+ '    model wrote for that claim, in one place. Counting bare prose words restores the defect it prevents.');
+}
+
+// The live current-turn prompt and replayed history turns must keep separate byte budgets, or
+// this regresses to the defect the fix above found: the live prompt clipped to a REPLAYED turn's
+// bound, silently discarding a task's own topic past byte 2048 before any feature was extracted.
+{
+	const query = readFileSync('src/memory/query.ts', 'utf8');
+	const sessionContext = readFileSync('src/adapter/session-context.ts', 'utf8');
+	assert.ok(query.includes('MAX_QUERY_BYTES') && query.includes('MAX_HISTORY_TURN_BYTES'),
+		'query.ts must source the live-prompt and replayed-history budgets from limits.ts by name, not\n'
+		+ '    reintroduce a shared literal that collapses the two back into one bound');
+	assert.ok(!/\b2048\b/u.test(query) && !/\b2048\b/u.test(sessionContext),
+		'query.ts and session-context.ts must not clip by a bare 2048 literal; use MAX_HISTORY_TURN_BYTES\n'
+		+ '    so the replayed-history bound cannot drift from the one enforced at its source');
 }
 
 // docs/usage.md lists the English directive cues by name. That list is the feature's user-facing

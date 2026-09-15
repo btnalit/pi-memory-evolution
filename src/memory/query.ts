@@ -1,5 +1,6 @@
 import { clipBytes, redact } from './privacy.ts';
 import { features, transformProse } from './search.ts';
+import { MAX_HISTORY_TURN_BYTES, MAX_QUERY_BYTES } from './limits.ts';
 
 export interface RecallQuery {
  query: string;
@@ -17,7 +18,8 @@ const WEAK = new Set(['配置', '设置', 'config', 'configuration', 'settings',
 // Facets can refine an established subject; they cannot make a new named subject inherit
 // unrelated context. This is a grammatical/attribute vocabulary, not a domain allowlist.
 export const FACETS = new Set([...features('端口 认证 进度 版本 超时 价格 状态 路径 输出 输入 安装 连接 性能 错误 port auth progress version timeout price status path output input installation connection performance error')]);
-const clean = (text: string) => clipBytes(redact(text), 2048).trim();
+// Default budget is the LIVE current-turn prompt's, not a history turn's: see MAX_QUERY_BYTES.
+const clean = (text: string, budget = MAX_QUERY_BYTES) => clipBytes(redact(text), budget).trim();
 
 /** Asking to retrieve an existing memory is not an instruction to learn a new one. */
 export function isRecallQuestion(text: string): boolean {
@@ -67,11 +69,18 @@ function advance(current: string, previous?: RecallQuery): RecallQuery {
  * their subject and explicit new/reset topics form barriers. No corpus or assistant text. */
 export function resolveRecallQuery(prompt: string, recentUsers: readonly string[] = []): RecallQuery {
  const current = clean(prompt);
+ // What the live prompt would look like as a REPLAYED turn: this is what session-context.ts
+ // actually produces for it, so it is what a self-inclusion in recentUsers must compare against
+ // — comparing against `current` itself would diverge for any prompt over the history budget,
+ // since the two are no longer clipped to the same length, and shadow the real prior turn.
+ const currentAsHistory = clean(prompt, MAX_HISTORY_TURN_BYTES);
  let previous: RecallQuery | undefined;
  for (const text of recentUsers.slice(-6)) {
-  const value = clean(text);
+  // A REPLAYED turn, not the live ask: bounded at the history budget, defensively,
+  // even though the caller (session-context.ts) already enforces it at the source.
+  const value = clean(text, MAX_HISTORY_TURN_BYTES);
   // Pi may already include this turn in its active context.
-  if (value !== current) previous = advance(value, previous);
+  if (value !== currentAsHistory) previous = advance(value, previous);
  }
  return advance(current, previous);
 }

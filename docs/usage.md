@@ -186,6 +186,10 @@ rename the tool to hide the conflict; an old installation would still run its ho
   gets longer, nor as the stored claim gets longer or gains aliases, so describing a task in
   full no longer suppresses the background it is about, and a claim that explains itself is
   no harder to recall than a one-liner. A prompt that engages nothing stored still injects nothing.
+  The live prompt itself may run up to 65,536 UTF-8 bytes before feature extraction — far past a
+  single conversational turn — so a task naming a stored record after a long pasted log, diff or
+  spec is still recalled; only bounded **replayed** history from earlier turns keeps the smaller
+  2,048-byte-per-turn budget.
 - Query coverage, topic naming, evidence-based document frequency, field weights, mild length
   normalization and a relative cutoff reject weak secondary matches. Unseen query words
   no longer receive the highest rarity weight. Exact paths must match, including case; `/srv/Atlas` and `/srv/atlas` are distinct. A quoted

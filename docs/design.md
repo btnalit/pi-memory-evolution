@@ -49,6 +49,15 @@ handles Chinese/English asking/remembering phrases; technical memory/recall ques
 retain those concepts. Unknown single-character query subjects remain unmatched barriers,
 not permission to inherit an old topic or generate CJK fragment matches.
 
+The live current-turn prompt is not a REPLAYED history turn and is bounded separately: up to
+65,536 UTF-8 bytes reach feature extraction, not the 2,048-byte-per-turn budget above. A real
+task description routinely runs past one turn's bound — a pasted stack trace, diff or spec
+ahead of the actual ask — and the two budgets used to be the same one, so a task naming a
+stored record by name past byte 2048 recalled nothing at all: not a low score, no candidate,
+because the naming words never reached feature extraction. Replayed history keeps the smaller,
+documented bound, enforced at its source (`adapter/session-context.ts`) and again defensively
+here, since it is a bounded window that stands in for the whole session, not the live ask.
+
 The bounded user history is replayed oldest first. Topic-less follow-ups inherit the last
 resolved subject/focus. Related or attribute-only follow-ups carry a **structured** plan:
 current query plus supporting subject context. Thus `SQLite → port? → auth? → continue`

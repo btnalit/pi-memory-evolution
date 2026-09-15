@@ -104,3 +104,20 @@ export const MAX_OUTPUT_BYTES = 64_000;
  * is about the ask at all.
  */
 export const MIN_FOCUS_COVERAGE = 0.45;
+
+/** Bytes one REPLAYED history turn may contribute to a query (design.md: "2,048 UTF-8 bytes
+ * each"). Enforced once at the source (`adapter/session-context.ts`, before a turn is ever kept)
+ * and re-enforced defensively in `memory/query.ts`, so a caller that replays raw context directly
+ * cannot exceed it either. This is NOT the bound for the live current-turn prompt below —
+ * conflating the two is what MAX_QUERY_BYTES exists to stop. */
+export const MAX_HISTORY_TURN_BYTES = 2048;
+
+/** Bytes the LIVE current-turn prompt may reach feature extraction with. A real task description
+ * is not a conversational history turn: pasting a stack trace, a diff or a spec ahead of the
+ * actual ask routinely runs past MAX_HISTORY_TURN_BYTES. `memory/query.ts` used to clip the live
+ * prompt to that same bound before extracting any feature, so a task naming a stored record by
+ * name past byte 2048 recalled nothing at all — not a low score, no candidate at all, because the
+ * naming words never reached feature extraction. `redact()` and `Intl.Segmenter` already run in
+ * full on whatever text is kept, at a two-digit-millisecond cost measured on 100KB input, so this is a
+ * pathological-input ceiling a realistic prompt is not expected to reach, not a truncation point. */
+export const MAX_QUERY_BYTES = 65_536;

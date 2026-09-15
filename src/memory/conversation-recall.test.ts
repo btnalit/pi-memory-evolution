@@ -267,3 +267,62 @@ test('the same engagement carries a claim whatever its length or alias count, ho
  assert.equal(reasons.get('badge-verbose'), 'incidental-overlap');
  assert.equal(reasons.get('badge'), 'incidental-overlap');
 });
+
+// A live task prompt is not a conversational history turn, and it is routinely longer than one:
+// a pasted stack trace, diff or spec ahead of the actual ask commonly runs past a single turn's
+// bound. query.ts once clipped the live prompt to the same 2,048-byte budget the bounded
+// REPLAYED HISTORY uses, so a task naming a stored record by name past byte 2048 recalled nothing
+// at all — not a low score, no candidate at all, because the naming words never reached feature
+// extraction. The two must stay separate bounds: MAX_HISTORY_TURN_BYTES governs replayed context,
+// MAX_QUERY_BYTES the live prompt.
+test('a topic named past the history byte budget is still recalled from a live task prompt', () => {
+ const filler = 'This is unrelated background context describing the repository layout and prior incidents. '.repeat(30);
+ assert.ok(Buffer.byteLength(filler) > 2048, 'the fixture must actually exceed the history-turn budget');
+ const late = `${filler}Before you start, please install the dependencies for this repo so the test suite can run.`;
+ const store = [...project, ...clutter];
+ assert.deepEqual(ids(late, store), ['deps']);
+ // The real hook (index.ts) calls resolveRecallQuery(event.prompt, recentUserMessages(ctx)), and
+ // Pi may already include the live turn in that history (query.ts's own comment on the dedup
+ // check says so). That self-copy must not shadow the live prompt's larger budget with its own
+ // history-clipped one: the topic must still be found this way, not only through the bare-string
+ // helper that never exercises recentUsers.
+ assert.deepEqual(selectRelevantMemories(store, resolveRecallQuery(late, [late]), 3, now).map(m => m.id), ['deps']);
+ // A positive control first, so the negative half below actually discriminates: a short prior
+ // turn does let a topic-less 'continue' inherit its subject in this codebase.
+ assert.deepEqual(selectRelevantMemories(store, resolveRecallQuery('continue', [task]), 3, now).map(m => m.id), ['deps']);
+ // Only the LIVE prompt's budget grew. The same long text replayed as a PRIOR turn, rather than
+ // asked directly, still loses its topic past the unchanged 2,048-byte history-turn bound, so a
+ // topic-less follow-up after it cannot inherit 'deps' — proving the two budgets stayed separate
+ // rather than the history bound being widened too.
+ assert.deepEqual(selectRelevantMemories(store, resolveRecallQuery('continue', [late]), 3, now).map(m => m.id), []);
+});
+
+// The widened live-prompt budget admits far more DISTINCT words than one repeated sentence does,
+// and diverse text is the realistic risk: a pasted log or spec has hundreds of different tokens,
+// any of which could coincidentally overlap a clutter record. Reusing clutter's own vocabulary at
+// length is the adversarial case — if the topic-match requirement only ever saw short clutter
+// notes, widening the prompt budget could let a long, wordy one accumulate enough incidental
+// overlap to look engaged. It must not: naming a topic, not overlap volume, is still what admits
+// a record, however many distinct words the now-longer prompt contributes.
+test('a long, vocabulary-diverse prompt still cannot admit clutter it never names as a topic', () => {
+ const officeLog = [
+  'Badge access to the server room needs security approval from facilities before anyone new is added.',
+  'New hires get repo access on their first day, along with a desk assignment and a laptop.',
+  'Standup is at 9:15 and should run no longer than ten minutes, ideally in the small meeting room.',
+  'Lunch orders need to be submitted before eleven or the vendor will not deliver on time.',
+  'Spare keys are held by reception, not by the server room, in case anyone gets locked out.',
+  'Bike storage is in the basement and needs a fob; ask facilities if yours does not work.',
+  'The office coffee machine needs descaling every month or the espresso starts tasting off.',
+  'The printer on the third floor jams with thick paper, so use the one near the kitchen instead.',
+  'Paper recycling goes in the blue bins on each floor, separate from general waste.',
+  'Visitors must be signed in at the front desk and given a temporary badge for the day.',
+ ].join(' ');
+ const filler = Array.from({ length: 6 }, (_, i) => `${officeLog} Note ${i}: none of this is the actual task.`).join(' ');
+ assert.ok(Buffer.byteLength(filler) > 2048, 'the fixture must actually exceed the history-turn budget');
+ const late = `${filler} Before you start, please install the dependencies for this repo so the test suite can run.`;
+ const store = [...project, ...clutter];
+ const diagnostics = retrieveMemories(store, resolveRecallQuery(late), 3, now).diagnostics;
+ assert.deepEqual(diagnostics.selected, ['deps']);
+ const clutterIds = new Set(clutter.map(m => m.id));
+ for (const candidate of diagnostics.candidates) if (clutterIds.has(candidate.id)) assert.equal(candidate.reason, 'incidental-overlap', candidate.id);
+});
