@@ -195,16 +195,19 @@ rename the tool to hide the conflict; an old installation would still run its ho
   no harder to recall than a one-liner. A prompt that engages nothing stored still injects nothing.
   The live prompt itself may run up to 65,536 UTF-8 bytes before feature extraction — far past a
   single conversational turn — so a task naming a stored record after a long pasted log, diff or
-  spec is still recalled; only bounded **replayed** history from earlier turns keeps the smaller
+  spec is still recalled, provided any paths in the paste sit on stack-frame, diff or fenced lines
+  or carry a line reference (next point); a path on an ordinary line of an unfenced paste reads as
+  typed and stays required. Only bounded **replayed** history from earlier turns keeps the smaller
   2,048-byte-per-turn budget.
 - Query coverage, topic naming, evidence-based document frequency, field weights, mild length
   normalization and a relative cutoff reject weak secondary matches. Unseen query words
   no longer receive the highest rarity weight. An exact path or filename you type must match,
   including case; `/srv/Atlas` and `/srv/atlas` are distinct. A path that arrived inside pasted
-  material — a stack-frame line, a diff, fenced code, or a `file:line:col` reference — still
-  counts in favour of a record that names it but is not required of every record, so a trace
-  pasted ahead of the ask does not block recall of the background the ask is about; a path
-  that also appears in the ask itself is typed, and stays required. A quoted
+  material — a stack-frame line, a diff (a hunk ends where its `@@` header says), fenced code, or
+  a `file:line:col` reference — still counts in favour of a record that names it but is not
+  required of every record, so a trace pasted ahead of the ask does not block recall of the
+  background the ask is about; a path that also appears in the ask itself is typed, and stays
+  required. A quoted
   question in a replay/incident note is weaker than evidence answering it. Redundancy
   filtering cannot let a project-state note hide a preference of the same origin.
   Source IDs/cwd have no authority bonus. After relevance gates, host-assigned evidence,

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rankMemories, recallQuery, resolveRecallQuery, retrieveMemories, selectRelevantMemories } from './retriever.ts';
-import { queryFeatures, queryText } from './query.ts';
+import { pastedLiterals, queryFeatures, queryText } from './query.ts';
 import { buildRuntimeDigest } from '../injector/digest.ts';
 import type { DurableMemory } from './memory-store.ts';
 
@@ -389,6 +389,34 @@ test('a stack trace, diff or fenced paste ahead of the ask does not block recall
  const bug = memory('export-bug', 'The stack trace from /home/me/invoice-api/src/export.ts is the CSV streaming bug; rows is undefined until the query resolves.', { searchTerms: ['csv export', 'streaming'] });
  const withBug = retrieveMemories([...store, bug], resolveRecallQuery(`${trace}\n\n${ask}`), 3, now).diagnostics;
  assert.ok(withBug.candidates.find(c => c.id === 'export-bug')!.matches.includes('literal:/home/me/invoice-api/src/export.ts'));
+});
+
+// A hunk header says how many body lines follow (`@@ -a,b +c,d @@`), so a well-formed hunk ends
+// exactly where the diff says — and the line after it is the ask again, even when it starts with
+// `-` (a markdown bullet), `+` or a space, which the body-shape heuristic alone read as more hunk.
+// Otherwise a path typed in a bullet right after a pasted diff, with no blank line between, was
+// laundered into the pasted set and stopped constraining, the one thing the fix promised not to do.
+test('a diff hunk ends where its header says, so a bullet ask right after it keeps its typed path', () => {
+ const store = [...project, ...clutter];
+ const ask = '- please install the dependencies for src/export.ts and fix this.';
+ const wellFormed = ['--- a/src/x.ts', '+++ b/src/x.ts', '@@ -1 +1 @@', '-old line', '+new line'].join('\n');
+ const mandatory = (text: string) => [...queryFeatures(text)].filter(w => w.startsWith('literal:') && !pastedLiterals(text).has(w));
+ assert.deepEqual(mandatory(`${wellFormed}\n${ask}`), ['literal:src/export.ts'], 'no blank line between the diff and the bullet');
+ const typed = retrieveMemories(store, resolveRecallQuery(`${wellFormed}\n${ask}`), 3, now).diagnostics;
+ assert.deepEqual(typed.selected, []);
+ assert.ok(typed.candidates.every(c => c.reason === 'resource-mismatch'), JSON.stringify(typed.candidates));
+ // Context lines count against both sides; an indented ask after a hunk with context is still the ask.
+ const context = ['@@ -1,3 +1,4 @@', "+import { stream } from './util/stream.ts';", " import { rows } from './db/rows.ts';", '-export function exportInvoices() {', '+export async function exportInvoices() {', ' }'].join('\n');
+ assert.deepEqual(mandatory(`${context}\n  please install the dependencies for src/export.ts`), ['literal:src/export.ts']);
+ assert.ok(pastedLiterals(`${context}\n  please install the dependencies for src/export.ts`).has('literal:./db/rows.ts'), 'the hunk body itself stays pasted');
+ // A truncated hunk (fewer body lines than declared) falls back to the shape heuristic: body-shaped
+ // lines stay hunk until a line that is not, so a plain-prose ask still ends it.
+ const truncated = ['@@ -1,2 +1,2 @@', '-old line', '+new line'].join('\n');
+ assert.deepEqual(mandatory(`${truncated}\nPlease install the dependencies for src/export.ts.`), ['literal:src/export.ts']);
+ assert.deepEqual(ids(`${truncated}\n\nPlease install the dependencies and fix this.`, store), ['deps']);
+ // An unfenced paste with a path on an ordinary line is typed, and stays required: this is the
+ // documented limit, pinned so that relaxing it is a decision rather than drift.
+ assert.deepEqual(mandatory("import { rows } from './db/rows.ts';\nPlease install the dependencies and fix this."), ['literal:./db/rows.ts']);
 });
 
 test('literal extraction strips frame suffixes and closing punctuation', () => {
