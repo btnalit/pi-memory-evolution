@@ -1,5 +1,5 @@
 import { clipBytes, redact } from './privacy.ts';
-import { features, transformProse } from './search.ts';
+import { features, literalFeatures, LINE_REFERENCE, LITERALS, transformProse } from './search.ts';
 import { MAX_HISTORY_TURN_BYTES, MAX_QUERY_BYTES } from './limits.ts';
 
 export interface RecallQuery {
@@ -47,6 +47,38 @@ export function queryFeatures(text: string): Set<string> {
   if (word.startsWith('literal:') && word.includes('/')) result.delete(`literal:${word.split('/').at(-1)}`);
  }
  return result;
+}
+
+// Lines that are pasted material rather than the ask: a V8 stack frame, a unified-diff header or
+// hunk, the body lines of an open hunk, and anything inside a code fence.
+const FRAME = /^\s*at\s/u;
+const DIFF_HEADER = /^(?:[-+]{3}\s|@@)/u;
+const DIFF_BODY = /^[-+ \\]/u;
+const FENCE = /^\s*(?:```|~~~)/u;
+/** Literals that arrived inside pasted material, not as the ask. A path the user types is a
+ * constraint — "/srv/wrong.json database port" must not return the /srv/right.json answer — and every
+ * literal used to be one, so a five-line stack trace or a diff ahead of the ask rejected every record
+ * as resource-mismatch before any other gate ran; traces and diffs always contain paths. A literal
+ * on a stack-frame line, a diff header or hunk line, inside a code fence, or carrying a line
+ * reference (`file:3:1`) keeps its weight but is not required of every record. A path that ALSO
+ * appears on an ordinary line is typed, and stays mandatory: pasting does not launder the ask. */
+export function pastedLiterals(text: string): Set<string> {
+ const pasted = new Set<string>(), typed = new Set<string>();
+ let fenced = false, hunk = false;
+ for (const line of clean(text).split('\n')) {
+  if (FENCE.test(line)) { fenced = !fenced; hunk = false; continue; }
+  if (DIFF_HEADER.test(line)) hunk = true;
+  else if (hunk && !DIFF_BODY.test(line)) hunk = false;
+  const quoted = fenced || hunk || FRAME.test(line);
+  for (const match of line.matchAll(LITERALS)) {
+   // A rooted path swallows its `:3:1` into the match; a relative filename stops at its extension,
+   // so the reference is what follows it on the line. Either way it is a reference, not the ask.
+   const referenced = LINE_REFERENCE.test(match[0]) || /^(?::\d+){1,2}(?![\w.])/u.test(line.slice(match.index + match[0].length));
+   for (const feature of literalFeatures(match[0])) (quoted || referenced ? pasted : typed).add(feature);
+  }
+ }
+ for (const feature of typed) pasted.delete(feature);
+ return pasted;
 }
 
 function advance(current: string, previous?: RecallQuery): RecallQuery {

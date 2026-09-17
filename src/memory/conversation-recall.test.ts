@@ -347,6 +347,57 @@ test('a topic named past the history byte budget is still recalled from a live t
  assert.deepEqual(selectRelevantMemories(store, resolveRecallQuery('continue', [late]), 3, now).map(m => m.id), []);
 });
 
+// The case the live-prompt budget was widened for — "a pasted stack trace, diff or spec ahead of the
+// ask" — still recalled nothing whenever the paste contained a path, and traces and diffs always do:
+// every literal in the prompt was a mandatory constraint on every record, so a five-line Node trace
+// rejected the whole store as resource-mismatch before coverage or topic matching ran. The literal
+// even carried its frame suffix (`literal:/home/me/invoice-api/src/export.ts:3:1)`), so a record
+// naming the file could not have matched it either. A literal the user TYPES is a constraint and
+// stays one (the /srv/wrong.json and /srv/Atlas tests elsewhere are the feature); a literal that
+// arrived inside pasted material — a stack frame, a diff, fenced code, or a file:line:col reference
+// — keeps its weight but is not required of every record.
+const trace = [
+ 'TypeError: Cannot read properties of undefined (reading \'rows\')',
+ '    at exportInvoices (/home/me/invoice-api/src/export.ts:3:1)',
+ '    at Layer.handle [as handle_request] (/home/me/invoice-api/node_modules/express/lib/router/layer.js:95:5)',
+ '    at next (/home/me/invoice-api/node_modules/express/lib/router/route.js:149:13)',
+ '    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)',
+].join('\n');
+test('a stack trace, diff or fenced paste ahead of the ask does not block recall; a typed path still constrains it', () => {
+ const store = [...project, ...clutter];
+ const ask = 'Please install the dependencies and fix this.';
+ assert.deepEqual(ids(ask, store), ['deps'], 'the bare ask');
+ const afterTrace = retrieveMemories(store, resolveRecallQuery(`${trace}\n\n${ask}`), 3, now).diagnostics;
+ assert.deepEqual(afterTrace.selected, ['deps'], 'the same ask after a stack trace');
+ assert.ok(!afterTrace.candidates.some(c => c.reason === 'resource-mismatch'), JSON.stringify(afterTrace.candidates));
+ // The frame suffix is not part of the path (F15), and the literal is still a weighted query feature.
+ assert.ok(afterTrace.query.includes('literal:/home/me/invoice-api/src/export.ts'), afterTrace.query.join(' '));
+ assert.ok(!afterTrace.query.some(word => word.includes(':3:1')), afterTrace.query.join(' '));
+ const diff = ['--- a/src/export.ts', '+++ b/src/export.ts', '@@ -1,3 +1,4 @@', "+import { stream } from './util/stream.ts';",
+  " import { rows } from './db/rows.ts';", '-export function exportInvoices() {', '+export async function exportInvoices() {'].join('\n');
+ assert.deepEqual(ids(`${diff}\n\n${ask}`, store), ['deps'], 'the same ask after a diff');
+ const fenced = ['```ts', "import { rows } from './db/rows.ts';", 'const config = require(\'/etc/invoice-api/config.json\');', '```'].join('\n');
+ assert.deepEqual(ids(`${fenced}\n${ask}`, store), ['deps'], 'the same ask after fenced code');
+ assert.deepEqual(ids(`Compiler output: src/export.ts:3:1 - error TS2339. ${ask}`, store), ['deps'], 'the same ask after a file:line:col reference');
+ // A literal the user types is the ask, and stays mandatory: no record names this file.
+ const typed = retrieveMemories(store, resolveRecallQuery('Please install the dependencies for src/export.ts and fix this.'), 3, now).diagnostics;
+ assert.deepEqual(typed.selected, []);
+ assert.ok(typed.candidates.every(c => c.reason === 'resource-mismatch'), JSON.stringify(typed.candidates));
+ // Typed once and pasted once is typed: the trace does not launder a path the ask itself names.
+ assert.deepEqual(ids(`${trace}\n\nPlease install the dependencies for /home/me/invoice-api/src/export.ts and fix this.`, store), []);
+ // A pasted literal keeps its weight: a record that names the file is matched on it.
+ const bug = memory('export-bug', 'The stack trace from /home/me/invoice-api/src/export.ts is the CSV streaming bug; rows is undefined until the query resolves.', { searchTerms: ['csv export', 'streaming'] });
+ const withBug = retrieveMemories([...store, bug], resolveRecallQuery(`${trace}\n\n${ask}`), 3, now).diagnostics;
+ assert.ok(withBug.candidates.find(c => c.id === 'export-bug')!.matches.includes('literal:/home/me/invoice-api/src/export.ts'));
+});
+
+test('literal extraction strips frame suffixes and closing punctuation', () => {
+ assert.deepEqual([...queryFeatures('at exportInvoices (/home/me/invoice-api/src/export.ts:3:1)')].filter(w => w.startsWith('literal:')), ['literal:/home/me/invoice-api/src/export.ts']);
+ assert.deepEqual([...queryFeatures('see src/export.ts:12 and (also /srv/atlas.json).')].filter(w => w.startsWith('literal:')), ['literal:src/export.ts', 'literal:/srv/atlas.json']);
+ // A digit-bearing name is not a line reference.
+ assert.deepEqual([...queryFeatures('/srv/py3/config.json')].filter(w => w.startsWith('literal:')), ['literal:/srv/py3/config.json']);
+});
+
 // The widened live-prompt budget admits far more DISTINCT words than one repeated sentence does,
 // and diverse text is the realistic risk: a pasted log or spec has hundreds of different tokens,
 // any of which could coincidentally overlap a clutter record. Reusing clutter's own vocabulary at

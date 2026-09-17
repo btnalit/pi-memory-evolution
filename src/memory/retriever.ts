@@ -3,7 +3,7 @@ import { clipBytes, fingerprint, redact } from "./privacy.ts";
 import { features, featureOffset } from "./search.ts";
 import { memoryQuality } from "./quality.ts";
 import { MIN_FOCUS_COVERAGE } from "./limits.ts";
-import { FACETS, queryFeatures, resolveRecallQuery, type RecallInput } from "./query.ts";
+import { FACETS, pastedLiterals, queryFeatures, resolveRecallQuery, type RecallInput } from "./query.ts";
 export { recallQuery, resolveRecallQuery } from "./query.ts";
 
 function overlap(text: string, query: Set<string>): number {
@@ -75,7 +75,11 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 	// Exact paths and filenames are identities, not vocabulary, and are exempt.
 	const rare = (word: string) => frequency.get(word)! <= Math.max(2, 0.02 * documents.length);
 	const total = [...query].reduce((sum, word) => sum + weights.get(word)!, 0);
-	const literals = [...query, ...context].filter(word => word.startsWith('literal:'));
+	// Every literal the user typed is a constraint on every record. One that arrived inside pasted
+	// material — a stack frame, a diff, fenced code, a file:line reference — keeps its weight above
+	// but is not required, or a trace ahead of the ask would reject the whole store (query.ts).
+	const pasted = new Set([...pastedLiterals(plan.query), ...pastedLiterals(plan.context ?? '')]);
+	const literals = [...query, ...context].filter(word => word.startsWith('literal:') && !pasted.has(word));
 	const subjects = [...context].filter(word => !FACETS.has(word));
 	const subjectWeight = subjects.reduce((sum, word) => sum + weights.get(word)!, 0);
 	const namedSubjects = subjects.filter(word => !word.startsWith('concept:'));

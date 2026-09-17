@@ -199,7 +199,12 @@ rename the tool to hide the conflict; an old installation would still run its ho
   2,048-byte-per-turn budget.
 - Query coverage, topic naming, evidence-based document frequency, field weights, mild length
   normalization and a relative cutoff reject weak secondary matches. Unseen query words
-  no longer receive the highest rarity weight. Exact paths must match, including case; `/srv/Atlas` and `/srv/atlas` are distinct. A quoted
+  no longer receive the highest rarity weight. An exact path or filename you type must match,
+  including case; `/srv/Atlas` and `/srv/atlas` are distinct. A path that arrived inside pasted
+  material — a stack-frame line, a diff, fenced code, or a `file:line:col` reference — still
+  counts in favour of a record that names it but is not required of every record, so a trace
+  pasted ahead of the ask does not block recall of the background the ask is about; a path
+  that also appears in the ask itself is typed, and stays required. A quoted
   question in a replay/incident note is weaker than evidence answering it. Redundancy
   filtering cannot let a project-state note hide a preference of the same origin.
   Source IDs/cwd have no authority bonus. After relevance gates, host-assigned evidence,

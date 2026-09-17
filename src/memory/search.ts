@@ -46,7 +46,18 @@ const STOP = new Set(`的 了 是 在 有 没有 现在 目前 当前 这个 那
 const WORDS = new Intl.Segmenter("zh", { granularity: "word" });
 // Paths and filenames are an exact-literal channel. Their components must not turn a
 // repository named pi-memory-evolution into evidence about the meaning of "memory".
-const LITERALS = /(?<![\p{L}\p{N}_])(?:~?\/|\.\.?\/)[^\s`"'<>，。！？,;!?]+|(?<![\w./-])(?:[\w.-]+\/)*[\w-]+\.(?:[cm]?[jt]sx?|json|md|sqlite|toml|ya?ml|sh|py|go|rs)\b|(?<![a-z0-9-])[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}/giu;
+export const LITERALS = /(?<![\p{L}\p{N}_])(?:~?\/|\.\.?\/)[^\s`"'<>，。！？,;!?]+|(?<![\w./-])(?:[\w.-]+\/)*[\w-]+\.(?:[cm]?[jt]sx?|json|md|sqlite|toml|ya?ml|sh|py|go|rs)\b|(?<![a-z0-9-])[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}/giu;
+/** A `file:line:col` or `file:line` reference, as compilers, linters and stack frames print paths,
+ * with the frame's closing parenthesis. Not part of the resource's identity. */
+export const LINE_REFERENCE = /(?::\d+){1,2}\)?$/u;
+/** The features one raw literal match contributes: the exact resource and, separately, its
+ * basename. One definition, so the query side can tell which features a given match produced. */
+export function literalFeatures(literal: string): [string, string] {
+	// Literal resource identity is case-sensitive, unlike prose. A line reference, a closing
+	// parenthesis and sentence punctuation are what surrounds a path, never part of it.
+	const clean = literal.replace(LINE_REFERENCE, '').replace(/[.:)]+$/u, '');
+	return [`literal:${clean}`, `literal:${clean.split("/").at(-1)}`];
+}
 
 /** Query-language cleanup must never rewrite literal paths/filenames. */
 export function transformProse(text: string, transform: (prose: string) => string): string {
@@ -62,9 +73,7 @@ export function features(text: string, includeSingle = false): Set<string> {
 	const result = new Set<string>();
 	let prose = redact(text).replace(/\[REDACTED[^\]\n]*\]/gu, " ");
 	prose = prose.replace(LITERALS, (literal) => {
-		const clean = literal.replace(/[.:]+$/u, ''); // Literal resource identity is case-sensitive, unlike prose.
-		result.add(`literal:${clean}`);
-		result.add(`literal:${clean.split("/").at(-1)}`);
+		for (const feature of literalFeatures(literal)) result.add(feature);
 		return " ";
 	});
 	// Detect all concepts on the original prose so overlapping phrases such as

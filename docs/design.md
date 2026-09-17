@@ -112,7 +112,12 @@ Neither side is the no-filler safeguard by itself — the gates below run
 first and are unchanged, and the relative cutoff, three-claim limit and digest byte cap run after.
 At least 3 focus features still require 2 matches.
 A single match cannot qualify alongside unknown non-attribute words. All explicit literal
-constraints must match, including qualified paths rather than only shared basenames.
+constraints must match, including qualified paths rather than only shared basenames — explicit
+meaning typed as part of the ask. A literal that arrived inside pasted material (a stack-frame
+line, a diff header or hunk, fenced code, or a `file:line:col` reference; `memory/query.ts`)
+keeps its doubled weight but is not a constraint, because traces and diffs always contain paths
+and requiring each of them of every record rejected the whole store before any other gate ran.
+Line references and a frame's closing parenthesis are stripped from the literal itself.
 Supporting context contributes at 0.35 weight and cannot replace current-focus evidence.
 Named context subject features must match; a concept-only contextual subject needs 60%
 weighted subject coverage. Generic attributes are not subject anchors. Evidence gets mild
