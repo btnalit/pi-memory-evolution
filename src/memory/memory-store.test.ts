@@ -135,6 +135,34 @@ test("an event that changed no memory does not invalidate an in-flight result; o
 		assert.match(plan, /USING (?:COVERING )?INDEX events_scope_changes/, plan);
 	} finally { db.close(); }
 }));
+// The narrower generation above reopened a race the review had probed and ruled out: a confirmation
+// (`reinforce`) writes no event at all — it is "not a change" — and before that fix it was protected
+// only because finishEvolution's always-written event, empty or not, made a competing result stale.
+// A source captured before the confirming one but finished after it then wrote through the confirmed
+// record from its older snapshot, and the stamp was gone: the record's decay anchor went backwards,
+// silently. The result is not stale — nothing it was shown changed — but what it writes must carry
+// the stamp written meanwhile, exactly as `undo` already carries it.
+test("a write-through from an older snapshot cannot erase a confirmation stamp written meanwhile", () => using((s) => {
+	const at = (d: number) => new Date(Date.parse("2026-09-01T00:00:00Z") + d * 86_400_000).toISOString();
+	s.capture({ ...source("seed", "## Critical Context\n- Database uses SQLite.\n- The printer is on floor three."), createdAt: at(0) });
+	const existing = s.readMemories().find(m => m.content.includes("SQLite"))!;
+	const old = s.readMemories().find(m => m.content.includes("printer"))!;
+	// S2 is captured first and delayed; S1, captured later, confirms the database record and finishes first.
+	s.capture({ id: "s2", scope: "/project", kind: "user", content: "Remember: the printer is on floor three no longer.", createdAt: at(3) });
+	s.capture({ id: "s1", scope: "/project", kind: "user", content: "Remember: the database uses SQLite.", createdAt: at(5) });
+	const second = s.beginEvolution("s2")!, first = s.beginEvolution("s1")!;
+	assert.ok(first.candidates.some(m => m.id === existing.id) && !second.candidates.some(m => m.id === existing.id), "fixture: only S1 is shown the database record");
+	assert.ok(second.candidates.some(m => m.id === old.id) && second.memories.some(m => m.id === existing.id), "fixture: S2 is shown the printer note and can write through the database record");
+	s.finishEvolution(first, [], "model");
+	assert.equal(s.readMemories().find(m => m.id === existing.id)!.reinforcedAt, at(5), "fixture: S1 confirmed it, writing no event");
+	// S2 replaces the printer note with text equal to the database record: a write-through of `existing`.
+	s.finishEvolution(second, [{ kind: "fact", content: "Database uses SQLite.", replaces: old.id }], "model");
+	const after = s.readMemories().find(m => m.id === existing.id)!;
+	assert.equal(after.updatedAt, at(3), "the write-through itself is intended");
+	assert.equal(after.revision, existing.revision + 1);
+	assert.equal(after.reinforcedAt, at(5), "but the confirmation written meanwhile survives it");
+	assert.equal(s.readMemories().find(m => m.id === old.id)!.status, "forgotten");
+}));
 test("stale model result from an older source cannot replace newer facts", () => using((s) => {
 	s.capture(source()); s.capture({...source("old"),createdAt:"2000-01-01T00:00:00.000Z"});
 	const run=s.beginEvolution("old")!;

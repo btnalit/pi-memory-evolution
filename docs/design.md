@@ -167,7 +167,10 @@ Pin/unpin, legacy annotation, explicit feedback and conflict resolution preserve
 date, and undo restores the prior date. Undo also ignores the confirmation stamp when deciding
 whether a record changed, and carries it forward rather than reverting it: confirmation writes no
 event, so an event snapshot can never carry a later stamp, and comparing it would make every
-confirmed record permanently un-undoable. Event history separately records when an operation
+confirmed record permanently un-undoable. Every write carries the current stamp forward the same
+way: a confirmation is not a change, so it does not make an in-flight result stale, and a result
+that then writes through the confirmed record from its older snapshot must not carry that
+snapshot's stamp over the newer one. Event history separately records when an operation
 occurred.
 
 See [core-quality.md](core-quality.md) for the evidence contract, exact ranking policy,

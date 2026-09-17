@@ -262,6 +262,8 @@ export class MemoryStore {
 	/** Confirmation is not a change: no content, evidence, status or `updatedAt` moves, so it writes
 	 * no event and creates no undo point - there is nothing to undo about having been mentioned. Only
 	 * `reinforcedAt` moves, and only forward, so replay or an out-of-order source cannot roll it back.
+	 * Writing no event also means it does not make an in-flight result stale; `record` carries the
+	 * current stamp onto every write, so a result built from an older snapshot cannot erase it either.
 	 * Pinned records are skipped because their freshness is already fixed at 1. */
 	private reinforce(ids: Iterable<string>, at: string): void {
 		const stamp = Date.parse(at);
@@ -280,6 +282,15 @@ export class MemoryStore {
 	}
 	private record(actor: string, reason: string, after: DurableMemory[], scope: string): string {
 		const before = after.map((m) => this.get(m.id) ?? null);
+		// A confirmation stamp moves only forward and writes no event (see `reinforce`), so a result
+		// computed before one landed is not stale — nothing it was shown changed — and commits. What it
+		// writes through was built from its older snapshot, and carried that snapshot's stamp over the
+		// newer one: the record's decay anchor went backwards, silently. The current stamp is carried
+		// onto whatever is written here, for every writer, exactly as `undo` already carries it.
+		after = after.map((memory, i) => {
+			const current = before[i]?.reinforcedAt;
+			return current && (!memory.reinforcedAt || Date.parse(current) > Date.parse(memory.reinforcedAt)) ? { ...memory, reinforcedAt: current } : memory;
+		});
 		const at = new Date().toISOString();
 		const event: Event = { id: randomUUID(), at, actor, reason, scope, before, after };
 		for (const memory of after) {
