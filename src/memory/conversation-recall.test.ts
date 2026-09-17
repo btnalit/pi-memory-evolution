@@ -225,7 +225,7 @@ test('an everyday word shared with a short claim is not a topic, in any store si
 // aliases ['server','access'] the badge note was injected on an ordinary task prompt about the API
 // server, while its alias-less twin was correctly held out. Naming a topic is a property of the
 // word, not of where it was written: an alias or concept names one only when it is rare in the
-// store (df <= max(2, 2% of records)), the same document frequency the weights already use.
+// store (df <= max(3, 2% of records)), the same document frequency the weights already use.
 test('an everyday alias shared across the store does not name a topic; a rare one still does', () => {
  const aliased = memory('badge-aliased', 'Badge access to the server room needs security approval.', { searchTerms: ['server', 'access'] });
  const plain = memory('badge-plain', 'Badge access to the server room needs security approval.');
@@ -249,6 +249,40 @@ test('an everyday alias shared across the store does not name a topic; a rare on
  const ports = Array.from({ length: 6 }, (_, i) => memory(`port-${i}`, `Service ${i} listens on port ${9000 + i}.`));
  const health = memory('health', 'The health endpoint on the API server answers on the admin port.', { searchTerms: ['health check'] });
  assert.ok(!ids('The invoice API server needs a health endpoint before the tests can run in staging.', [...ports, ...clutter, health]).includes('port-3'));
+});
+
+// The floor of the rarity rule is where the two sides of the subject gate meet. A floor of 2
+// held out the everyday alias above only once three records mentioned servers — and, in any store
+// under 150 records, silenced a real topic as soon as three records carried it: three notes aliased
+// `billing` (a decision, a retry policy, a tax rule) made `billing` df 3, so none of them was carried
+// on the subject side and a long task prompt about the billing service injected nothing, where with
+// one or two billing records the decision was injected. A topic with several records is the ordinary
+// shape of a project store, and a long task prompt naming it is the case the subject side exists
+// for. The floor is 3: a topic keeps naming its records up to three of them (more as the store grows
+// past 150), and an everyday alias is held out from df 4 — the twin fixture above sits at df 5.
+test('a topic carried by three records still names them on a long task prompt', () => {
+ const billing = [
+  memory('billing-db', 'We decided to use Postgres instead of MySQL for the billing service.', { kind: 'decision', searchTerms: ['billing', 'postgres'] }),
+  memory('billing-retry', 'Billing webhooks are retried three times with exponential backoff.', { searchTerms: ['billing', 'webhooks'] }),
+  memory('billing-tax', 'Tax rates for billing come from the finance sheet, never hard-coded.', { searchTerms: ['billing', 'tax'] }),
+ ];
+ const store = [...project.filter(m => m.id !== 'billing'), ...clutter, ...billing];
+ const prompt = 'I want to add a monthly statement export to the billing service. It should stream the response so large\n'
+  + 'exports do not blow up memory, respect the existing authentication middleware, and include a test. Please\n'
+  + 'start by reading the current invoice module and telling me what you would change.';
+ const diagnostics = retrieveMemories(store, resolveRecallQuery(prompt), 3, now).diagnostics;
+ assert.equal(store.filter(m => m.searchTerms?.includes('billing')).length, 3, 'fixture: billing has df 3');
+ assert.ok(diagnostics.selected.includes('billing-db'), JSON.stringify(diagnostics.candidates.filter(c => c.id.startsWith('billing'))));
+ assert.ok(!diagnostics.candidates.some(c => c.id.startsWith('billing') && c.reason === 'incidental-overlap'), 'the topic still names its records');
+ // The same prompt, and nothing about billing stored: still nothing injected.
+ assert.deepEqual(ids(prompt, [...project.filter(m => m.id !== 'billing'), ...clutter]), []);
+ // An everyday alias shared by four records is held out; the badge twins above are the df-5 case.
+ const servers = [memory('build-server', 'The build server has sixteen cores.', { searchTerms: ['server'] }),
+  memory('log-server', 'The log server keeps ninety days.', { searchTerms: ['server'] }),
+  memory('mail-server', 'The mail server relays through the provider.', { searchTerms: ['server'] })];
+ const aliased = memory('badge-aliased', 'Badge access to the server room needs security approval.', { searchTerms: ['server', 'access'] });
+ const held = retrieveMemories([...project, ...clutter.filter(m => m.id !== 'badge'), ...servers, aliased], resolveRecallQuery('The invoice API server needs a health endpoint before the tests can run in staging.'), 3, now).diagnostics;
+ assert.equal(held.candidates.find(c => c.id === 'badge-aliased')?.reason, 'incidental-overlap');
 });
 
 test('multilingual incidental overlap cannot displace a named subject', () => {

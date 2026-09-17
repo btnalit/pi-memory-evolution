@@ -86,12 +86,15 @@ Current-focus coverage — the share of what was just asked that this record acc
 be **>=0.45**; that is the right measure for a recall question, where the prompt *is* the subject.
 Alternatively, the prompt must *name* the record's topic: at least one query feature that is an
 exact path/filename, or a curated concept synonym or one of the model-written `searchTerms` for
-that claim that is **rare in the store** — document frequency at most `max(2, 2% of records)`, the
+that claim that is **rare in the store** — document frequency at most `max(3, 2% of records)`, the
 same frequency that weights the word — alongside the ordinary multi-match requirement below. The
 rarity clause is what keeps the subject side from being only as strong as its weakest alias: a
 model asked for aliases grounded in a claim about the server room writes `server`, and an
 everyday word must not carry that note onto every task prompt mentioning a server while its
-alias-less twin is held out. That is what a task prompt
+alias-less twin is held out. The floor of 3 is where that rule's two costs meet: a topic keeps
+naming its records while up to three carry it, an everyday alias is held out from four, and below
+that the data cannot tell the two apart — in a store where only one note talks about servers,
+"server" is that note's topic. That is what a task prompt
 needs: query coverage is a fraction of everything said, so describing a task in two sentences
 rather than three words divides a relevant record's score by the length of the description, and
 automatic injection effectively only worked for short questions. Naming is unaffected by whatever

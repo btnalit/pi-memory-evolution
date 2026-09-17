@@ -72,8 +72,14 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 	// note onto any task prompt mentioning a server — while its alias-less twin was correctly held
 	// out. Rarity is data-driven and prompt-invariant, the property the subject side already has:
 	// the same document frequency that weights the word decides whether it can name anything.
-	// Exact paths and filenames are identities, not vocabulary, and are exempt.
-	const rare = (word: string) => frequency.get(word)! <= Math.max(2, 0.02 * documents.length);
+	// Exact paths and filenames are identities, not vocabulary, and are exempt. The floor is where
+	// the rule's two costs meet: at 2 it silenced a real topic as soon as three records carried it
+	// (three notes aliased `billing` recalled nothing on a long billing prompt in any store under
+	// 150 records), which is the ordinary shape of a project store; at 3 a topic keeps naming its
+	// records up to three of them, and an everyday alias is held out from df 4. Below that the data
+	// cannot tell an everyday word from a topic: in a store where only one note talks about servers,
+	// "server" is that note's topic. See conversation-recall.test.ts for both sides of the line.
+	const rare = (word: string) => frequency.get(word)! <= Math.max(3, 0.02 * documents.length);
 	const total = [...query].reduce((sum, word) => sum + weights.get(word)!, 0);
 	// Every literal the user typed is a constraint on every record. One that arrived inside pasted
 	// material — a stack frame, a diff, fenced code, a file:line reference — keeps its weight above
