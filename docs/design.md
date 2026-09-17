@@ -261,6 +261,11 @@ governed per call, per source and per day by the routing policy. Context reserva
 spend estimate reserve **exactly the ceiling that will be sent**, so neither can admit a payload
 that leaves no room for the reply the request permits, nor admit a call as cheaper than it may
 bill. A model declaring no limit is reserved 12,800 tokens, this contract's worst legal reply.
+A catalog entry whose `maxTokens` is no smaller than its `contextWindow` — the catalog's convention
+for "may use the whole window", true of every first-party Mistral, Moonshot and xAI model — is treated
+the same way: sent no ceiling and reserved the worst legal reply, because reserving the whole window
+left no room for any input and refused every call unsent. Context arithmetic counts tokens, not
+bytes: one per CJK character and at most three bytes per token elsewhere, a deliberate overestimate.
 A 120-second per-attempt deadline bounds waiting even when a provider ignores abort;
 remote computation/billing cannot be guaranteed to stop. A backup has a fresh deadline,
 clamped by the source's remaining 300-second cumulative allowance. Failed calls retain local summary claims. User-cue prose is saved but needs a

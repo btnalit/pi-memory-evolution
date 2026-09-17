@@ -44,7 +44,9 @@ export const completeMemory: CompleteMemory = async (ctx, systemPrompt, input, s
 	// before any answer is written, so an invented ceiling can leave a thinking model with no room
 	// to answer at all. This one cannot: it is the most the model could ever emit. Not every adapter
 	// substitutes a default when the field is omitted, so it is sent explicitly rather than left out.
-	const maxTokens = answerCeiling(model.maxTokens);
+	// A ceiling no smaller than the window is the catalog saying "the whole window", not a number to
+	// send; that case is left out like a model declaring none (see limits.ts).
+	const maxTokens = answerCeiling(model.maxTokens, model.contextWindow);
 	try {
 		const response = await registry.complete(model, {
 			systemPrompt,

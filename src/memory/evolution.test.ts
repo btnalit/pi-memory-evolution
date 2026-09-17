@@ -7,7 +7,7 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { MemoryStore } from './memory-store.ts';
 import { evolve, parseClaims } from './evolution.ts';
 import { MAX_CLAIM_CHARS, MIN_CLAIM_CHARS } from './extractor.ts';
-import { MAX_CANDIDATES, MAX_OUTPUT_TOKENS, RELATED_CONTAINMENT } from './limits.ts';
+import { MAX_CANDIDATES, MAX_OUTPUT_TOKENS, RELATED_CONTAINMENT, estimateTokens } from './limits.ts';
 import { features, mentions } from './search.ts';
 import { memoryQuality } from './quality.ts';
 import { retrieveMemories } from './retriever.ts';
@@ -102,6 +102,45 @@ test('the reply budget reserved locally is exactly the ceiling the request will 
 	store.capture({id:'s3',scope:'/project',kind:'summary',content:'## Critical Context\n- Queue uses NATS.',createdAt:new Date().toISOString()});
 	await assert.rejects(evolve(store,'s3',ctx(19000,20000),AbortSignal.timeout(1000),complete),
 		(error:{code?:string})=>error.code==='context_limit');
+}));
+
+// 182 of the 1,354 entries in Pi 0.85.1's model catalog declare maxTokens === contextWindow — every
+// first-party Mistral, Moonshot and xAI model among them. That is the catalog's convention for "may
+// use the whole window", not a usable ceiling: reserved in full it left no room for any input, so
+// every attempt on those models failed locally as context_limit, cooled the model for an hour and
+// spent one of the source's four calls, without a request ever having been sent.
+test('a model declaring its whole window as its ceiling is treated as declaring none, and is actually called',()=>using(async(store)=>{
+	const seen:(undefined|{outputTokens?:number})[]=[];
+	const begin=store.beginEvolution.bind(store);
+	(store as unknown as {beginEvolution:unknown}).beginEvolution=(...args:Parameters<typeof begin>)=>{seen.push(args[5]);return begin(...args);};
+	let calls=0;
+	const complete:CompleteMemory=async()=>{calls++;return {model:'mistral/devstral-latest',text:'{"memories":[]}'};};
+	const whole={model:{provider:'mistral',id:'devstral-latest',contextWindow:262144,maxTokens:262144}} as unknown as ExtensionContext;
+	assert.equal(await evolve(store,'s1',whole,AbortSignal.timeout(1000),complete),true);
+	assert.equal(calls,1,'the provider must actually be asked');
+	assert.equal(seen.at(-1)?.outputTokens,MAX_OUTPUT_TOKENS,'nothing is sent as a ceiling, so the contract worst case is what is reserved');
+	assert.match(store.status(),/done=1/);
+	assert.ok(!store.status().includes('context_limit'));
+}));
+
+// The same arithmetic counted every byte as a token. A 24 KB ASCII source is about 8,000 tokens,
+// which fits a 20,000-token window beside a 4,000-token answer with room to spare; counted as 24,000
+// tokens it did not, so the call was refused locally on a model that would have taken it.
+test('context arithmetic counts tokens, not bytes, so a payload that fits is not refused unsent',()=>using(async(store)=>{
+	const prose='The Atlas deployment checklist covers staging, canary and production rollout steps. '.repeat(280);
+	assert.ok(Buffer.byteLength(prose)>20000&&Buffer.byteLength(prose)<32000,'the fixture must exceed the window in bytes yet stay inside the source cap');
+	store.capture({id:'wide',scope:'/project',kind:'user',content:prose,createdAt:new Date().toISOString()});
+	let calls=0;
+	const complete:CompleteMemory=async()=>{calls++;return {model:'p/m',text:'{"memories":[]}'};};
+	const tight={model:{provider:'p',id:'m',contextWindow:20000,maxTokens:4000}} as unknown as ExtensionContext;
+	assert.equal(await evolve(store,'wide',tight,AbortSignal.timeout(1000),complete),true);
+	assert.equal(calls,1);
+	// The estimator stays conservative in both scripts: one token per CJK character, and no more than
+	// three bytes per token elsewhere, so JSON punctuation and short identifiers are not undercounted.
+	assert.equal(estimateTokens('中'.repeat(100)),100);
+	assert.equal(estimateTokens('a'.repeat(300)),100);
+	assert.equal(estimateTokens('中'.repeat(10)+'a'.repeat(30)),20);
+	assert.ok(estimateTokens(JSON.stringify({content:'{"a":1}'}))>=Math.ceil(Buffer.byteLength(JSON.stringify({content:'{"a":1}'}))/3));
 }));
 
 // Retrieval is the host's job: it is deterministic, free, and already knows the vocabulary of every

@@ -66,9 +66,29 @@ export const MAX_OUTPUT_TOKENS = MAX_CLAIMS * MAX_CLAIM_CHARS;
  * context arithmetic and spend MUST be the same. Reserving less than is asked for lets a payload
  * be packed that leaves no room for the reply the request permits — the provider then rejects the
  * whole call, and a cost ceiling can be overshot by a call that was admitted as cheaper. */
-export function answerCeiling(modelMaxTokens: unknown): number | undefined {
-	return Number.isSafeInteger(modelMaxTokens) && (modelMaxTokens as number) > 0 ? modelMaxTokens as number : undefined;
+export function answerCeiling(modelMaxTokens: unknown, contextWindow?: unknown): number | undefined {
+	if (!Number.isSafeInteger(modelMaxTokens) || (modelMaxTokens as number) <= 0) return undefined;
+	// A ceiling no smaller than the window is the catalog's convention for "may use the whole window"
+	// (182 of the 1,354 entries in Pi 0.85.1's catalog, every first-party Mistral, Moonshot and xAI
+	// model among them), not a number that can be reserved: reserved in full it leaves no room for
+	// any input, so every attempt failed locally as context_limit before a request was ever sent.
+	// It is treated exactly like a model declaring no limit — nothing is sent, the provider's own
+	// default applies, and MAX_OUTPUT_TOKENS is reserved — which keeps "reserve what is sent" intact.
+	if (Number.isSafeInteger(contextWindow) && (contextWindow as number) > 0 && (modelMaxTokens as number) >= (contextWindow as number)) return undefined;
+	return modelMaxTokens as number;
 }
+/** A conservative token estimate for context arithmetic. Counting every byte as a token was four
+ * times too pessimistic for ASCII and refused calls that fit: on a model whose window is tight but
+ * usable, a 24 KB source read as 24,000 tokens against a 20,000-token window. One token per CJK
+ * code point (the unit MAX_OUTPUT_TOKENS already assumes) and no more than three bytes per token
+ * elsewhere still overestimates real tokenizers on JSON, identifiers and paths, so a payload that
+ * passes here fits; it just no longer refuses one that would have. This is not exact tokenization. */
+export function estimateTokens(text: string): number {
+	let cjk = 0, cjkBytes = 0;
+	for (const char of text) if (CJK.test(char)) { cjk++; cjkBytes += Buffer.byteLength(char); }
+	return cjk + Math.ceil((Buffer.byteLength(text) - cjkBytes) / 3);
+}
+const CJK = /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]$/u;
 // Worst legal reply on the wire (~56.8 KB: MAX_CLAIMS x (MAX_CLAIM_BYTES + the 1024-byte alias
 // budget) plus punctuation), rounded up so pretty-printed but legal output is not rejected.
 export const MAX_OUTPUT_BYTES = 64_000;

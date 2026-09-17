@@ -75,10 +75,13 @@ Only known code values, numeric `Retry-After`/reset metadata and raw stop enums 
 Unsupported/opaque SDK errors can still be generic `provider`; no universal balance API is
 claimed. Error-body inspection is transient, bounded to 8192 bytes and 200 ms, never stored.
 
-Input planning drops lower-priority existing candidates when a conservative byte/token
-estimate exceeds the chosen context window. It does not truncate facts or progress JSON to
-pretend they fit. If the original evidence still cannot fit, that route is rejected. Model
-mistakes and provider-specific tokenization remain possible; this is not exact token counting.
+Input planning drops lower-priority existing candidates when a conservative token estimate
+(one token per CJK character, at most three bytes per token elsewhere) exceeds the chosen
+context window less the reply ceiling. It does not truncate facts or progress JSON to
+pretend they fit. If the original evidence still cannot fit, that route is rejected. A model
+whose catalog ceiling equals its whole window is reserved this contract's worst legal reply
+instead, so such models are usable at all. Model mistakes and provider-specific tokenization
+remain possible; this is not exact token counting.
 
 ## Optional configuration
 
