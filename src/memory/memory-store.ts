@@ -353,7 +353,16 @@ export class MemoryStore {
 	 * records the model was never shown — losing aliases it could not have preserved and resetting
 	 * the aging clock on records it never named. So `memories` is the recency window plus whatever
 	 * was actually shown, and nothing else: `candidates` stays a subset, and every record the host
-	 * may write through is one that was either recent or in front of the model. */
+	 * may write through is one that was either recent or in front of the model.
+	 *
+	 * What is shown is what may be named. A record `finishEvolution` would refuse on the store's
+	 * own authority — pinned, or already newer than this source — is therefore never offered: the
+	 * payload carries no `updatedAt`, so a model could not know, and naming one discarded the whole
+	 * reply, valid additions included, and paused the source for good. A source captured before a
+	 * newer one in the same scope but processed after it (any backoff) hit exactly that. Neither
+	 * has an upside in being shown: reinforcement and alias enrichment both skip pinned records,
+	 * and a newer record is never confirmed by older evidence. They stay in `memories`, so a
+	 * restatement of their content is still deduplicated rather than added beside them. */
 	private selectCandidates(source: Source): { memories: DurableMemory[]; candidates: DurableMemory[] } {
 		const scoped = this.readMemories(source.scope).filter((m) => m.scope === source.scope && active(m)
 			&& (source.kind !== "progress" || (m.kind === "project_state" && source.targets!.includes(m.id))))
@@ -363,8 +372,9 @@ export class MemoryStore {
 		// past the 32 most recent, so in any scope with more than 32 records an older one could never
 		// be shown again, and therefore never superseded — only accumulated alongside.
 		const vocabulary = source.kind === "progress" ? undefined : features(source.content);
+		const nameable = (m: DurableMemory) => m.layer !== "pinned" && Date.parse(m.updatedAt) <= Date.parse(source.createdAt);
 		const candidates = (vocabulary === undefined ? scoped
-			: scoped.filter((m) => mentions(vocabulary, m.content, m.searchTerms) >= RELATED_CONTAINMENT)).slice(0, MAX_CANDIDATES);
+			: scoped.filter((m) => mentions(vocabulary, m.content, m.searchTerms) >= RELATED_CONTAINMENT)).filter(nameable).slice(0, MAX_CANDIDATES);
 		const recent = scoped.slice(0, MAX_CANDIDATES);
 		const known = new Set(recent.map((m) => m.id));
 		// Older shown records follow the recency window in age order, so this stays recency-ordered.
@@ -426,10 +436,10 @@ export class MemoryStore {
 			// same: a broken output contract is the model's mistake, correctable and worth another model;
 			// a refusal grounded in the store's own authority is not, because the same evidence will be
 			// refused again. Only the first becomes invalid_output. The second keeps write_rejected below.
+			// The diagnostic field path only admits the contract's own indices; anything else stays 'result'.
+			const at = (index: number, field?: string) => index <= MAX_CLAIMS - 1 ? `memories[${index}]${field ? `.${field}` : ''}` : 'result';
 			const broke: (reason: DiagnosticReason, index: number, field?: string) => never = (reason, index, field) => {
-				// The diagnostic field path only admits the contract's own indices; anything else stays 'result'.
-				const at = index <= MAX_CLAIMS - 1 ? `memories[${index}]${field ? `.${field}` : ''}` : 'result';
-				throw new EvolutionError('invalid_output', { ...diagnostic, reason, field: at });
+				throw new EvolutionError('invalid_output', { ...diagnostic, reason, field: at(index, field) });
 			};
 			const stage = (memory: DurableMemory) => {
 				if (![...after.values()].some((m) => active(m) && fingerprint(m.content) === fingerprint(memory.content))) after.set(memory.id, memory);
@@ -459,8 +469,13 @@ export class MemoryStore {
 					if (run.source.kind === "progress" && old.kind !== "project_state") broke('replaces_kind', index, 'replaces');
 					// Authority, not shape: a pinned record, another origin's record, or one already newer
 					// than this source will refuse the same evidence however many times it is offered.
-					if (old.scope !== run.source.scope || old.layer === "pinned"
-						|| Date.parse(old.updatedAt) > Date.parse(run.source.createdAt)) throw new Error("Invalid replacement target");
+					// selectCandidates withholds all three before the model is asked, so reaching this means
+					// the shown set and the nameable set have come apart. It stays as defence in depth, and
+					// it is typed so the reason reaches /memory status instead of pausing the source blind.
+					const refusal: DiagnosticReason | undefined = old.scope !== run.source.scope ? 'origin_replaces'
+						: old.layer === "pinned" ? 'pinned_replaces'
+						: Date.parse(old.updatedAt) > Date.parse(run.source.createdAt) ? 'newer_replaces' : undefined;
+					if (refusal) throw new EvolutionError('write_rejected', { ...diagnostic, reason: refusal, field: at(index, 'replaces') });
 					targets.add(old.id);
 					if (claim.kind !== old.kind) broke('replaces_kind', index, 'kind');
 					if (fingerprint(old.content) === fingerprint(claim.content)) {

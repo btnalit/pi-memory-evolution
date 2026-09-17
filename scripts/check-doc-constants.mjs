@@ -132,7 +132,6 @@ assert.ok(!/\bEVOLUTION_MAX_TOKENS\b/u.test(readdirSync('src', { recursive: true
 // Each survivor is allowed by name with the reason it is not the model's mistake to fix.
 const AUTHORITY_ERRORS = [
 	['Invalid memory diagnostics', 'rejects a malformed argument from a caller, before any model output is read'],
-	['Invalid replacement target', 'pinned, cross-origin, or a record already newer than this source'],
 	['Invalid or sensitive claim', 'the model echoed something credential-shaped; retrying would resend the same\n'
 		+ '    unredacted source to another call and, invalid_output being sibling-eligible, to another vendor'],
 ];
@@ -163,6 +162,21 @@ for (const m of finish.matchAll(/throw new Error\((["'])(.*?)\1\)/gu))
 		+ '    the model what it broke. If it is the model breaking the output contract, raise\n'
 		+ "    EvolutionError('invalid_output', { reason }) instead. If the store is refusing on its own\n"
 		+ '    authority, add it to AUTHORITY_ERRORS in this script with the reason it cannot be corrected.');
+
+// The replacement-authority refusal (pinned, cross-origin, or a record already newer than the source)
+// is the one authority error that is typed rather than bare: its reason must reach /memory status,
+// because it used to pause the source with an empty diagnostic. It must stay write_rejected — the
+// same evidence is refused however often it is offered — and it is defence in depth only, because
+// selectCandidates withholds those records before the model is asked (evolution.test.ts pins both).
+assert.ok(/throw new EvolutionError\('write_rejected', \{ \.\.\.diagnostic, reason: refusal/u.test(finish),
+	'finishEvolution must refuse a pinned, cross-origin or newer replacement target with\n'
+	+ "    EvolutionError('write_rejected', { ...diagnostic, reason: refusal, ... }): typed so the reason is\n"
+	+ '    recorded, and write_rejected because the store\'s own authority is not the model\'s mistake to correct.');
+for (const reason of ['pinned_replaces', 'origin_replaces', 'newer_replaces'])
+	assert.ok(finish.includes(`'${reason}'`), `finishEvolution no longer names the authority refusal reason ${reason}`);
+assert.ok(!/invalid_output[^;]*(?:pinned|origin|newer)_replaces/u.test(finish),
+	'an authority refusal must never be raised as invalid_output: that makes it correctable, and the\n'
+	+ '    same evidence would be refused again on the next paid call');
 
 // The set shown to the model is the set it may name. If those ever come apart, the model can be
 // offered a record the store will then refuse, turning a good reply into a paid rejected write.

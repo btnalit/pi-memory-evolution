@@ -230,7 +230,9 @@ cutting to a small cap would drop the record that most needed superseding, and b
 would stay active forever. IDF weighting is worse rather than better, for the same reason.
 
 The set shown is the set that may be named: **a source cannot replace a record it never mentions**,
-because it is never offered one. This deliberately
+because it is never offered one. Nor is it offered a record it could not replace anyway: pinned
+records and records already newer than the source are withheld too, since the payload carries no
+`updatedAt` and naming one discarded the whole reply. This deliberately
 limits automatic replacement authority, **not recall eligibility**. One origin can cover
 multiple projects. The prompt requires an explicitly identifiable same subject/fact and
 preservation of project/resource qualifications; matching cwd alone is not identity.
@@ -242,7 +244,8 @@ characters, with total JSON <=1024 bytes. Malformed claims/aliases reject the ba
 The prompt asks for concise Chinese/English aliases, never added facts. Existing text
 can gain aliases without changing its provenance/evidence date; correction clears stale
 aliases and undo restores the actual prior metadata. Unknown, cross-origin, pinned,
-stale, duplicate-target and cyclic replacements are rejected transactionally. Only normal
+stale, duplicate-target and cyclic replacements are rejected transactionally, the authority
+refusals with a recorded reason. Only normal
 `stop` completion is accepted, never truncated/tool/error output. Model paths are not
 used for file operations, and model claims remain `provisional`, not awaiting approval. Host-assigned evidence types
 cannot be supplied by model output. A weaker proposed replacement is withheld; only that

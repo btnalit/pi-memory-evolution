@@ -17,6 +17,8 @@ test('valid JSON claims; rejects extra actions, excessive output and unsupported
 	assert.deepEqual(parseClaims('```json\n{"memories":[]}\n```'),[]);
 	for(const value of ['{"memories":[{"kind":"shell","content":"rm -rf"}]}','{"memories":[{"kind":"fact","content":"valid fact","command":"bash"}]}','{"memories":null}','not json',JSON.stringify({memories:Array.from({length:17},()=>({kind:'fact',content:'valid fact'}))})])assert.throws(()=>parseClaims(value));
 });
+/** A host with a selected model: evolve() declines to claim a source without one (review F4). */
+const host={model:{provider:'fake',id:'model'}} as unknown as ExtensionContext;
 async function using(fn:(store:MemoryStore)=>Promise<void>){const dir=mkdtempSync(join(tmpdir(),'pme-evolve-'));const store=new MemoryStore(dir);try{store.capture({id:'s1',scope:'/project',kind:'summary',content:'## Critical Context\n- Database uses SQLite.',createdAt:new Date().toISOString()});await fn(store);}finally{store.close();rmSync(dir,{recursive:true,force:true});}}
 test('automatically applies valid model output, no approval and one call per source',()=>using(async(store)=>{
 	let calls=0;
@@ -33,19 +35,20 @@ test('large valid bilingual output fits the new byte budget while oversized outp
 	assert.throws(()=>parseClaims(' '.repeat(64001)),(e:any)=>e.code==='invalid_output'&&e.diagnostic.reason==='output_too_large');
 });
 test('provider, parse and transaction failures have distinct persisted categories',()=>using(async(store)=>{
-	// A pinned record refuses this evidence however often it is offered, so the write is rejected
-	// and the source stops. Naming a record that was never shown is the model's own mistake and
-	// stays correctable — that case is covered separately below.
+	// A pinned record is withheld from the model altogether, so a reply that names one can only be
+	// naming an id it was never shown: the model's own mistake, correctable as unknown_replaces. The
+	// store's own refusals — here, output that still redacts to a placeholder — stay write_rejected.
 	const pinned=store.readMemories()[0];store.act(pinned.id,'pin');
-	const replacePinned=async(_ctx:unknown,_system:unknown,input:string)=>({model:'test',
-		text:JSON.stringify({memories:[{kind:'fact',content:'Database uses PostgreSQL.',replaces:JSON.parse(input).existing[0]?.id??'unknown'}]})});
-	for(const [complete,code] of [
-		[async()=>{throw new Error('private-secret');},'provider'],
-		[async()=>({model:'test',text:'bad JSON'}),'invalid_output'],
-		[replacePinned,'write_rejected'],
+	const replacePinned=async(_ctx:unknown,_system:unknown,input:string)=>{assert.deepEqual(JSON.parse(input).existing,[],'a pinned record is never offered');return {model:'test',
+		text:JSON.stringify({memories:[{kind:'fact',content:'Database uses PostgreSQL.',replaces:JSON.parse(input).existing[0]?.id??'unknown'}]})};};
+	for(const [complete,code,reason] of [
+		[async()=>{throw new Error('private-secret');},'provider',undefined],
+		[async()=>({model:'test',text:'bad JSON'}),'invalid_output','json_syntax'],
+		[replacePinned,'invalid_output','unknown_replaces'],
+		[async()=>({model:'test',text:'{"memories":[{"kind":"fact","content":"Database password: hunter2 is in the vault."}]}'}),'write_rejected',undefined],
 	] as const){
-		await assert.rejects(evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),complete,true),(error:any)=>error.code===code);
-		assert.match(store.status(),new RegExp(code));assert.ok(!store.status().includes('private-secret'));
+		await assert.rejects(evolve(store,'s1',host,AbortSignal.timeout(1000),complete,true),(error:any)=>error.code===code&&(reason===undefined||error.diagnostic.reason===reason));
+		assert.match(store.status(),new RegExp(code));assert.ok(!store.status().includes('private-secret'));assert.ok(!store.status().includes('hunter2'));
 	}
 }));
 test('invalid completion never partially applies changes; local fallback remains',()=>using(async(store)=>{
@@ -322,6 +325,7 @@ test('a record the model reaffirms outright is confirmed, not only one it leaves
 	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
 		text:JSON.stringify({memories:[{kind:'fact',content:'The Atlas service listens on port 9999.'}]})}));
 	const target=store.readMemories().find(m=>m.content.includes('9999'))!;
+	const count=store.readMemories().length;
 
 	store.capture({id:'s2',scope:'/project',kind:'summary',createdAt:at(30),
 		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
@@ -334,15 +338,18 @@ test('a record the model reaffirms outright is confirmed, not only one it leaves
 	assert.equal(after.status,'provisional','and it must not retire the record it reaffirms');
 
 	// A pinned record is already fixed at freshness 1 and can never go dormant, so confirming it is
-	// pure write churn on a record the store has been told to leave alone.
+	// pure write churn on a record the store has been told to leave alone. It is not even shown: a
+	// pinned record can never be named, so offering it only invited a refusal (review F1).
 	store.act(after.id,'pin');
 	store.capture({id:'s3',scope:'/project',kind:'summary',createdAt:at(60),
 		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
 	const pinned=store.beginEvolution('s3')!;
-	assert.ok(pinned.candidates.some(c=>c.id===after.id),'fixture: the pinned record must still be shown');
-	store.finishEvolution(pinned,[],'fake/model');
+	assert.ok(!pinned.candidates.some(c=>c.id===after.id),'a pinned record is withheld from the model');
+	assert.ok(pinned.memories.some(c=>c.id===after.id),'but stays visible locally for deduplication');
+	store.finishEvolution(pinned,[{kind:'fact',content:'The Atlas service listens on port 9999.'}],'fake/model');
 	assert.equal(store.readMemories().find(m=>m.id===after.id)!.reinforcedAt,at(30),
 		'a pinned record must not be re-stamped: its freshness is already fixed at 1');
+	assert.equal(store.readMemories().length,count,'and a restatement of it is deduplicated, not stored twice');
 }));
 
 test('confirmation moves the decay anchor but never the replacement authority gate',()=>using(async(store)=>{
@@ -469,15 +476,67 @@ test('a broken output contract is correctable, not a permanent stop',()=>using(a
 }));
 
 // The other half of the split: a refusal the store makes on its own authority is not correctable,
-// because the same evidence is refused however many times it is offered. Those still stop.
-test('a refusal on the store\'s own authority still stops the source',()=>using(async(store)=>{
+// because the same evidence is refused however many times it is offered. Those still stop. A pinned
+// record is withheld before the model is asked (see the out-of-order test above), so reaching the
+// refusal means the shown set and the nameable set came apart; the throw stays as defence in depth,
+// and since it used to pause the source with an empty diagnostic, it now records why.
+test('a refusal on the store\'s own authority still stops the source, and says why',()=>using(async(store)=>{
 	const pinned=store.readMemories()[0];store.act(pinned.id,'pin');
-	await assert.rejects(evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),
+	const begin=store.beginEvolution.bind(store);
+	(store as unknown as {beginEvolution:unknown}).beginEvolution=(...args:Parameters<typeof begin>)=>{
+		const run=begin(...args);if(run)run.candidates=[...run.candidates,store.readMemories().find(m=>m.id===pinned.id)!];return run;};
+	await assert.rejects(evolve(store,'s1',host,AbortSignal.timeout(1000),
 		async(_ctx,_system,input)=>({model:'test',text:JSON.stringify({memories:[{kind:'fact',
 			content:'Database uses PostgreSQL.',replaces:JSON.parse(input).existing[0]?.id??'unknown'}]})})),
-		(error:any)=>error.code==='write_rejected');
+		(error:any)=>error.code==='write_rejected'&&error.diagnostic.reason==='pinned_replaces'&&error.diagnostic.field==='memories[0].replaces');
 	assert.match(store.status(),/paused=1/);
+	assert.match(store.status(),/write_rejected[^\n]*\n\s*diagnostics=\{[^\n]*"reason":"pinned_replaces"/);
 	assert.equal(store.readMemories().find(m=>m.id===pinned.id)!.layer,'pinned');
+}));
+
+// A source that ran after a newer source in the same scope was shown the record the newer one had
+// just rewritten — the payload carries no updatedAt, so the model could not know — and naming it
+// was refused on authority grounds: the whole reply was discarded, valid additions included, and the
+// source was paused for good with no reason recorded. Pinned records were in the same position, and
+// showing them had no upside: neither reinforcement nor alias enrichment applies to them. What is
+// shown is what may be named, so both are withheld before the model sees them. They stay in
+// `memories`, so a duplicate of their content is still recognised rather than re-added.
+test('a source is never shown a record it would be refused: one newer than itself, or a pinned one',()=>using(async(store)=>{
+	const base=Date.now();
+	const at=(days:number)=>new Date(base+days*86_400_000).toISOString();
+	const original=store.readMemories()[0];
+	// S1 is captured first and delayed; S2, captured a day later, runs first and rewrites the record.
+	store.capture({id:'older',scope:'/project',kind:'user',content:'Remember: the database uses PostgreSQL now.',createdAt:at(1)});
+	store.capture({id:'newer',scope:'/project',kind:'user',content:'Remember: the database uses PostgreSQL now.',createdAt:at(2)});
+	await evolve(store,'newer',host,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+		text:JSON.stringify({memories:[{kind:'fact',content:'Database uses PostgreSQL.',replaces:original.id}]})}));
+	const rewritten=store.readMemories().find(m=>m.content.includes('PostgreSQL'))!;
+	assert.equal(rewritten.updatedAt,at(2));
+	const run=store.beginEvolution('older',true)!;
+	assert.deepEqual(run.candidates.map(m=>m.id),[],'the rewritten record is newer than this source, so it must not be offered');
+	assert.ok(run.memories.some(m=>m.id===rewritten.id),'but it stays visible locally, so a restatement is deduplicated rather than added again');
+	// The delayed source completes: nothing it may name is missing, and its restatement is absorbed.
+	store.finishEvolution(run,[{kind:'fact',content:'Database uses PostgreSQL.'},{kind:'preference',content:'The user prefers PostgreSQL.'}],'fake/model');
+	assert.match(store.status(),/done=3/);
+	assert.equal(store.readMemories().filter(m=>m.status!=='forgotten').length,2);
+	// The same for a pinned record.
+	store.act(rewritten.id,'pin');
+	store.capture({id:'later',scope:'/project',kind:'user',content:'Remember: the database uses PostgreSQL now.',createdAt:at(3)});
+	const pinnedRun=store.beginEvolution('later',true)!;
+	assert.ok(!pinnedRun.candidates.some(m=>m.id===rewritten.id),'a pinned record is withheld');
+	assert.ok(pinnedRun.candidates.length>0,'while records this source may name are still offered');
+	assert.ok(pinnedRun.memories.some(m=>m.id===rewritten.id));
+	store.failEvolution(pinnedRun,'cancelled');
+	// Defence in depth for the newer-than-source case, with its reason recorded.
+	store.act(rewritten.id,'unpin');
+	store.capture({id:'stranded',scope:'/project',kind:'user',content:'Remember: the database uses PostgreSQL now.',createdAt:at(1)});
+	const begin=store.beginEvolution.bind(store);
+	(store as unknown as {beginEvolution:unknown}).beginEvolution=(...args:Parameters<typeof begin>)=>{
+		const run=begin(...args);if(run)run.candidates=[...run.candidates,store.readMemories().find(m=>m.id===rewritten.id)!];return run;};
+	await assert.rejects(evolve(store,'stranded',host,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+		text:JSON.stringify({memories:[{kind:'fact',content:'Database uses MySQL.',replaces:rewritten.id}]})})),
+		(error:any)=>error.code==='write_rejected'&&error.diagnostic.reason==='newer_replaces');
+	assert.match(store.status(),/"reason":"newer_replaces"/);
 }));
 
 // The store's last barrier: the model's own output still redacts to a placeholder, meaning it

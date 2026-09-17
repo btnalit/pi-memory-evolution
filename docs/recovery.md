@@ -50,13 +50,17 @@ of replacing its nominated record, a replacement id that was never shown, the sa
 twice, a replacement that changes evidence kind, a cyclic batch, or aliases that fail validation —
 is the model's error. It is reported as `invalid_output` with a
 `reason` naming the rule, so the correction prompt can cite it and a sibling model may try. A
-**refusal on the store's own authority** — a pinned record, another origin's record, a record
-already newer than the source, or model output that still redacts to a placeholder — is not
-correctable: the same evidence is refused however often it
-is offered, so it stays `write_rejected` and stops the source rather than burning the budget. The
-last of those is a deliberate refusal to retry rather than an inability: a correction would resend
-the same unredacted source to another call and, because `invalid_output` permits cross-provider
-fallback, to another vendor. One exposure and a stop is the cheaper outcome.
+**refusal on the store's own authority** — a pinned record (`pinned_replaces`), another origin's
+record (`origin_replaces`), a record already newer than the source (`newer_replaces`), or model
+output that still redacts to a placeholder — is not correctable: the same evidence is refused
+however often it is offered, so it stays `write_rejected` and stops the source rather than burning
+the budget, and `/memory status` shows the reason. The first three are withheld from the model
+before it is asked — what is shown is what may be named — so a source captured before a newer one
+in the same scope but processed after it is simply not offered the record the newer one rewrote;
+the refusal remains as defence in depth. The last is a deliberate refusal to retry rather than an
+inability: a correction would resend the same unredacted source to another call and, because
+`invalid_output` permits cross-provider fallback, to another vendor. One exposure and a stop is
+the cheaper outcome.
 
 Generic source backoff is 1 minute, 5 minutes, 15 minutes, then 1 hour, with up to 20%
 positive jitter on runtime failures. Route failures can try one alternate immediately;

@@ -107,7 +107,10 @@ test("in-flight model output loses authority after manual edit", () => using((s)
 test("stale model result from an older source cannot replace newer facts", () => using((s) => {
 	s.capture(source()); s.capture({...source("old"),createdAt:"2000-01-01T00:00:00.000Z"});
 	const run=s.beginEvolution("old")!;
-	assert.throws(() => s.finishEvolution(run,[{kind:"fact",content:"Database port is 1111.",replaces:s.readMemories()[0].id}],"model"));
+	// The newer record is not offered at all, so naming it is naming an id the model was never shown.
+	assert.deepEqual(run.candidates,[]);
+	assert.throws(() => s.finishEvolution(run,[{kind:"fact",content:"Database port is 1111.",replaces:s.readMemories()[0].id}],"model"),
+		(error: any) => error.code === 'invalid_output' && error.diagnostic.reason === 'unknown_replaces');
 }));
 test("manual suppression retires pending raw source, so reload cannot relearn it", () => using((s) => {
 	s.capture(source()); s.act(s.readMemories()[0].id, "forget");
