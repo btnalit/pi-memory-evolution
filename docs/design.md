@@ -84,9 +84,14 @@ labels and cwd have no authority bonus.
 A record must qualify on one of two sides, because the two describe different asks.
 Current-focus coverage — the share of what was just asked that this record accounts for — must
 be **>=0.45**; that is the right measure for a recall question, where the prompt *is* the subject.
-Alternatively, the prompt must *name* the record's topic: at least one query feature that is a
-curated concept synonym, an exact path/filename, or one of the model-written `searchTerms` for
-that claim, alongside the ordinary multi-match requirement below. That is what a task prompt
+Alternatively, the prompt must *name* the record's topic: at least one query feature that is an
+exact path/filename, or a curated concept synonym or one of the model-written `searchTerms` for
+that claim that is **rare in the store** — document frequency at most `max(2, 2% of records)`, the
+same frequency that weights the word — alongside the ordinary multi-match requirement below. The
+rarity clause is what keeps the subject side from being only as strong as its weakest alias: a
+model asked for aliases grounded in a claim about the server room writes `server`, and an
+everyday word must not carry that note onto every task prompt mentioning a server while its
+alias-less twin is held out. That is what a task prompt
 needs: query coverage is a fraction of everything said, so describing a task in two sentences
 rather than three words divides a relevant record's score by the length of the description, and
 automatic injection effectively only worked for short questions. Naming is unaffected by whatever

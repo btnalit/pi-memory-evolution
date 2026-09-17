@@ -298,12 +298,11 @@ assert.ok(MAX_QUERY_BYTES > MAX_HISTORY_TURN_BYTES, 'the live-prompt budget must
 	assert.ok(!/MIN_FOCUS_COVERAGE\s*&&(?!\s*!topicMatches)/u.test(retriever),
 		'the query-side floor may be paired only with the topic-match requirement: any second condition\n'
 		+ '    on the subject side is a floor on the record, and that is what made recall depend on claim length.');
-	// The whole statement, not a substring: an appended `|| body.has(word)` would otherwise pass. And
-	// exactly one increment, so the count cannot be widened by a second statement elsewhere.
-	assert.ok(/if \(word\.startsWith\('concept:'\) \|\| word\.startsWith\('literal:'\) \|\| aliases\.has\(word\)\) topicMatches\+\+;/u.test(retriever)
-		&& (retriever.match(/topicMatches\s*(?:\+\+|\+=|-=|--|=(?!=))/gu) ?? []).length === 2, // the `= 0` declaration and the one increment
-		'topicMatches must count only curated topic names: concepts, exact resources, or the aliases the\n'
-		+ '    model wrote for that claim, in one place. Counting bare prose words restores the defect it prevents.');
+	// What may count as naming a topic — an exact resource, or a concept or model-written alias that is
+	// rare in the store, never a bare prose word — is pinned by behaviour rather than by the shape of
+	// the statement: src/memory/conversation-recall.test.ts holds the clutter fixtures that go red when
+	// a prose word counts, the aliased/alias-less twin pair that goes red when an everyday alias counts,
+	// and the rare-alias positive control that goes red when a rare one stops counting.
 }
 
 // The live current-turn prompt and replayed history turns must keep separate byte budgets, or

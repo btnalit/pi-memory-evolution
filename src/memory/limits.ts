@@ -107,8 +107,9 @@ export const MAX_OUTPUT_BYTES = 64_000;
  * That is the whole reason automatic injection looked dead outside short questions.
  *
  * The subject side has no share floor, and must not get one. It is carried by NAMING: at least one
- * query feature that names this record's topic — a curated concept synonym, an exact path/filename,
- * or one of the model-written `searchTerms` for the claim — plus the ordinary multi-match
+ * query feature that names this record's topic — an exact path/filename, or a curated concept
+ * synonym or one of the model-written `searchTerms` for the claim that is rare in the store (an
+ * everyday alias shared by many records names nothing; retriever.ts) — plus the ordinary multi-match
  * requirement (retriever.ts, 'incidental-overlap' and 'thin-match'). Its first version was the
  * share of the record's own vocabulary the prompt engaged, the asymmetric containment the store uses
  * to pick replacement candidates (`RELATED_CONTAINMENT`). That is invariant to the prompt and

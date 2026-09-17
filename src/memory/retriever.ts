@@ -57,13 +57,23 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 		origin: new Set(memory.scope === "legacy" ? [] : [...tokenize(memory.scope),
 			...tokenize(memory.scope.split(/[\\/]/u).at(-1) ?? "")].filter((word) => !word.startsWith("concept:"))) }));
 	const unknown = new Set<string>();
+	const frequency = new Map<string, number>();
 	const weights = new Map([...query, ...context].map((word) => {
 		const df = documents.filter((d) => d.mentions.has(word) || d.aliases.has(word) || d.origin.has(word)).length;
+		frequency.set(word, df);
 		if (!df) unknown.add(word);
 		// No evidence is not rare evidence: unseen question words must not receive
 		// the largest IDF. Exact resource constraints and thin-match gates still apply.
 		return [word, (word.startsWith("literal:") ? 2 : 1) * (df ? 1 + Math.log((documents.length + 1) / (df + 1)) : 1)];
 	}));
+	// A word names a topic only if it is rare in the store. The subject side is only as strong as
+	// its weakest alias: the evolution prompt asks for aliases grounded in the claim, so a compliant
+	// model writes `server` for a note about the server room, and that everyday word then carried the
+	// note onto any task prompt mentioning a server — while its alias-less twin was correctly held
+	// out. Rarity is data-driven and prompt-invariant, the property the subject side already has:
+	// the same document frequency that weights the word decides whether it can name anything.
+	// Exact paths and filenames are identities, not vocabulary, and are exempt.
+	const rare = (word: string) => frequency.get(word)! <= Math.max(2, 0.02 * documents.length);
 	const total = [...query].reduce((sum, word) => sum + weights.get(word)!, 0);
 	const literals = [...query, ...context].filter(word => word.startsWith('literal:'));
 	const subjects = [...context].filter(word => !FACETS.has(word));
@@ -86,9 +96,10 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 					covered += weight; focusMatches++;
 					if (body.has(word) || aliases.has(word) || origin.has(word)) evidenceMatches++;
 					// Something that names a topic, as opposed to a word that merely occurs in one:
-					// a curated concept synonym, an exact resource identity, or one of the aliases
-					// the model wrote for this very claim. See the subject gate below.
-					if (word.startsWith('concept:') || word.startsWith('literal:') || aliases.has(word)) topicMatches++;
+					// an exact resource identity, or — when rare in the store — a curated concept
+					// synonym or one of the aliases the model wrote for this very claim. See the
+					// subject gate below, and `rare` above for why an everyday alias is not a name.
+					if (word.startsWith('literal:') || ((word.startsWith('concept:') || aliases.has(word)) && rare(word))) topicMatches++;
 				}
 				matches.push(word);
 			}

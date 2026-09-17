@@ -219,6 +219,38 @@ test('an everyday word shared with a short claim is not a topic, in any store si
  assert.deepEqual(ids('Who approves access to the server room?', store).includes('badge'), true);
 });
 
+// The subject side is only as strong as the weakest alias. The evolution prompt asks for aliases
+// "grounded in that claim", so a compliant model writes `server` for a note about the server room —
+// and that everyday word then named a topic as surely as a rare one did. Review reproduced it: with
+// aliases ['server','access'] the badge note was injected on an ordinary task prompt about the API
+// server, while its alias-less twin was correctly held out. Naming a topic is a property of the
+// word, not of where it was written: an alias or concept names one only when it is rare in the
+// store (df <= max(2, 2% of records)), the same document frequency the weights already use.
+test('an everyday alias shared across the store does not name a topic; a rare one still does', () => {
+ const aliased = memory('badge-aliased', 'Badge access to the server room needs security approval.', { searchTerms: ['server', 'access'] });
+ const plain = memory('badge-plain', 'Badge access to the server room needs security approval.');
+ const store = [...project, ...clutter.filter(m => m.id !== 'badge'), aliased, plain,
+  memory('build-server', 'The build server has sixteen cores and forty gigabytes of memory.'),
+  memory('log-rotation', 'Server logs rotate weekly and are kept for ninety days.')];
+ const prompt = 'The invoice API server needs a health endpoint before the tests can run in staging.';
+ const diagnostics = retrieveMemories(store, resolveRecallQuery(prompt), 3, now).diagnostics;
+ const reasons = new Map(diagnostics.candidates.map(c => [c.id, c.reason]));
+ assert.equal(reasons.get('badge-plain'), 'incidental-overlap', 'the alias-less twin was always held out');
+ assert.equal(reasons.get('badge-aliased'), 'incidental-overlap', 'and an everyday alias must not carry its twin in');
+ assert.ok(!diagnostics.selected.includes('badge-aliased'));
+ // Positive control: an alias that is rare in the store still names the topic, whatever the prompt
+ // says besides. This is the drill's own case and must not regress.
+ const long = 'Reformat this module so it reads better, keep the public signatures as they are, and use tabs for\n'
+  + 'indentation like the rest of the tree. Then add a short comment above each exported function.';
+ const indent = memory('indent', 'The user prefers tabs over spaces for indentation.', { kind: 'preference', searchTerms: ['indentation', '缩进'] });
+ assert.deepEqual(ids(long, [...store, indent]), ['indent']);
+ // A rare concept still names a topic too; a concept every other record shares does not.
+ assert.deepEqual(ids('Can you help me set up the database connection for the staging environment?', project), ['staging']);
+ const ports = Array.from({ length: 6 }, (_, i) => memory(`port-${i}`, `Service ${i} listens on port ${9000 + i}.`));
+ const health = memory('health', 'The health endpoint on the API server answers on the admin port.', { searchTerms: ['health check'] });
+ assert.ok(!ids('The invoice API server needs a health endpoint before the tests can run in staging.', [...ports, ...clutter, health]).includes('port-3'));
+});
+
 test('multilingual incidental overlap cannot displace a named subject', () => {
  const relevant = memory('deps-bilingual', 'The user prefers pnpm over npm for installing dependencies in all projects.', {
   kind: 'preference', searchTerms: ['pnpm', 'npm', 'package manager', '包管理器', '依赖安装'],

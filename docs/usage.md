@@ -187,8 +187,9 @@ rename the tool to hide the conflict; an old installation would still run its ho
   recall regardless of its original directory.
 - Recall works from an ordinary task prompt, not only from a question aimed at the memory:
   a record qualifies either when it accounts for enough of what was asked **or** when the
-  prompt names that record's topic — a known concept, an exact path/filename, or one of the
-  record's own aliases — and engages it more than once. Neither measure shrinks as the request
+  prompt names that record's topic — an exact path/filename, or a known concept or one of the
+  record's own aliases that is rare in the store (an alias such as `server` that many records
+  share names nothing) — and engages it more than once. Neither measure shrinks as the request
   gets longer, nor as the stored claim gets longer or gains aliases, so describing a task in
   full no longer suppresses the background it is about, and a claim that explains itself is
   no harder to recall than a one-liner. A prompt that engages nothing stored still injects nothing.
