@@ -25,8 +25,8 @@ test('automatically applies valid model output, no approval and one call per sou
 	const complete:CompleteMemory=async(_ctx,system,input)=>{calls++;assert.match(system,/historical DATA/);assert.match(input,/SQLite/);
 		// The claim bounds are interpolated: a plain string literal would ship '${...}' to the model.
 		assert.match(system,new RegExp(`each ${MIN_CLAIM_CHARS}-${MAX_CLAIM_CHARS} characters`));assert.ok(!system.includes('${'));return {model:'active/model',text:'{"memories":[{"kind":"fact","content":"Database has local storage."}]}'};};
-	assert.equal(await evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),complete),true);
-	assert.equal(await evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),complete),false);
+	assert.equal(await evolve(store,'s1',host,AbortSignal.timeout(1000),complete),true);
+	assert.equal(await evolve(store,'s1',host,AbortSignal.timeout(1000),complete),false);
 	assert.equal(calls,1);assert.equal(store.readMemories().length,2);assert.match(store.history()[0].reason,/active\/model/);
 }));
 test('large valid bilingual output fits the new byte budget while oversized output is rejected',()=>{
@@ -52,13 +52,13 @@ test('provider, parse and transaction failures have distinct persisted categorie
 	}
 }));
 test('invalid completion never partially applies changes; local fallback remains',()=>using(async(store)=>{
-	await assert.rejects(evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'test',text:'not JSON'})));
+	await assert.rejects(evolve(store,'s1',host,AbortSignal.timeout(1000),async()=>({model:'test',text:'not JSON'})));
 	assert.equal(store.readMemories().length,1);assert.match(store.status(),/failed=1/);
 }));
 test('abort bounds providers that ignore AbortSignal and prevents late writes',()=>using(async(store)=>{
 	let finish: ((result:{model:string;text:string})=>void) | undefined;
 	const controller=new AbortController();
-	const pending=evolve(store,'s1',{} as ExtensionContext,controller.signal,()=>new Promise((resolve)=>{finish=resolve;}));
+	const pending=evolve(store,'s1',host,controller.signal,()=>new Promise((resolve)=>{finish=resolve;}));
 	controller.abort();await assert.rejects(pending);
 	finish!({model:'late',text:'{"memories":[{"kind":"fact","content":"Late invented fact."}]}'});
 	await new Promise((resolve)=>setImmediate(resolve));assert.equal(store.readMemories().length,1);
@@ -68,7 +68,7 @@ test('the output correction note follows the actual previous failure, not a cumu
 	const prompts:string[]=[];
 	const ok:CompleteMemory=async(_ctx,system)=>{prompts.push(system);return {model:'test',text:'{"memories":[]}'};};
 	const bad=(text:string):CompleteMemory=>async(_ctx,system)=>{prompts.push(system);return {model:'test',text};};
-	const ctx={} as ExtensionContext, signal=()=>AbortSignal.timeout(1000);
+	const ctx=host, signal=()=>AbortSignal.timeout(1000);
 	// A protocol failure earns one correction note carrying the fixed rule that failed, never the failed output.
 	await assert.rejects(evolve(store,'s1',ctx,signal(),bad('{"memories":[{"kind":"fact"}]}'),true));
 	await assert.rejects(evolve(store,'s1',ctx,signal(),bad('still not JSON'),true));
@@ -155,11 +155,11 @@ test('the model is shown only records the source mentions, not merely the recent
 		{kind:'fact',content:'The office printer sits on floor three.'},
 		{kind:'preference',content:'The user prefers concise replies in code review.'},
 	]})});
-	await evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),seed);
+	await evolve(store,'s1',host,AbortSignal.timeout(1000),seed);
 
 	store.capture({id:'s2',scope:'/project',kind:'summary',content:'## Critical Context\n- Database now uses PostgreSQL.',createdAt:new Date().toISOString()});
 	let shown:{content:string}[]=[];
-	await evolve(store,'s2',{} as ExtensionContext,AbortSignal.timeout(1000),async(_ctx,_system,input)=>{
+	await evolve(store,'s2',host,AbortSignal.timeout(1000),async(_ctx,_system,input)=>{
 		shown=JSON.parse(input).existing;return {model:'fake/model',text:'{"memories":[]}'};});
 	const contents=shown.map(m=>m.content);
 	assert.ok(contents.some(c=>c.includes('SQLite')),'the record this source is about must be offered');
@@ -169,7 +169,7 @@ test('the model is shown only records the source mentions, not merely the recent
 
 test('a source cannot replace a record it never mentions, because it is never shown one',()=>using(async(store)=>{
 	const seed:CompleteMemory=async()=>({model:'fake/model',text:'{"memories":[{"kind":"fact","content":"The office printer sits on floor three."}]}'});
-	await evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),seed);
+	await evolve(store,'s1',host,AbortSignal.timeout(1000),seed);
 	const printer=store.readMemories().find(m=>m.content.includes('printer'))!;
 	store.capture({id:'s2',scope:'/project',kind:'summary',content:'## Critical Context\n- Database now uses PostgreSQL.',createdAt:new Date().toISOString()});
 	const run=store.beginEvolution('s2')!;
@@ -187,7 +187,7 @@ test('a record the source contradicts survives beside the many it merely restate
 	// Enough restated records to fill any plausible small cap ahead of the contradicted one, while
 	// staying inside MAX_CLAIMS so the seeding reply is itself valid.
 	const restated=Array.from({length:10},(_,i)=>({kind:'fact' as const,content:`Atlas service ${i} listens on port ${9000+i}.`}));
-	await evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+	await evolve(store,'s1',host,AbortSignal.timeout(1000),async()=>({model:'fake/model',
 		text:JSON.stringify({memories:[...restated,{kind:'fact',content:'Database uses SQLite.'}]})}));
 	const stale=store.readMemories().find(m=>m.content.includes('SQLite'))!;
 
@@ -208,7 +208,7 @@ test('a matching record older than the recency cap is still shown, so it can sti
 	const at=(i:number)=>new Date(Date.parse('2026-01-01T00:00:00.000Z')+i*86400_000).toISOString();
 	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:at(0),
 		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
-	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+	await evolve(store,'seed',host,AbortSignal.timeout(1000),async()=>({model:'fake/model',
 		text:JSON.stringify({memories:[{kind:'fact',content:'The Atlas service listens on port 9999.'}]})}));
 	const target=store.readMemories().find(m=>m.content.includes('9999'))!;
 
@@ -216,7 +216,7 @@ test('a matching record older than the recency cap is still shown, so it can sti
 	for(let round=0;round<3;round++){
 		store.capture({id:`filler${round}`,scope:'/project',kind:'summary',createdAt:at(1+round),
 			content:'## Critical Context\n- Unrelated bluetooth speaker pairing work.'});
-		await evolve(store,`filler${round}`,{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+		await evolve(store,`filler${round}`,host,AbortSignal.timeout(1000),async()=>({model:'fake/model',
 			text:JSON.stringify({memories:Array.from({length:16},(_,i)=>({kind:'fact',
 				content:`The bluetooth speaker in room ${round}${i} pairs automatically.`}))})}));
 	}
@@ -267,7 +267,7 @@ test('the cap bounds what is shown, and the host may only write through what was
 	for(let round=0;round<3;round++){
 		store.capture({id:`atlas${round}`,scope:'/project',kind:'summary',createdAt:at(round),
 			content:'## Critical Context\n'+Array.from({length:16},(_,i)=>`- ${line(round*16+i)}`).join('\n')});
-		await evolve(store,`atlas${round}`,{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+		await evolve(store,`atlas${round}`,host,AbortSignal.timeout(1000),async()=>({model:'fake/model',
 			text:JSON.stringify({memories:Array.from({length:16},(_,i)=>({kind:'fact',content:line(round*16+i)}))})}));
 	}
 	store.capture({id:'s2',scope:'/project',kind:'summary',createdAt:at(9),
@@ -300,14 +300,14 @@ test('restating a project state, however exactly, never resets its seven-day cap
 	const say=(text:string)=>async()=>({model:'fake/model',text:JSON.stringify({memories:[{kind:'project_state',content:text}]})});
 	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:at(0),
 		content:'## Critical Context\n- The Atlas rollout runbook lives in docs.'});
-	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),say('[pending] The Atlas rollout is still running on port 9999.'));
+	await evolve(store,'seed',host,AbortSignal.timeout(1000),say('[pending] The Atlas rollout is still running on port 9999.'));
 	const before=store.readMemories().find(m=>m.kind==='project_state')!;
 	assert.equal(before.reinforcedAt,undefined);
 
 	store.capture({id:'s2',scope:'/project',kind:'summary',createdAt:at(30),
 		content:'## Critical Context\n- The Atlas rollout is still running on port 9999.'});
 	const count=store.readMemories().length, events=store.history().length;
-	await evolve(store,'s2',{} as ExtensionContext,AbortSignal.timeout(1000),say('[pending] The Atlas rollout is still running on port 9999.'));
+	await evolve(store,'s2',host,AbortSignal.timeout(1000),say('[pending] The Atlas rollout is still running on port 9999.'));
 	const after=store.readMemories().find(m=>m.id===before.id)!;
 	assert.equal(after.reinforcedAt,undefined,
 		'a restated state must not be confirmed: the cap is the only thing stopping finished work being injected forever');
@@ -322,7 +322,7 @@ test('a record the model reaffirms outright is confirmed, not only one it leaves
 	const at=(i:number)=>new Date(Date.parse('2026-05-01T00:00:00.000Z')+i*86400_000).toISOString();
 	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:at(0),
 		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
-	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+	await evolve(store,'seed',host,AbortSignal.timeout(1000),async()=>({model:'fake/model',
 		text:JSON.stringify({memories:[{kind:'fact',content:'The Atlas service listens on port 9999.'}]})}));
 	const target=store.readMemories().find(m=>m.content.includes('9999'))!;
 	const count=store.readMemories().length;
@@ -356,7 +356,7 @@ test('confirmation moves the decay anchor but never the replacement authority ga
 	const at=(i:number)=>new Date(Date.parse('2026-03-01T00:00:00.000Z')+i*86400_000).toISOString();
 	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:at(0),
 		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
-	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+	await evolve(store,'seed',host,AbortSignal.timeout(1000),async()=>({model:'fake/model',
 		text:JSON.stringify({memories:[{kind:'fact',content:'The Atlas service listens on port 9999.'}]})}));
 	const target=store.readMemories().find(m=>m.content.includes('9999'))!;
 
@@ -382,7 +382,7 @@ test('no source confirms a project state, by silence or otherwise',()=>using(asy
 	const at=(i:number)=>new Date(Date.parse('2026-03-01T00:00:00.000Z')+i*86400_000).toISOString();
 	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:at(0),
 		content:'## Critical Context\n- The Atlas migration runbook lives in docs.'});
-	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+	await evolve(store,'seed',host,AbortSignal.timeout(1000),async()=>({model:'fake/model',
 		text:JSON.stringify({memories:[{kind:'project_state',content:'[pending] The Atlas migration is still running.'}]})}));
 	const state=store.readMemories().find(m=>m.kind==='project_state')!;
 
@@ -411,7 +411,7 @@ test('a dormant record is still a candidate, so later evidence can revive or ret
 	const ago=(d:number)=>new Date(Date.now()-d*86400_000).toISOString();
 	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:ago(300),
 		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
-	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>({model:'fake/model',
+	await evolve(store,'seed',host,AbortSignal.timeout(1000),async()=>({model:'fake/model',
 		text:JSON.stringify({memories:[{kind:'fact',content:'The Atlas service listens on port 9999.'}]})}));
 	const target=store.readMemories().find(m=>m.content.includes('9999'))!;
 	assert.equal(memoryQuality(target).dormant,true,'fixture: the record must be past its horizon');
@@ -438,12 +438,12 @@ test('confirmation never costs the ability to undo the change it accompanied',()
 		{kind:'fact',content:'The Atlas service listens on port 9999.',...(searchTerms?{searchTerms}:{})}]})});
 	store.capture({id:'seed',scope:'/project',kind:'summary',createdAt:at(0),
 		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
-	await evolve(store,'seed',{} as ExtensionContext,AbortSignal.timeout(1000),reply());
+	await evolve(store,'seed',host,AbortSignal.timeout(1000),reply());
 	const target=store.readMemories().find(m=>m.content.includes('9999'))!;
 
 	store.capture({id:'s2',scope:'/project',kind:'summary',createdAt:at(30),
 		content:'## Critical Context\n- The Atlas service listens on port 9999.'});
-	await evolve(store,'s2',{} as ExtensionContext,AbortSignal.timeout(1000),reply(['atlas','port']));
+	await evolve(store,'s2',host,AbortSignal.timeout(1000),reply(['atlas','port']));
 	const annotated=store.readMemories().find(m=>m.id===target.id)!;
 	assert.deepEqual(annotated.searchTerms,['atlas','port'],'fixture: the aliases must have been written');
 	assert.equal(annotated.reinforcedAt,at(30),'fixture: and the record confirmed in the same call');
@@ -462,14 +462,14 @@ test('a broken output contract is correctable, not a permanent stop',()=>using(a
 	const target=store.readMemories().find(m=>m.kind==='project_state')!;
 	store.capture({id:'p1',scope:'/project',kind:'progress',targets:[target.id],content:'tool result',createdAt:new Date().toISOString()});
 
-	await assert.rejects(evolve(store,'p1',{} as ExtensionContext,AbortSignal.timeout(1000),
+	await assert.rejects(evolve(store,'p1',host,AbortSignal.timeout(1000),
 		async()=>({model:'test',text:'{"memories":[{"kind":"fact","content":"Atlas push completed."}]}'})),
 		(error:any)=>error.code==='invalid_output'&&error.diagnostic.reason==='progress_contract');
 	assert.match(store.status(),/paused=0/,'a contract mistake must not pause the source');
 
 	// The retry is told which rule it broke, instead of having the whole schema repeated at it.
 	let corrected='';
-	await evolve(store,'p1',{} as ExtensionContext,AbortSignal.timeout(1000),async(_ctx,system)=>{corrected=system;
+	await evolve(store,'p1',host,AbortSignal.timeout(1000),async(_ctx,system)=>{corrected=system;
 		return {model:'test',text:JSON.stringify({memories:[{kind:'project_state',content:'Atlas push completed.',replaces:target.id}]})};},true);
 	assert.match(corrected,/OUTPUT CORRECTION[\s\S]*progress_contract/);
 	assert.equal(store.readMemories().find(m=>m.id===target.id)!.status,'forgotten');
@@ -545,7 +545,7 @@ test('a source is never shown a record it would be refused: one newer than itsel
 // sibling-eligible — to another provider. One exposure and a stop is the cheaper outcome.
 test('model output that redacts to a placeholder stops the source instead of being retried',()=>using(async(store)=>{
 	let calls=0;
-	await assert.rejects(evolve(store,'s1',{} as ExtensionContext,AbortSignal.timeout(1000),async()=>{calls++;
+	await assert.rejects(evolve(store,'s1',host,AbortSignal.timeout(1000),async()=>{calls++;
 		return {model:'test',text:'{"memories":[{"kind":"fact","content":"Database password: hunter2 is stored in the vault."}]}'};}),
 		(error:{code?:string})=>error.code==='write_rejected');
 	assert.equal(calls,1,'the source must not be sent to the model again');

@@ -13,7 +13,8 @@ async function fixture(fn:(f:any)=>Promise<void>,complete?:CompleteMemory,env:No
 	const dir=mkdtempSync(join(tmpdir(),'pme-index-v2-'));const stateDir=join(dir,'state');const cwd=join(dir,'project');mkdirSync(cwd);
 	const hooks=new Map<string,any>();const tools=new Map<string,any>();let command:any;const notifications:string[]=[];
 	const pi={on:(event:string,handler:any)=>hooks.set(event,handler),registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand:(name:string,options:any)=>{assert.equal(name,'memory');command=options.handler;}} as unknown as ExtensionAPI;
-	const ctx={cwd,hasUI:true,sessionManager:{getSessionId:()=> 'session-uuid'},ui:{notify:(text:string)=>notifications.push(text)}} as unknown as ExtensionContext;
+	// A selected model, as a real session has: without one, evolve() leaves every source pending (review F4).
+	const ctx={cwd,hasUI:true,model:{provider:'test',id:'active'},sessionManager:{getSessionId:()=> 'session-uuid'},ui:{notify:(text:string)=>notifications.push(text)}} as unknown as ExtensionContext;
 	await memoryEvolution(pi,{stateDir,env,complete:complete??(async()=>({model:'test/active',text:'{"memories":[]}'})),timeoutMs:30,...timing});
 	const call=async(name:string,event:any={})=>{const result=await hooks.get(name)?.(event,ctx);await new Promise((r)=>setImmediate(r));return result;};
 	try{await fn({dir,stateDir,cwd,hooks,tools,ctx,notifications,command:(args:string)=>command(args,ctx),call});}
@@ -470,7 +471,7 @@ test('an invalid policy file names itself instead of the advice that fails the s
 async function session(stateDir:string,cwd:string,sessionId:string,complete:CompleteMemory) {
 	const hooks=new Map<string,any>();const notifications:string[]=[];let command:any;
 	const pi={on:(event:string,handler:any)=>hooks.set(event,handler),registerTool:()=>{},registerCommand:(_name:string,options:any)=>{command=options.handler;}} as unknown as ExtensionAPI;
-	const ctx={cwd,hasUI:true,sessionManager:{getSessionId:()=>sessionId},ui:{notify:(text:string)=>notifications.push(text)}} as unknown as ExtensionContext;
+	const ctx={cwd,hasUI:true,model:{provider:'test',id:'active'},sessionManager:{getSessionId:()=>sessionId},ui:{notify:(text:string)=>notifications.push(text)}} as unknown as ExtensionContext;
 	await memoryEvolution(pi,{stateDir,complete,timeoutMs:2000,pollMs:60_000});
 	return {notifications,ctx,
 		command:async(args:string)=>{await command(args,ctx);return notifications.at(-1) as string;},

@@ -214,8 +214,9 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 				const scope = scopeOf(ctx);
 				let text: string;
 				if (operation === "status") {
-					const model = ctx.model ? modelLabel(`${ctx.model.provider}/${ctx.model.id}`) : 'unavailable';
-					text = `${current.status()}\nCurrent model: ${model}\nAllowed routes: ${routeCandidates(ctx, current).map(modelKey).join(' → ') || 'no active model'} (at most ${current.policy.sourceModels} of them per source)\n${current.budgetStatus(model, Date.now(), ctx.model ? { provider: ctx.model.provider, pricing: ctx.model.cost } : undefined)}\nCapture origin: ${scope}\nRecall: all origins, topic-based\nRecovery polling: every ${(dependencies.pollMs ?? RECOVERY_POLL_MS) / 1000}s while Pi is running`;
+					// No model is not a route: captured sources wait, unclaimed, until Pi has one selected.
+					const model = ctx.model ? modelLabel(`${ctx.model.provider}/${ctx.model.id}`) : undefined;
+					text = `${current.status()}\nCurrent model: ${model ?? 'none selected; captured sources wait until one is'}\nAllowed routes: ${routeCandidates(ctx, current).map(modelKey).join(' → ') || 'no active model'} (at most ${current.policy.sourceModels} of them per source)\n${model ? current.budgetStatus(model, Date.now(), { provider: ctx.model!.provider, pricing: ctx.model!.cost }) : 'Shared model budget: no model selected.'}\nCapture origin: ${scope}\nRecall: all origins, topic-based\nRecovery polling: every ${(dependencies.pollMs ?? RECOVERY_POLL_MS) / 1000}s while Pi is running`;
 				}
 				else if (operation === "learning") text = `Last learning capture (transient, not proof of updates):\n${lastLearning}\n${current.processingStatus()}`;
 				else if (operation === "explain") {

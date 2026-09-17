@@ -26,20 +26,25 @@ export function parseClaims(text: string): Claim[] { return parseMemoryOutput(te
  * adapter adds around the prompt and the input, and the correction note on a retry. */
 const CONTEXT_SLACK_TOKENS = 400;
 
-/** One bounded model call per source. No lock held over network; stale results cannot commit. */
+/** One bounded model call per source. No lock held over network; stale results cannot commit.
+ * Returns false without claiming anything when the host has no model selected: that is transient
+ * (none configured yet, or an RPC client that has not chosen one), so the source stays pending for
+ * the recovery timer to pick up once one exists. It is not the `unavailable` pause, which is for a
+ * failed legacy import or a host without `registry.complete`, where waiting cannot help. */
 export async function evolve(store: MemoryStore, sourceId: string, ctx: ExtensionContext, signal: AbortSignal, complete: CompleteMemory = completeMemory, retry: RetryMode = false, timeoutMs = EVOLUTION_TIMEOUT_MS): Promise<boolean> {
 	signal.throwIfAborted();
 	const selectedModel = ctx.model;
-	const model = selectedModel ? modelLabel(`${selectedModel.provider}/${selectedModel.id}`) : 'unavailable';
+	if (!selectedModel) return false;
+	const model = modelLabel(`${selectedModel.provider}/${selectedModel.id}`);
 	// Exactly what the adapter will ask the provider for, so context arithmetic and the spend estimate
 	// cannot promise less room than the request permits. A model declaring no limit — or its whole
 	// window, which is the catalog's way of saying the same — is sent none, and the provider's own
 	// default applies; this contract's worst legal reply is the estimate for that.
-	const answerReserve = answerCeiling(selectedModel?.maxTokens, selectedModel?.contextWindow) ?? MAX_OUTPUT_TOKENS;
-	const run = store.beginEvolution(sourceId, retry, timeoutMs, Date.now(), model, selectedModel ? {
+	const answerReserve = answerCeiling(selectedModel.maxTokens, selectedModel.contextWindow) ?? MAX_OUTPUT_TOKENS;
+	const run = store.beginEvolution(sourceId, retry, timeoutMs, Date.now(), model, {
 		provider: selectedModel.provider, pricing: selectedModel.cost,
 		outputTokens: answerReserve, promptBytes: Buffer.byteLength(PROMPT) + 1200,
-	} : undefined);
+	});
 	if (!run) return false;
 	signal = AbortSignal.any([signal, AbortSignal.timeout(run.timeoutMs)]);
 	let cancel: (() => void) | undefined;
@@ -56,7 +61,7 @@ export async function evolve(store: MemoryStore, sourceId: string, ctx: Extensio
 		// Conservative token estimate (limits.ts: one per CJK character, at most three bytes per token
 		// elsewhere), never cut a progress JSON payload or a fact in half. Bytes are not tokens: counted
 		// byte-for-byte, a source that fit a tight window with room to spare was refused unsent.
-		const capacity = selectedModel?.contextWindow;
+		const capacity = selectedModel.contextWindow;
 		if (Number.isSafeInteger(capacity) && capacity! > 0) {
 			const available = capacity! - answerReserve - estimateTokens(PROMPT) - CONTEXT_SLACK_TOKENS;
 			while (payload.existing.length && estimateTokens(JSON.stringify(payload)) > available) payload.existing.pop();

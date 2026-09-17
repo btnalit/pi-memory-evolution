@@ -339,6 +339,9 @@ retains its original provenance. While Pi is closed no polling occurs.
 Only allowlisted error codes are persisted, never exception strings, provider error bodies,
 model response text or credentials. Stage categories distinguish provider/unavailable,
 output limit, invalid output, write rejection, stale output, timeout and interrupted work.
+`unavailable` pauses a source and is reserved for causes waiting cannot fix: a failed legacy
+import, or a host without `registry.complete`. A session with no model selected is not one of
+them — nothing is claimed or reserved, and the source stays pending until Pi has a model.
 Status reports retrying/paused counts and up to five failed-job details with next due times;
 normal structural validation is still separate from model/job health.
 
