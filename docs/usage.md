@@ -95,7 +95,13 @@ rename the tool to hide the conflict; an old installation would still run its ho
   what separates a standing rule from a question about one — `Always run the tests.` and
   `In the future, always run the tests.` state a rule, while `Do you always run the
   tests?`, `Don't you think we should refactor?` and `Will this work in the future?` stay
-  questions and are not learned. Both `'` and `’` are accepted.
+  questions and are not learned. Both `'` and `’` are accepted. Two further narrowings keep
+  ordinary sentences out: a text ending in `?` or `？` is a question whatever word it opened
+  with (`Never seen this error before, what is it?`), and a bare imperative that limits itself
+  to the step at hand — `for now`, `for this`, `this time`, `just` or `yet` after the cue, as in
+  `Don't worry about the tests for now, just make it compile.` — is an instruction, not a
+  rule. The explicit openers are durable by their own words, so `From now on, just run the
+  unit tests.` is still learned.
   A directive quoted from a pasted log or document is indistinguishable from your own
   by position alone, so it is learned; this matches the existing `以后`/`不要` behavior. Natural declarations such as `我比较在意的三大功能…`,
   `我们的核心需求是…` or `Our priorities are…` also trigger learning, even if followed
