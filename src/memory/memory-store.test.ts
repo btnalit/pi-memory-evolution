@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, statSync }
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
-import { MemoryStore, type Source } from "./memory-store.ts";
+import { MemoryStore, CHANGED_EVENT_SQL, type Source } from "./memory-store.ts";
 import { Database } from "./sqlite.ts";
 import { selectRelevantMemories } from "./retriever.ts";
 import { archiveLegacyFiles, legacyFiles } from "./legacy-files.ts";
@@ -103,6 +103,37 @@ test("in-flight model output loses authority after manual edit", () => using((s)
 	s.act(s.readMemories()[0].id,"forget");
 	assert.throws(() => s.finishEvolution(run,[{kind:"fact",content:"Database is on port 5432."}],"model"),/stale/);
 	assert.deepEqual(selectRelevantMemories(s.readMemories(),"Database port"),[]);
+}));
+// Any event in the scope used to move the generation an in-flight result is checked against —
+// including a user-turn capture with no local claims, or a model reply that changed nothing. Each
+// one made the paid call `stale`, cost a failure with backoff and one of the source's four calls, so
+// in a busy scope sources were paused by attrition. Only an event that changed a memory is evidence
+// the result was computed against a different store. (Feedback and pins do write the record — a
+// verdict or layer plus a revision — so they still count, and should: an in-flight reply must not
+// overwrite a record the user just marked incorrect.)
+test("an event that changed no memory does not invalidate an in-flight result; one that did still does", () => using((s, dir) => {
+	s.capture(source()); const run = s.beginEvolution("s1")!;
+	const before = s.readMemories();
+	// The user's next turn ends while the call is in flight: captured, no local claims, an event written.
+	s.capture({ id: "turn", scope: "/project", kind: "user", content: "Remember the database.", createdAt: new Date().toISOString() });
+	// And another source's model reply lands with nothing to change: an event written, no memory touched.
+	s.finishEvolution(s.beginEvolution("turn")!, [], "model");
+	assert.equal(s.history().length, 3, "fixture: both events were written");
+	assert.deepEqual(s.readMemories(), before, "fixture: neither changed a memory");
+	s.finishEvolution(run, [{ kind: "fact", content: "Database is on port 5432." }], "model");
+	assert.match(s.status(), /done=2/);
+	assert.equal(s.readMemories().length, 2);
+	// Positive control: a capture that DOES change a memory in the scope still makes the result stale.
+	s.capture({ id: "turn2", scope: "/project", kind: "user", content: "Remember the database.", createdAt: new Date().toISOString() });
+	const second = s.beginEvolution("turn2")!;
+	s.capture(source("s3", "## Critical Context\n- Database port is 9999."));
+	assert.throws(() => s.finishEvolution(second, [{ kind: "fact", content: "Database uses Redis." }], "model"), (e: any) => e.code === "stale");
+	// And the check stays O(log n): the generation query is answered from a partial index over changed events.
+	const db = new Database(join(dir, "memory.sqlite"));
+	try {
+		const plan = db.prepare(`EXPLAIN QUERY PLAN SELECT COALESCE(MAX(rowid),0) AS n FROM events WHERE scope=? AND ${CHANGED_EVENT_SQL}`).all("/project").map(r => String(r.detail)).join("; ");
+		assert.match(plan, /USING (?:COVERING )?INDEX events_scope_changes/, plan);
+	} finally { db.close(); }
 }));
 test("stale model result from an older source cannot replace newer facts", () => using((s) => {
 	s.capture(source()); s.capture({...source("old"),createdAt:"2000-01-01T00:00:00.000Z"});

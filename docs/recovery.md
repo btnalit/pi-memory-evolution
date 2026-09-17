@@ -40,7 +40,7 @@ Last-checked ordering moves temporarily unroutable sources behind other eligible
 | Context overflow or HTTP 400/404/422 | Do not resend unchanged requests to that model immediately; cool it down for 1 hour and permit a compatible backup. |
 | Invalid JSON / output truncation / **broken output contract** | Initial attempt, at most one corrective prompt naming the rule that was broken, then an alternate model. Three output failures pause the source; two failures do not authorize repeatedly probing the same model. |
 | Unsafe/unauthorized write or recognized safety/refusal | Reject and pause that source. No fallback to circumvent safety or write guards. |
-| Stale result | Re-read on a bounded delayed retry; not counted as a provider-health failure. |
+| Stale result | Re-read on a bounded delayed retry; not counted as a provider-health failure. It **is** counted against the source's own budgets — one of its reserved calls, and one failure with backoff — because the request was sent and may have been billed. Only an event that changed a memory in the scope makes a result stale; a capture with no local claims, feedback, a pin or a reply that changed nothing does not. |
 | Cancellation / shutdown / reload | Release the lease without adding a failure; already-reserved requests may still have consumed quota. |
 | Unknown error | Safe generic category and bounded transport retry; no guessing that arbitrary error prose means insufficient credit. |
 

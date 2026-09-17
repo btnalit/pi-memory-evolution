@@ -21,6 +21,11 @@ const pausedSQL = (p: RoutingPolicy) => `(${PAUSED_SQL} OR calls>=${p.sourceCall
 // Selection and claim both check source budgets; route/global waits never modify source retry_at.
 const automaticEligibility = (p: RoutingPolicy) => `((state='pending' OR state='failed') AND NOT ${pausedSQL(p)} AND retry_at<=?)`;
 
+/** An event that changed a memory. In-flight model results are measured against these only: a
+ * capture with no local claims, feedback, a pin, or a reply that changed nothing all write an event
+ * but change no memory, and each one used to make every in-flight result in the scope `stale`. The
+ * same expression backs a partial index, so the check stays O(log n) however many events accrue. */
+export const CHANGED_EVENT_SQL = "json_array_length(json_extract(data,'$.after'))>0";
 export type MemoryKind = "fact" | "preference" | "decision" | "project_state";
 export interface DurableMemory {
 	id: string;
@@ -112,6 +117,7 @@ export class MemoryStore {
 				CREATE INDEX IF NOT EXISTS sources_scope_state ON sources(json_extract(data,'$.scope'),state);
 				CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, scope TEXT NOT NULL, data TEXT NOT NULL);
 				CREATE INDEX IF NOT EXISTS events_scope ON events(scope);
+				CREATE INDEX IF NOT EXISTS events_scope_changes ON events(scope) WHERE ${CHANGED_EVENT_SQL};
 				CREATE TABLE IF NOT EXISTS blocked (scope TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(scope,hash));`);
 			this.transaction(() => {
 				const schema = this.db.prepare("SELECT value FROM metadata WHERE key='schema'").get();
@@ -247,8 +253,11 @@ export class MemoryStore {
 		if (!isMemory(data) || data.id !== id || data.scope !== row.scope || fingerprint(data.content) !== row.hash) throw new Error("Invalid memory record");
 		return data;
 	}
+	/** The newest event that changed a memory in this scope. A result computed before it was
+	 * computed against a different store and may not commit; events that changed nothing are not
+	 * evidence of that, so they do not move it (see CHANGED_EVENT_SQL). */
 	private generation(scope: string): number {
-		return Number(this.db.prepare("SELECT COALESCE(MAX(rowid),0) AS n FROM events WHERE scope=?").get(scope)!.n);
+		return Number(this.db.prepare(`SELECT COALESCE(MAX(rowid),0) AS n FROM events WHERE scope=? AND ${CHANGED_EVENT_SQL}`).get(scope)!.n);
 	}
 	/** Confirmation is not a change: no content, evidence, status or `updatedAt` moves, so it writes
 	 * no event and creates no undo point - there is nothing to undo about having been mentioned. Only
