@@ -51,7 +51,11 @@ export function queryFeatures(text: string): Set<string> {
 
 // Lines that are pasted material rather than the ask: a V8 stack frame, a unified-diff header or
 // hunk, the body lines of an open hunk, and anything inside a code fence.
-const FRAME = /^\s*at\s/u;
+/** A V8 stack frame: `at fn (location:line:col)` or `at location:line:col`. The location is required —
+ * a frame with none (`at <anonymous>`, `at async Promise.all (index 0)`) carries no literal, and an
+ * English line that merely opens with `at` (`at /srv/wrong.json what is the port?`) is the ask,
+ * whose path must stay typed. The closing `)` is optional: a bare `at path:3:1` form has none. */
+const FRAME = /^\s*at\s.*:\d+(?::\d+)?\)?\s*$/u;
 const DIFF_HEADER = /^(?:[-+]{3}\s|@@)/u;
 /** A hunk header, with the body line counts it declares: `@@ -a[,b] +c[,d] @@`, a count omitted is 1. */
 const HUNK = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/u;

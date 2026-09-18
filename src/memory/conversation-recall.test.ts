@@ -453,6 +453,27 @@ test('a diff hunk ends where its header says, so a bullet ask right after it kee
  assert.deepEqual(mandatory("import { rows } from './db/rows.ts';\nPlease install the dependencies and fix this."), ['literal:./db/rows.ts']);
 });
 
+// A stack-frame line is `at … location:line[:col]`, and the location is what makes it one. Matching
+// any line that opened with `at` also matched an English ask that happened to start with the word,
+// and laundered its typed path into the pasted set — the opposite of what a typed literal promises.
+test('a line that merely opens with "at" is the ask, and its path stays typed; every real frame shape stays pasted', () => {
+	const store = [...project, ...clutter];
+	const mandatory = (text: string) => [...queryFeatures(text)].filter(w => w.startsWith('literal:') && !pastedLiterals(text).has(w));
+	assert.deepEqual(mandatory('at /srv/wrong.json what is the database port?'), ['literal:/srv/wrong.json']);
+	assert.deepEqual(mandatory('at least look at src/export.ts before answering'), ['literal:src/export.ts']);
+	const typed = retrieveMemories(store, resolveRecallQuery('at /srv/wrong.json what is the database port?'), 3, now).diagnostics;
+	assert.deepEqual(typed.selected, []);
+	assert.ok(typed.candidates.every(c => c.reason === 'resource-mismatch'), JSON.stringify(typed.candidates));
+	// Frames with a location, in every shape V8 and its neighbours print, are pasted: named function
+	// with parentheses, a bare path, a Windows-style line ending, a source-mapped `?:line:col` that
+	// the line-reference rule alone cannot see past, and a Rust-style relative frame.
+	for (const frame of ['    at exportInvoices (/home/me/invoice-api/src/export.ts:3:1)', '    at /home/me/invoice-api/src/export.ts:3:1',
+		'    at exportInvoices (/home/me/invoice-api/src/export.ts:3:1)\r', '    at foo (webpack:///./src/x.ts?:3:1)', '   at src/main.rs:5:9'])
+		assert.deepEqual(mandatory(frame), [], JSON.stringify(frame));
+	// A frame with no location carries no literal, so nothing turns on how it is classified.
+	assert.deepEqual([...queryFeatures('    at async Promise.all (index 0)')].filter(w => w.startsWith('literal:')), []);
+});
+
 test('literal extraction strips frame suffixes and closing punctuation', () => {
  assert.deepEqual([...queryFeatures('at exportInvoices (/home/me/invoice-api/src/export.ts:3:1)')].filter(w => w.startsWith('literal:')), ['literal:/home/me/invoice-api/src/export.ts']);
  assert.deepEqual([...queryFeatures('see src/export.ts:12 and (also /srv/atlas.json).')].filter(w => w.startsWith('literal:')), ['literal:src/export.ts', 'literal:/srv/atlas.json']);
