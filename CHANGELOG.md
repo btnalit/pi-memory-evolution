@@ -2,6 +2,13 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
+## [0.4.1](https://github.com/btnalit/pi-memory-evolution/compare/v0.4.0...v0.4.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* recall from ordinary task prompts, and close the seams the 2026-09-17 review found ([#31](https://github.com/btnalit/pi-memory-evolution/issues/31)) ([9b34b18](https://github.com/btnalit/pi-memory-evolution/commit/9b34b18cdfb8d8892f16362f6c8ea1a788704ba2))
+
 ## [0.4.0](https://github.com/btnalit/pi-memory-evolution/compare/v0.3.2...v0.4.0) (2026-09-10)
 
 
