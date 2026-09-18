@@ -203,7 +203,8 @@ rename the tool to hide the conflict; an old installation would still run its ho
   normalization and a relative cutoff reject weak secondary matches. Unseen query words
   no longer receive the highest rarity weight. An exact path or filename you type must match,
   including case; `/srv/Atlas` and `/srv/atlas` are distinct. A path that arrived inside pasted
-  material — a stack-frame line, a diff (a hunk ends where its `@@` header says), fenced code, or
+  material — a stack-frame line (`at …location:line:col`; a line that merely opens with the word
+  `at` is the ask), a diff (a hunk ends where its `@@` header says), fenced code, or
   a `file:line:col` reference — still counts in favour of a record that names it but is not
   required of every record, so a trace pasted ahead of the ask does not block recall of the
   background the ask is about; a path that also appears in the ask itself is typed, and stays
