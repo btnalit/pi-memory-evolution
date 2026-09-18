@@ -98,7 +98,11 @@ available. Rebuilding with different tooling may legitimately produce different
 bytes and require investigation, not bypassing the integrity check.
 
 A cancelled or failed npm call is not proof nothing was published: the registry
-check on retry handles that case. Do not delete/recreate tags or edit registry
+check on retry handles that case. After a successful `npm publish` the script waits up
+to five minutes for the version to become visible anonymously — npm's propagation lag has
+exceeded a minute — and only then attaches release assets; a job that fails after
+`+ pi-memory-evolution@x.y.z` was printed has published, and the retry above takes the
+already-published branch. Do not delete/recreate tags or edit registry
 metadata to disguise a failed release.
 
 ## Dependency updates and Pi Gallery
