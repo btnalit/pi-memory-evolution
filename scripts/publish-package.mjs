@@ -19,15 +19,20 @@ if (decision === 'already-published') {
 } else {
 	// No rebuilding, lifecycle scripts or implicit fallback to another registry.
 	execFileSync('npm', ['publish', archive, '--access', 'public', '--tag', 'latest', '--provenance', '--ignore-scripts', '--registry', 'https://registry.npmjs.org/'], { stdio: 'inherit', timeout: 120_000 });
+	// npm answers "being processed and may take a few minutes to become available" and means it: the
+	// 0.4.1 publish took over a minute to appear anonymously, and an 18-second window failed the job
+	// after the version was already live and signed. The retry path (already-published) recovers
+	// that, but every release needing a manual re-dispatch is the failure mode. Five minutes covers
+	// the propagation lag seen so far and stays inside the job's ten-minute ceiling.
 	let verified = false;
-	for (let attempt = 0; attempt < 6; attempt++) {
+	for (let attempt = 0; attempt < 30; attempt++) {
 		const published = await registryJson(`${registry}/${manifest.version}`);
 		if (published) {
 			assert.equal(publicationDecision(manifest, published), 'already-published');
 			verified = true; break;
 		}
-		await new Promise(resolve => setTimeout(resolve, 3000));
+		await new Promise(resolve => setTimeout(resolve, 10_000));
 	}
-	assert.ok(verified, 'Publication returned but public registry verification did not complete; retry this release');
+	assert.ok(verified, 'Publication returned but public registry verification did not complete within five minutes; retry this release');
 	console.log(`Published and anonymously verified ${manifest.name}@${manifest.version}.`);
 }
