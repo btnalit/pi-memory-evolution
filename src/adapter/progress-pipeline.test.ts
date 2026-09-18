@@ -147,11 +147,59 @@ test('natural requirements and priorities learn without a magic remember keyword
   '我们的核心需求是跨会话记忆和自动更新。','我希望系统每次都能自动召回相关背景。','我喜欢简洁的解释。',
   'Our priorities are automatic evolution, relevant injection and automatic recall. What do you think?',
   'Our project must preserve provenance and update stale progress.','我喜欢茶。','我们决定采用 SQLite 数据库。','We decided to use SQLite.',
+  // 以后 and 不要 had no English counterpart, so the same standing rule was learned in Chinese and dropped in English.
+  // 'use', not 'prefer': the latter is already an EXPLICIT cue, and the case must prove the opener alone.
+  'From now on use conventional commits.','Going forward, tag every release with a signed tag.','In the future, use pnpm in this repo.',
+  'In future, use pnpm in this repo.','In the future, always run the tests before committing.',
+  'Always run the test suite before committing.','Never commit generated build artifacts.','Do not add comments unless they explain why.',
+  "Don't use sed on TypeScript sources.",'Don\u2019t use sed on TypeScript sources.',
+  // An opener that says in its own words that the rule is durable is not cancelled by a word that
+  // would make a bare imperative one-off: "just" here means "only", and "from now on" means always.
+  'From now on, just run the unit tests before pushing.','Going forward, only use pnpm for this repo.',
  ])assert.equal(learningIntent(text).learn,true,text);
+});
+
+// Sentence-initial always/never/don't/do not is also how ordinary one-off instructions and even
+// questions begin. On the branch that introduced the cue, all of these were captured as standing
+// preferences and spent a paid learning call each — 10 of 11 review probes, 0 of 11 before the cue
+// existed. A directive is a rule only when it is not a question and does not limit itself to the
+// step at hand: "for now", "for this", "this time", "just" and "yet" after the cue say it does.
+test('one-off instructions and questions that merely open with a directive word are not learned',()=>{
+ for(const text of [
+  // Named in the review finding.
+  "Don't worry about the tests for now, just make it compile.",
+  'Do not run the migration, I just want to see the plan.',
+  'Never seen this error before, what is it?',
+  'Always the same stack trace when I run it. Why?',
+  'In the future tense, how would you phrase this sentence?',
+  'Never mind the linter, does the build pass?',
+  // One per one-off marker.
+  "Don't commit yet.",
+  'Always run the full suite this time.',
+  'Do not bump the version for this.',
+  "Don't just run the tests, tell me what failed.",
+  'Never mind for now, I will look at it tomorrow.',
+  // A question mark at the end is a question whatever word it opened with, including the
+  // durable openers.
+  'Always? Or only on release branches?',
+  'From now on, should I use pnpm?',
+  'Going forward, do we still need the changelog?',
+ ])assert.equal(learningIntent(text).learn,false,text);
 });
 
 test('questions, vague continuations, quoted examples and one-off commands are not durable requirements',()=>{
  for(const text of ['请接着继续','你还知道我们项目要实现的需求吧？','我需要你运行测试。','我的要求是什么？','我在意什么？',
   'What do you remember about my project requirements?','例如：我喜欢简洁的解释。','"Our priorities are automatic memory."',
-  'Suppose our project must preserve provenance.','你觉得这个偏好怎么设置？','当前偏好设置在哪里？','Do I prefer tea?'])assert.equal(learningIntent(text).learn,false,text);
+  'Suppose our project must preserve provenance.','你觉得这个偏好怎么设置？','当前偏好设置在哪里？','Do I prefer tea?',
+  // A standing rule is stated at the start of a sentence; mid-sentence the same words ask about one.
+  'Do you always run the test suite?','Should we never use sed here?','Can you check whether the tests always pass on macOS?',
+  'Never mind, do you remember the port?','"Always run the tests." is what the guide says.','Suppose we always run tests.',
+  // A sentence-initial cue followed by a pronoun is a question wearing an imperative's clothes.
+  "Don't you think we should refactor this module?","Don't we need to update the changelog too?",
+  "Don't you remember the timeout value we picked?",
+  // 'from now on'/'going forward'/'in (the) future' are only directives as sentence openers;
+  // mid-sentence they are ordinary prose, and matching them would also override the recall-question gate above.
+  'Do you think this API will still work in the future?',"We'll deal with performance in future releases.",
+  'We might reconsider going forward with this vendor.','The docs say support will be dropped in future versions.',
+ ])assert.equal(learningIntent(text).learn,false,text);
 });

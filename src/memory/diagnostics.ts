@@ -8,6 +8,9 @@ export const DIAGNOSTIC_REASONS = ['empty_text', 'missing_final', 'ambiguous_fin
  // so a correction can say which one, instead of repeating the whole schema back at it.
  'progress_contract', 'unknown_replaces', 'duplicate_replaces', 'replaces_kind', 'cyclic_replaces',
  'invalid_aliases',
+ // Refusals on the store's own authority (write_rejected, never correctable). The records they name
+ // are withheld from the model before it is asked; these say why when the barrier is still reached.
+ 'pinned_replaces', 'origin_replaces', 'newer_replaces',
  'http_error', 'abnormal_stop', 'request_failed', 'legacy_import_failed'] as const;
 export type DiagnosticReason = typeof DIAGNOSTIC_REASONS[number];
 /** Structural metadata only. Never add output snippets, arbitrary keys, headers or exception messages. */

@@ -17,7 +17,12 @@ test('the model\'s own ceiling is sent, never a smaller one of ours',async()=>{
 	const sent=new Set<string>();
 	for(const [model,expected] of [[{id:'small',provider:'test',maxTokens:4096},4096],
 		[{id:'big',provider:'test',maxTokens:200000},200000],[{id:'none',provider:'test'},undefined],
-		[{id:'bad',provider:'test',maxTokens:0},undefined],[{id:'nan',provider:'test',maxTokens:1.5},undefined]] as const){
+		[{id:'bad',provider:'test',maxTokens:0},undefined],[{id:'nan',provider:'test',maxTokens:1.5},undefined],
+		// The catalog writes maxTokens === contextWindow for "may use the whole window". That is not a
+		// ceiling that can be sent: reserved in full it leaves no room for input, so it is treated as none.
+		[{id:'whole-window',provider:'test',maxTokens:262144,contextWindow:262144},undefined],
+		[{id:'over-window',provider:'test',maxTokens:300000,contextWindow:262144},undefined],
+		[{id:'within-window',provider:'test',maxTokens:4096,contextWindow:128000},4096]] as const){
 		// 'maxTokens' in options, not options.maxTokens: a key present but holding undefined would
 		// otherwise read as absent, and some adapters treat a present key differently from a missing one.
 		let seen:unknown='unset';

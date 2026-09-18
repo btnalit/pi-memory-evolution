@@ -89,7 +89,21 @@ rename the tool to hide the conflict; an old installation would still run its ho
   facts, preferences, decisions or project-state claims using recognizable headings.
 - Explicit user statements containing cues such as `remember`, `prefer`, `记住`,
   `偏好`, `纠正`, `不对`, `以后`, or `不要` also trigger learning, without waiting for
-  another compaction. Natural declarations such as `我比较在意的三大功能…`,
+  another compaction. The English counterparts of `以后`/`不要` count the same way, and
+  all of them only at the *start of a sentence*: `from now on`, `going forward`,
+  `in the future` (or `in future`), `always`, `never`, `don't` or `do not`. Position is
+  what separates a standing rule from a question about one — `Always run the tests.` and
+  `In the future, always run the tests.` state a rule, while `Do you always run the
+  tests?`, `Don't you think we should refactor?` and `Will this work in the future?` stay
+  questions and are not learned. Both `'` and `’` are accepted. Two further narrowings keep
+  ordinary sentences out: a text ending in `?` or `？` is a question whatever word it opened
+  with (`Never seen this error before, what is it?`), and a bare imperative that limits itself
+  to the step at hand — `for now`, `for this`, `this time`, `just` or `yet` after the cue, as in
+  `Don't worry about the tests for now, just make it compile.` — is an instruction, not a
+  rule. The explicit openers are durable by their own words, so `From now on, just run the
+  unit tests.` is still learned.
+  A directive quoted from a pasted log or document is indistinguishable from your own
+  by position alone, so it is learned; this matches the existing `以后`/`不要` behavior. Natural declarations such as `我比较在意的三大功能…`,
   `我们的核心需求是…` or `Our priorities are…` also trigger learning, even if followed
   by a question asking for feedback. This is bounded intent recognition, not universal
   understanding. Quotes, ordinary recall questions and one-off commands are not requirements.
@@ -171,9 +185,29 @@ rename the tool to hide the conflict; an old installation would still run its ho
   does not immediately lose its subject. Bounds and compaction still limit recall.
   A fresh session saying only `继续` injects nothing; naming a topic enables cross-session
   recall regardless of its original directory.
-- Query coverage, evidence-based document frequency, field weights, mild length
+- Recall works from an ordinary task prompt, not only from a question aimed at the memory:
+  a record qualifies either when it accounts for enough of what was asked **or** when the
+  prompt names that record's topic — an exact path/filename, or a known concept or one of the
+  record's own aliases that is rare in the store (an alias such as `server` that many records
+  share names nothing) — and engages it more than once. Neither measure shrinks as the request
+  gets longer, nor as the stored claim gets longer or gains aliases, so describing a task in
+  full no longer suppresses the background it is about, and a claim that explains itself is
+  no harder to recall than a one-liner. A prompt that engages nothing stored still injects nothing.
+  The live prompt itself may run up to 65,536 UTF-8 bytes before feature extraction — far past a
+  single conversational turn — so a task naming a stored record after a long pasted log, diff or
+  spec is still recalled, provided any paths in the paste sit on stack-frame, diff or fenced lines
+  or carry a line reference (next point); a path on an ordinary line of an unfenced paste reads as
+  typed and stays required. Only bounded **replayed** history from earlier turns keeps the smaller
+  2,048-byte-per-turn budget.
+- Query coverage, topic naming, evidence-based document frequency, field weights, mild length
   normalization and a relative cutoff reject weak secondary matches. Unseen query words
-  no longer receive the highest rarity weight. Exact paths must match, including case; `/srv/Atlas` and `/srv/atlas` are distinct. A quoted
+  no longer receive the highest rarity weight. An exact path or filename you type must match,
+  including case; `/srv/Atlas` and `/srv/atlas` are distinct. A path that arrived inside pasted
+  material — a stack-frame line, a diff (a hunk ends where its `@@` header says), fenced code, or
+  a `file:line:col` reference — still counts in favour of a record that names it but is not
+  required of every record, so a trace pasted ahead of the ask does not block recall of the
+  background the ask is about; a path that also appears in the ask itself is typed, and stays
+  required. A quoted
   question in a replay/incident note is weaker than evidence answering it. Redundancy
   filtering cannot let a project-state note hide a preference of the same origin.
   Source IDs/cwd have no authority bonus. After relevance gates, host-assigned evidence,
@@ -340,7 +374,7 @@ lists/search or 8,000 bytes in `show`, with an ellipsis when truncated.
 Commands that take exact IDs can address records outside the current cwd. `search` and
 `explain <query>` use only their explicit query, whereas automatic recall can resolve
 follow-ups from recent user context. `explain` without arguments shows the last automatic
-snapshot: normalized focus/context features, eligible/excluded counts, scores, coverage,
+snapshot: normalized focus/context features, eligible/excluded counts, scores, query coverage,
 up to 10 candidate IDs and rejection/selection reasons, plus actual injected count/bytes.
 It retains at most 8,000 bytes (+ truncation marker) in memory, not a database/session log;
 no memory bodies or provider errors are included. It resets on reload and is not proof

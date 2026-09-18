@@ -29,6 +29,27 @@ async function using(fn: (s: MemoryStore, db: Database, dir: string) => Promise<
 const signal = () => AbortSignal.timeout(5000);
 const ok = (ctx: ExtensionContext) => ({ model: `${ctx.model!.provider}/${ctx.model!.id}`, text: '{"memories":[]}' });
 
+// A session with no selected model — none configured yet, or an RPC client that has not picked
+// one — used to claim the source, reserve a model_calls row under the literal model name
+// 'unavailable' (counting against the shared 20/hour and the source's 4), throw `unavailable`
+// from the adapter and pause the source for good. Configuring a model later did not un-pause it.
+// `unavailable` is the right code for a failed legacy import or a host without registry.complete;
+// a missing model is transient, so the source must simply wait, unclaimed, until one exists.
+test('no selected model leaves the source pending and unclaimed, and it is processed once one exists', () => using(async (s) => {
+ const bare = { model: undefined, modelRegistry: {} } as unknown as ExtensionContext;
+ assert.equal(await evolveRouted(s, 'source', bare, signal()), false, 'the real adapter, not a test seam: nothing to call');
+ const info = s.routingInfo('source');
+ assert.deepEqual([info.models, info.calls, info.model, info.error], [[], 0, undefined, ''], 'no call was reserved under any model name');
+ assert.equal(s.pausedJobs(), 0);
+ assert.equal(s.pending(undefined, 'auto', Date.now() + 3_600_000), 'source', 'still eligible for the automatic timer an hour later');
+ assert.ok(!s.status().includes('unavailable'));
+ // A model appears: the same source is picked up on the next tick, with no manual retry.
+ const calls: string[] = [];
+ assert.equal(await evolveRouted(s, 'source', context(), signal(), async c => { calls.push(modelKey(c.model!)); return ok(c); }, 'auto'), true);
+ assert.deepEqual(calls, ['primary/model']);
+ assert.match(s.status(), /done=1/);
+}));
+
 test('default follows Pi; quota switches providers, never sibling models or the foreground setting', () => using(async (s, db, dir) => {
  const ctx = context(), calls: string[] = [];
  const complete = async (c: ExtensionContext) => {

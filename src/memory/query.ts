@@ -1,5 +1,6 @@
 import { clipBytes, redact } from './privacy.ts';
-import { features, transformProse } from './search.ts';
+import { features, literalFeatures, LINE_REFERENCE, LITERALS, transformProse } from './search.ts';
+import { MAX_HISTORY_TURN_BYTES, MAX_QUERY_BYTES } from './limits.ts';
 
 export interface RecallQuery {
  query: string;
@@ -17,7 +18,8 @@ const WEAK = new Set(['配置', '设置', 'config', 'configuration', 'settings',
 // Facets can refine an established subject; they cannot make a new named subject inherit
 // unrelated context. This is a grammatical/attribute vocabulary, not a domain allowlist.
 export const FACETS = new Set([...features('端口 认证 进度 版本 超时 价格 状态 路径 输出 输入 安装 连接 性能 错误 port auth progress version timeout price status path output input installation connection performance error')]);
-const clean = (text: string) => clipBytes(redact(text), 2048).trim();
+// Default budget is the LIVE current-turn prompt's, not a history turn's: see MAX_QUERY_BYTES.
+const clean = (text: string, budget = MAX_QUERY_BYTES) => clipBytes(redact(text), budget).trim();
 
 /** Asking to retrieve an existing memory is not an instruction to learn a new one. */
 export function isRecallQuestion(text: string): boolean {
@@ -47,6 +49,48 @@ export function queryFeatures(text: string): Set<string> {
  return result;
 }
 
+// Lines that are pasted material rather than the ask: a V8 stack frame, a unified-diff header or
+// hunk, the body lines of an open hunk, and anything inside a code fence.
+const FRAME = /^\s*at\s/u;
+const DIFF_HEADER = /^(?:[-+]{3}\s|@@)/u;
+/** A hunk header, with the body line counts it declares: `@@ -a[,b] +c[,d] @@`, a count omitted is 1. */
+const HUNK = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/u;
+const DIFF_BODY = /^[-+ \\]/u;
+const FENCE = /^\s*(?:```|~~~)/u;
+/** Literals that arrived inside pasted material, not as the ask. A path the user types is a
+ * constraint — "/srv/wrong.json database port" must not return the /srv/right.json answer — and every
+ * literal used to be one, so a five-line stack trace or a diff ahead of the ask rejected every record
+ * as resource-mismatch before any other gate ran; traces and diffs always contain paths. A literal
+ * on a stack-frame line, a diff header or hunk line, inside a code fence, or carrying a line
+ * reference (`file:3:1`) keeps its weight but is not required of every record. A path that ALSO
+ * appears on an ordinary line is typed, and stays mandatory: pasting does not launder the ask. */
+export function pastedLiterals(text: string): Set<string> {
+ const pasted = new Set<string>(), typed = new Set<string>();
+ // A hunk ends where its header says: the counts it declares are consumed by its body lines (`-`
+ // against the old side, `+` against the new, a context line against both), and the line after the
+ // last one is the ask again even if it starts with `-`, `+` or a space — a markdown bullet right
+ // after a pasted diff is the ask, and its path must stay typed. Body shape alone decides only for
+ // a hunk that is shorter than declared (a truncated paste): body-shaped lines until one that is not.
+ let fenced = false, hunk = false, oldLeft = Infinity, newLeft = Infinity;
+ for (const line of clean(text).split('\n')) {
+  if (FENCE.test(line)) { fenced = !fenced; hunk = false; continue; }
+  const header = HUNK.exec(line);
+  if (header) { hunk = true; oldLeft = Number(header[1] ?? 1); newLeft = Number(header[2] ?? 1); }
+  else if (DIFF_HEADER.test(line)) { hunk = true; oldLeft = newLeft = Infinity; }
+  else if (hunk && (!DIFF_BODY.test(line) || (oldLeft <= 0 && newLeft <= 0))) hunk = false;
+  else if (hunk) { if (line[0] === '-' || line[0] === ' ') oldLeft--; if (line[0] === '+' || line[0] === ' ') newLeft--; }
+  const quoted = fenced || hunk || FRAME.test(line);
+  for (const match of line.matchAll(LITERALS)) {
+   // A rooted path swallows its `:3:1` into the match; a relative filename stops at its extension,
+   // so the reference is what follows it on the line. Either way it is a reference, not the ask.
+   const referenced = LINE_REFERENCE.test(match[0]) || /^(?::\d+){1,2}(?![\w.])/u.test(line.slice(match.index + match[0].length));
+   for (const feature of literalFeatures(match[0])) (quoted || referenced ? pasted : typed).add(feature);
+  }
+ }
+ for (const feature of typed) pasted.delete(feature);
+ return pasted;
+}
+
 function advance(current: string, previous?: RecallQuery): RecallQuery {
  const terms = queryFeatures(current);
  if (RESET.test(current)) return { query: terms.size ? current : '', mode: 'reset' };
@@ -67,11 +111,18 @@ function advance(current: string, previous?: RecallQuery): RecallQuery {
  * their subject and explicit new/reset topics form barriers. No corpus or assistant text. */
 export function resolveRecallQuery(prompt: string, recentUsers: readonly string[] = []): RecallQuery {
  const current = clean(prompt);
+ // What the live prompt would look like as a REPLAYED turn: this is what session-context.ts
+ // actually produces for it, so it is what a self-inclusion in recentUsers must compare against
+ // — comparing against `current` itself would diverge for any prompt over the history budget,
+ // since the two are no longer clipped to the same length, and shadow the real prior turn.
+ const currentAsHistory = clean(prompt, MAX_HISTORY_TURN_BYTES);
  let previous: RecallQuery | undefined;
  for (const text of recentUsers.slice(-6)) {
-  const value = clean(text);
+  // A REPLAYED turn, not the live ask: bounded at the history budget, defensively,
+  // even though the caller (session-context.ts) already enforces it at the source.
+  const value = clean(text, MAX_HISTORY_TURN_BYTES);
   // Pi may already include this turn in its active context.
-  if (value !== current) previous = advance(value, previous);
+  if (value !== currentAsHistory) previous = advance(value, previous);
  }
  return advance(current, previous);
 }

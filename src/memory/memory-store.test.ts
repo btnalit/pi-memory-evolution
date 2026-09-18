@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, statSync }
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
-import { MemoryStore, type Source } from "./memory-store.ts";
+import { MemoryStore, CHANGED_EVENT_SQL, type Source } from "./memory-store.ts";
 import { Database } from "./sqlite.ts";
 import { selectRelevantMemories } from "./retriever.ts";
 import { archiveLegacyFiles, legacyFiles } from "./legacy-files.ts";
@@ -104,10 +104,72 @@ test("in-flight model output loses authority after manual edit", () => using((s)
 	assert.throws(() => s.finishEvolution(run,[{kind:"fact",content:"Database is on port 5432."}],"model"),/stale/);
 	assert.deepEqual(selectRelevantMemories(s.readMemories(),"Database port"),[]);
 }));
+// Any event in the scope used to move the generation an in-flight result is checked against —
+// including a user-turn capture with no local claims, or a model reply that changed nothing. Each
+// one made the paid call `stale`, cost a failure with backoff and one of the source's four calls, so
+// in a busy scope sources were paused by attrition. Only an event that changed a memory is evidence
+// the result was computed against a different store. (Feedback and pins do write the record — a
+// verdict or layer plus a revision — so they still count, and should: an in-flight reply must not
+// overwrite a record the user just marked incorrect.)
+test("an event that changed no memory does not invalidate an in-flight result; one that did still does", () => using((s, dir) => {
+	s.capture(source()); const run = s.beginEvolution("s1")!;
+	const before = s.readMemories();
+	// The user's next turn ends while the call is in flight: captured, no local claims, an event written.
+	s.capture({ id: "turn", scope: "/project", kind: "user", content: "Remember the database.", createdAt: new Date().toISOString() });
+	// And another source's model reply lands with nothing to change: an event written, no memory touched.
+	s.finishEvolution(s.beginEvolution("turn")!, [], "model");
+	assert.equal(s.history().length, 3, "fixture: both events were written");
+	assert.deepEqual(s.readMemories(), before, "fixture: neither changed a memory");
+	s.finishEvolution(run, [{ kind: "fact", content: "Database is on port 5432." }], "model");
+	assert.match(s.status(), /done=2/);
+	assert.equal(s.readMemories().length, 2);
+	// Positive control: a capture that DOES change a memory in the scope still makes the result stale.
+	s.capture({ id: "turn2", scope: "/project", kind: "user", content: "Remember the database.", createdAt: new Date().toISOString() });
+	const second = s.beginEvolution("turn2")!;
+	s.capture(source("s3", "## Critical Context\n- Database port is 9999."));
+	assert.throws(() => s.finishEvolution(second, [{ kind: "fact", content: "Database uses Redis." }], "model"), (e: any) => e.code === "stale");
+	// And the check stays O(log n): the generation query is answered from a partial index over changed events.
+	const db = new Database(join(dir, "memory.sqlite"));
+	try {
+		const plan = db.prepare(`EXPLAIN QUERY PLAN SELECT COALESCE(MAX(rowid),0) AS n FROM events WHERE scope=? AND ${CHANGED_EVENT_SQL}`).all("/project").map(r => String(r.detail)).join("; ");
+		assert.match(plan, /USING (?:COVERING )?INDEX events_scope_changes/, plan);
+	} finally { db.close(); }
+}));
+// The narrower generation above reopened a race the review had probed and ruled out: a confirmation
+// (`reinforce`) writes no event at all — it is "not a change" — and before that fix it was protected
+// only because finishEvolution's always-written event, empty or not, made a competing result stale.
+// A source captured before the confirming one but finished after it then wrote through the confirmed
+// record from its older snapshot, and the stamp was gone: the record's decay anchor went backwards,
+// silently. The result is not stale — nothing it was shown changed — but what it writes must carry
+// the stamp written meanwhile, exactly as `undo` already carries it.
+test("a write-through from an older snapshot cannot erase a confirmation stamp written meanwhile", () => using((s) => {
+	const at = (d: number) => new Date(Date.parse("2026-09-01T00:00:00Z") + d * 86_400_000).toISOString();
+	s.capture({ ...source("seed", "## Critical Context\n- Database uses SQLite.\n- The printer is on floor three."), createdAt: at(0) });
+	const existing = s.readMemories().find(m => m.content.includes("SQLite"))!;
+	const old = s.readMemories().find(m => m.content.includes("printer"))!;
+	// S2 is captured first and delayed; S1, captured later, confirms the database record and finishes first.
+	s.capture({ id: "s2", scope: "/project", kind: "user", content: "Remember: the printer is on floor three no longer.", createdAt: at(3) });
+	s.capture({ id: "s1", scope: "/project", kind: "user", content: "Remember: the database uses SQLite.", createdAt: at(5) });
+	const second = s.beginEvolution("s2")!, first = s.beginEvolution("s1")!;
+	assert.ok(first.candidates.some(m => m.id === existing.id) && !second.candidates.some(m => m.id === existing.id), "fixture: only S1 is shown the database record");
+	assert.ok(second.candidates.some(m => m.id === old.id) && second.memories.some(m => m.id === existing.id), "fixture: S2 is shown the printer note and can write through the database record");
+	s.finishEvolution(first, [], "model");
+	assert.equal(s.readMemories().find(m => m.id === existing.id)!.reinforcedAt, at(5), "fixture: S1 confirmed it, writing no event");
+	// S2 replaces the printer note with text equal to the database record: a write-through of `existing`.
+	s.finishEvolution(second, [{ kind: "fact", content: "Database uses SQLite.", replaces: old.id }], "model");
+	const after = s.readMemories().find(m => m.id === existing.id)!;
+	assert.equal(after.updatedAt, at(3), "the write-through itself is intended");
+	assert.equal(after.revision, existing.revision + 1);
+	assert.equal(after.reinforcedAt, at(5), "but the confirmation written meanwhile survives it");
+	assert.equal(s.readMemories().find(m => m.id === old.id)!.status, "forgotten");
+}));
 test("stale model result from an older source cannot replace newer facts", () => using((s) => {
 	s.capture(source()); s.capture({...source("old"),createdAt:"2000-01-01T00:00:00.000Z"});
 	const run=s.beginEvolution("old")!;
-	assert.throws(() => s.finishEvolution(run,[{kind:"fact",content:"Database port is 1111.",replaces:s.readMemories()[0].id}],"model"));
+	// The newer record is not offered at all, so naming it is naming an id the model was never shown.
+	assert.deepEqual(run.candidates,[]);
+	assert.throws(() => s.finishEvolution(run,[{kind:"fact",content:"Database port is 1111.",replaces:s.readMemories()[0].id}],"model"),
+		(error: any) => error.code === 'invalid_output' && error.diagnostic.reason === 'unknown_replaces');
 }));
 test("manual suppression retires pending raw source, so reload cannot relearn it", () => using((s) => {
 	s.capture(source()); s.act(s.readMemories()[0].id, "forget");

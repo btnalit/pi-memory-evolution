@@ -49,6 +49,15 @@ handles Chinese/English asking/remembering phrases; technical memory/recall ques
 retain those concepts. Unknown single-character query subjects remain unmatched barriers,
 not permission to inherit an old topic or generate CJK fragment matches.
 
+The live current-turn prompt is not a REPLAYED history turn and is bounded separately: up to
+65,536 UTF-8 bytes reach feature extraction, not the 2,048-byte-per-turn budget above. A real
+task description routinely runs past one turn's bound — a pasted stack trace, diff or spec
+ahead of the actual ask — and the two budgets used to be the same one, so a task naming a
+stored record by name past byte 2048 recalled nothing at all: not a low score, no candidate,
+because the naming words never reached feature extraction. Replayed history keeps the smaller,
+documented bound, enforced at its source (`adapter/session-context.ts`) and again defensively
+here, since it is a bounded window that stands in for the whole session, not the live ask.
+
 The bounded user history is replayed oldest first. Topic-less follow-ups inherit the last
 resolved subject/focus. Related or attribute-only follow-ups carry a **structured** plan:
 current query plus supporting subject context. Thus `SQLite → port? → auth? → continue`
@@ -72,9 +81,46 @@ a replay note repeating a user's question is not evidence of its answer. Other q
 facts remain ordinary evidence. Concept words in origins are excluded. Source IDs, legacy
 labels and cwd have no authority bonus.
 
-Current-focus coverage must be >=45%; at least 3 focus features still require 2 matches.
+A record must qualify on one of two sides, because the two describe different asks.
+Current-focus coverage — the share of what was just asked that this record accounts for — must
+be **>=0.45**; that is the right measure for a recall question, where the prompt *is* the subject.
+Alternatively, the prompt must *name* the record's topic: at least one query feature that is an
+exact path/filename, or a curated concept synonym or one of the model-written `searchTerms` for
+that claim that is **rare in the store** — document frequency at most `max(3, 2% of records)`, the
+same frequency that weights the word — alongside the ordinary multi-match requirement below. The
+rarity clause is what keeps the subject side from being only as strong as its weakest alias: a
+model asked for aliases grounded in a claim about the server room writes `server`, and an
+everyday word must not carry that note onto every task prompt mentioning a server while its
+alias-less twin is held out. The floor of 3 is where that rule's two costs meet: a topic keeps
+naming its records while up to three carry it, an everyday alias is held out from four, and below
+that the data cannot tell the two apart — in a store where only one note talks about servers,
+"server" is that note's topic. That is what a task prompt
+needs: query coverage is a fraction of everything said, so describing a task in two sentences
+rather than three words divides a relevant record's score by the length of the description, and
+automatic injection effectively only worked for short questions. Naming is unaffected by whatever
+else the prompt says — and by whatever else the *record* says. The subject side has no share floor
+on purpose: its first version was the share of the record's own vocabulary, or of its aliases,
+that the prompt engaged, and a claim may run to 800 characters and carry 8 bilingual aliases, so
+the same two matches that carried a one-line claim were rejected once the claim explained itself,
+and a record with the full alias budget could not clear the bar on the very aliases written to
+widen its recall. Bare prose words cannot carry a record the query is not otherwise about: on a
+long prompt two coincidental everyday words are as many matches as the two that are a claim's
+actual subject, and score no lower. The query side is unaffected. The price is paid by a record
+with no aliases whose subject is outside the concept vocabulary: it is reachable only when the
+prompt is mostly about it, until evolution — which asks for aliases even on unchanged facts —
+supplies one that names its topic. A record that shares only a concept and everyday words with a
+long prompt is not separated by these gates; the relative cutoff and the three-claim limit below
+are what bound it.
+Neither side is the no-filler safeguard by itself — the gates below run
+first and are unchanged, and the relative cutoff, three-claim limit and digest byte cap run after.
+At least 3 focus features still require 2 matches.
 A single match cannot qualify alongside unknown non-attribute words. All explicit literal
-constraints must match, including qualified paths rather than only shared basenames.
+constraints must match, including qualified paths rather than only shared basenames — explicit
+meaning typed as part of the ask. A literal that arrived inside pasted material (a stack-frame
+line, a diff header or hunk, fenced code, or a `file:line:col` reference; `memory/query.ts`)
+keeps its doubled weight but is not a constraint, because traces and diffs always contain paths
+and requiring each of them of every record rejected the whole store before any other gate ran.
+Line references and a frame's closing parenthesis are stripped from the literal itself.
 Supporting context contributes at 0.35 weight and cannot replace current-focus evidence.
 Named context subject features must match; a concept-only contextual subject needs 60%
 weighted subject coverage. Generic attributes are not subject anchors. Evidence gets mild
@@ -124,7 +170,10 @@ Pin/unpin, legacy annotation, explicit feedback and conflict resolution preserve
 date, and undo restores the prior date. Undo also ignores the confirmation stamp when deciding
 whether a record changed, and carries it forward rather than reverting it: confirmation writes no
 event, so an event snapshot can never carry a later stamp, and comparing it would make every
-confirmed record permanently un-undoable. Event history separately records when an operation
+confirmed record permanently un-undoable. Every write carries the current stamp forward the same
+way: a confirmation is not a change, so it does not make an in-flight result stale, and a result
+that then writes through the confirmed record from its older snapshot must not carry that
+snapshot's stamp over the newer one. Event history separately records when an operation
 occurred.
 
 See [core-quality.md](core-quality.md) for the evidence contract, exact ranking policy,
@@ -197,7 +246,9 @@ cutting to a small cap would drop the record that most needed superseding, and b
 would stay active forever. IDF weighting is worse rather than better, for the same reason.
 
 The set shown is the set that may be named: **a source cannot replace a record it never mentions**,
-because it is never offered one. This deliberately
+because it is never offered one. Nor is it offered a record it could not replace anyway: pinned
+records and records already newer than the source are withheld too, since the payload carries no
+`updatedAt` and naming one discarded the whole reply. This deliberately
 limits automatic replacement authority, **not recall eligibility**. One origin can cover
 multiple projects. The prompt requires an explicitly identifiable same subject/fact and
 preservation of project/resource qualifications; matching cwd alone is not identity.
@@ -209,7 +260,8 @@ characters, with total JSON <=1024 bytes. Malformed claims/aliases reject the ba
 The prompt asks for concise Chinese/English aliases, never added facts. Existing text
 can gain aliases without changing its provenance/evidence date; correction clears stale
 aliases and undo restores the actual prior metadata. Unknown, cross-origin, pinned,
-stale, duplicate-target and cyclic replacements are rejected transactionally. Only normal
+stale, duplicate-target and cyclic replacements are rejected transactionally, the authority
+refusals with a recorded reason. Only normal
 `stop` completion is accepted, never truncated/tool/error output. Model paths are not
 used for file operations, and model claims remain `provisional`, not awaiting approval. Host-assigned evidence types
 cannot be supplied by model output. A weaker proposed replacement is withheld; only that
@@ -228,6 +280,11 @@ governed per call, per source and per day by the routing policy. Context reserva
 spend estimate reserve **exactly the ceiling that will be sent**, so neither can admit a payload
 that leaves no room for the reply the request permits, nor admit a call as cheaper than it may
 bill. A model declaring no limit is reserved 12,800 tokens, this contract's worst legal reply.
+A catalog entry whose `maxTokens` is no smaller than its `contextWindow` — the catalog's convention
+for "may use the whole window", true of every first-party Mistral, Moonshot and xAI model — is treated
+the same way: sent no ceiling and reserved the worst legal reply, because reserving the whole window
+left no room for any input and refused every call unsent. Context arithmetic counts tokens, not
+bytes: one per CJK character and at most three bytes per token elsewhere, a deliberate overestimate.
 A 120-second per-attempt deadline bounds waiting even when a provider ignores abort;
 remote computation/billing cannot be guaranteed to stop. A backup has a fresh deadline,
 clamped by the source's remaining 300-second cumulative allowance. Failed calls retain local summary claims. User-cue prose is saved but needs a
@@ -298,6 +355,9 @@ retains its original provenance. While Pi is closed no polling occurs.
 Only allowlisted error codes are persisted, never exception strings, provider error bodies,
 model response text or credentials. Stage categories distinguish provider/unavailable,
 output limit, invalid output, write rejection, stale output, timeout and interrupted work.
+`unavailable` pauses a source and is reserved for causes waiting cannot fix: a failed legacy
+import, or a host without `registry.complete`. A session with no model selected is not one of
+them — nothing is claimed or reserved, and the source stays pending until Pi has a model.
 Status reports retrying/paused counts and up to five failed-job details with next due times;
 normal structural validation is still separate from model/job health.
 

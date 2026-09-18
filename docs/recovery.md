@@ -40,7 +40,7 @@ Last-checked ordering moves temporarily unroutable sources behind other eligible
 | Context overflow or HTTP 400/404/422 | Do not resend unchanged requests to that model immediately; cool it down for 1 hour and permit a compatible backup. |
 | Invalid JSON / output truncation / **broken output contract** | Initial attempt, at most one corrective prompt naming the rule that was broken, then an alternate model. Three output failures pause the source; two failures do not authorize repeatedly probing the same model. |
 | Unsafe/unauthorized write or recognized safety/refusal | Reject and pause that source. No fallback to circumvent safety or write guards. |
-| Stale result | Re-read on a bounded delayed retry; not counted as a provider-health failure. |
+| Stale result | Re-read on a bounded delayed retry; not counted as a provider-health failure. It **is** counted against the source's own budgets — one of its reserved calls, and one failure with backoff — because the request was sent and may have been billed. Only an event that changed a memory in the scope makes a result stale; a capture with no local claims, feedback, a pin or a reply that changed nothing does not. |
 | Cancellation / shutdown / reload | Release the lease without adding a failure; already-reserved requests may still have consumed quota. |
 | Unknown error | Safe generic category and bounded transport retry; no guessing that arbitrary error prose means insufficient credit. |
 
@@ -50,13 +50,17 @@ of replacing its nominated record, a replacement id that was never shown, the sa
 twice, a replacement that changes evidence kind, a cyclic batch, or aliases that fail validation —
 is the model's error. It is reported as `invalid_output` with a
 `reason` naming the rule, so the correction prompt can cite it and a sibling model may try. A
-**refusal on the store's own authority** — a pinned record, another origin's record, a record
-already newer than the source, or model output that still redacts to a placeholder — is not
-correctable: the same evidence is refused however often it
-is offered, so it stays `write_rejected` and stops the source rather than burning the budget. The
-last of those is a deliberate refusal to retry rather than an inability: a correction would resend
-the same unredacted source to another call and, because `invalid_output` permits cross-provider
-fallback, to another vendor. One exposure and a stop is the cheaper outcome.
+**refusal on the store's own authority** — a pinned record (`pinned_replaces`), another origin's
+record (`origin_replaces`), a record already newer than the source (`newer_replaces`), or model
+output that still redacts to a placeholder — is not correctable: the same evidence is refused
+however often it is offered, so it stays `write_rejected` and stops the source rather than burning
+the budget, and `/memory status` shows the reason. The first three are withheld from the model
+before it is asked — what is shown is what may be named — so a source captured before a newer one
+in the same scope but processed after it is simply not offered the record the newer one rewrote;
+the refusal remains as defence in depth. The last is a deliberate refusal to retry rather than an
+inability: a correction would resend the same unredacted source to another call and, because
+`invalid_output` permits cross-provider fallback, to another vendor. One exposure and a stop is
+the cheaper outcome.
 
 Generic source backoff is 1 minute, 5 minutes, 15 minutes, then 1 hour, with up to 20%
 positive jitter on runtime failures. Route failures can try one alternate immediately;
@@ -75,10 +79,13 @@ Only known code values, numeric `Retry-After`/reset metadata and raw stop enums 
 Unsupported/opaque SDK errors can still be generic `provider`; no universal balance API is
 claimed. Error-body inspection is transient, bounded to 8192 bytes and 200 ms, never stored.
 
-Input planning drops lower-priority existing candidates when a conservative byte/token
-estimate exceeds the chosen context window. It does not truncate facts or progress JSON to
-pretend they fit. If the original evidence still cannot fit, that route is rejected. Model
-mistakes and provider-specific tokenization remain possible; this is not exact token counting.
+Input planning drops lower-priority existing candidates when a conservative token estimate
+(one token per CJK character, at most three bytes per token elsewhere) exceeds the chosen
+context window less the reply ceiling. It does not truncate facts or progress JSON to
+pretend they fit. If the original evidence still cannot fit, that route is rejected. A model
+whose catalog ceiling equals its whole window is reserved this contract's worst legal reply
+instead, so such models are usable at all. Model mistakes and provider-specific tokenization
+remain possible; this is not exact token counting.
 
 ## Optional configuration
 

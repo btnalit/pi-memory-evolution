@@ -2,6 +2,52 @@ import { isRecallQuestion } from './query.ts';
 
 const EXPLICIT = /记住|偏好|更正|纠正|应该改成|改为|不对|以后|不要|\b(?:remember|prefer|correction|instead)\b/iu;
 const IMPERATIVE = /(?:^|[.!?。！？]\s*)(?:please\s+)?remember\b|记住|更正|纠正|以后|不要/iu;
+/** The English counterparts of the 以后 / 不要 cues above, which had none: a user writing
+ * "From now on use conventional commits." or "Never commit generated files." was stating exactly
+ * what 以后 / 不要 state, and nothing was captured.
+ *
+ * EVERY alternative is anchored to a sentence start, because position is the only thing separating
+ * a standing rule from a question about one, and an unanchored phrase is a question in disguise:
+ * "Do you think this API will work in the future?" and "We'll deal with it in future releases."
+ * state no rule, and matching them would spend a paid call AND override the recall-question gate.
+ * "in (the) future" stays, behind the same anchor: as a sentence opener it is the plain-English
+ * 以后 ("In the future, always run the tests before committing."), and mid-sentence it is ordinary
+ * prose ("in future versions"), so the anchor is what decides, not the phrase. A trailing
+ * "…from now on" is therefore missed rather than guessed at; that is the same direction the rest
+ * of this recognizer errs in.
+ *
+ * The bare imperatives additionally refuse a following pronoun: "Don't use sed." is a rule,
+ * "Don't you think we should refactor?" and "Don't we need a changelog?" are questions that merely
+ * start with the same word. Both apostrophes are accepted, because a phone or editor autocorrects
+ * "don't" to "don’t" and dropping that would silently lose exactly what this cue exists to catch.
+ *
+ * This widens which sentences are recognized, not what is stored: every capture still goes through
+ * the same extraction, quality and privacy path. */
+const DIRECTIVE = /(?:^|[.!?。！？\n]\s*)(?:please\s+)?(?:(?:always|never(?!\s+mind\b)|don['’]?t|do not)(?!\s*[,，]?\s*(?:you|we|i|they|he|she|it)\b)\b|(?:from now on|going forward|in (?:the )?future)\b)/iu;
+const DIRECTIVES = new RegExp(DIRECTIVE.source, `${DIRECTIVE.flags}g`);
+/** The bare imperatives above are also how ordinary one-off instructions begin. A cue sentence
+ * that limits itself to the step at hand — "Don't worry about the tests for now, just make it
+ * compile.", "Do not run the migration, I just want to see the plan.", "Don't commit yet." — states
+ * an instruction, not a rule, and storing it as a standing preference is exactly the false memory
+ * a weaker model will then act on. These are looked for after the cue, inside its own sentence.
+ * An opener that says in its own words that it is durable ("from now on", "going forward", "in the
+ * future") is not cancelled by them: there "just" means "only", not "this once". */
+const ONE_OFF = /\b(?:for now|for this|this time|just|yet)\b/iu;
+const DURABLE_OPENER = /\b(?:from now on|going forward|in (?:the )?future)\b/iu;
+/** Whether the text states a standing rule by a DIRECTIVE cue. Position separates a rule from a
+ * question about one, but it does not make a question a rule: a text that ends in a question mark
+ * is a question whatever word it opened with ("Never seen this error before, what is it?",
+ * "Always the same stack trace when I run it. Why?"), so no cue may override the question gates. */
+function directive(text: string): boolean {
+ if (/[?？]\s*$/u.test(text)) return false;
+ for (const match of text.matchAll(DIRECTIVES)) {
+  if (DURABLE_OPENER.test(match[0])) return true;
+  const rest = text.slice(match.index + match[0].length);
+  const end = rest.search(/[.!?。！？\n]/u);
+  if (!ONE_OFF.test(end < 0 ? rest : rest.slice(0, end))) return true;
+ }
+ return false;
+}
 
 /** A bounded intent recognizer, not a general semantic classifier. A stated preference
  * or project requirement may precede a question asking for feedback. Mere questions,
@@ -9,16 +55,17 @@ const IMPERATIVE = /(?:^|[.!?。！？]\s*)(?:please\s+)?remember\b|记住|更�
 export function learningIntent(text: string): { learn: boolean; reason: string } {
  const clean = text.trim();
  if (!clean || /^(?:[>`"“「]|(?:例如|举例|假设|如果我说|example\b|suppose\b|if I say\b))/iu.test(clean)) return { learn: false, reason: 'quoted-or-example' };
- if (isRecallQuestion(clean) && !IMPERATIVE.test(clean)) return { learn: false, reason: 'recall-question' };
+ const directed = directive(clean);
+ if (isRecallQuestion(clean) && !IMPERATIVE.test(clean) && !directed) return { learn: false, reason: 'recall-question' };
  const declaration = /(?:^|[。.!?\n]\s*)(?:(?:我|我们)(?:比较|最|更|主要|特别)?(?:在意|看重|喜欢|不喜欢|偏好|倾向于|决定采用|决定使用)|(?:我的|我们的|本项目的?|这个项目的?|项目的?)(?:核心)?(?:需求|要求|目标|优先级)\s*(?:是|为|[:：])|(?:I|we)\s+(?:care about|value|like|dislike|want to prioritize|decided to use|decided to adopt)\s+|(?:my|our)\s+(?:priorities|requirements|preferences|goals)\s+(?:are|include)\s+|(?:our|this)\s+(?:project|system)\s+(?:must|needs to|should)\s+)([^\n]+)/iu.exec(clean);
  if (declaration && declaration[1].trim().length >= 1 && !/^(?:什么|哪些|哪种|是否|怎么|如何|what\b|which\b|whether\b)/iu.test(declaration[1].trim())
   && !/^(?:这个|那个|这些|那些|它|this|that|it)[。.!?？]*$/iu.test(declaration[1].trim())) return { learn: true, reason: 'stated-requirement' };
  const durable = /(?:^|[。.!?\n]\s*)(?:我|我们)(?:希望|要求|需要|想要)([^。.!?\n]+)/u.exec(clean);
  if (durable && /项目|系统|长期|以后|默认|每次|总是|功能|需求|优先|自动/u.test(durable[1])
   && !/^(?:什么|哪些|是否|怎么|如何)/u.test(durable[1].trim())) return { learn: true, reason: 'stated-requirement' };
- if (!IMPERATIVE.test(clean) && /[?？]\s*$/u.test(clean)
+ if (!IMPERATIVE.test(clean) && !directed && /[?？]\s*$/u.test(clean)
   && /^(?:你|请问|如何|怎么|为什么|是否|什么|当前|我是否|我应该|what\b|how\b|why\b|should\b|can\b|do\b)/iu.test(clean)) return { learn: false, reason: 'question' };
- if (EXPLICIT.test(clean)) return { learn: true, reason: 'explicit-cue' };
+ if (EXPLICIT.test(clean) || directed) return { learn: true, reason: 'explicit-cue' };
  return { learn: false, reason: 'no-learning-intent' };
 }
 export function learningCue(text: string): boolean { return learningIntent(text).learn; }

@@ -5,7 +5,7 @@ import { EVOLUTION_TIMEOUT_MS, EvolutionError, failureCode, type FailureCode } f
 import type { Claim } from "./extractor.ts";
 import { clipBytes, redact } from "./privacy.ts";
 // The prompt states these to the model and the parser judges its reply by them: one source only.
-import { answerCeiling, MAX_CLAIMS, MAX_CLAIM_BYTES, MAX_CLAIM_CHARS, MIN_CLAIM_CHARS, MAX_OUTPUT_TOKENS, MAX_SEARCH_TERMS, MAX_SEARCH_TERM_CHARS, MIN_SEARCH_TERM_CHARS } from './limits.ts';
+import { answerCeiling, estimateTokens, MAX_CLAIMS, MAX_CLAIM_BYTES, MAX_CLAIM_CHARS, MIN_CLAIM_CHARS, MAX_OUTPUT_TOKENS, MAX_SEARCH_TERMS, MAX_SEARCH_TERM_CHARS, MIN_SEARCH_TERM_CHARS } from './limits.ts';
 import { parseMemoryOutput } from './output.ts';
 import { modelLabel, OUTPUT_PROTOCOL_VERSION, type Diagnostic } from './diagnostics.ts';
 
@@ -22,20 +22,29 @@ At most ${MAX_CLAIMS} claims, each ${MIN_CLAIM_CHARS}-${MAX_CLAIM_CHARS} charact
 Use replaces only for the SAME fact about the SAME explicitly identifiable subject, corrected/superseded by newer evidence. Existing candidates are confined to this source origin as a conservative write safeguard; global recall is not permission to overwrite facts from other origins. Never replace a pinned memory. Existing evidence and feedback are host-assigned provenance, not confidence probabilities. A summary cannot override an explicit user statement/manual correction or direct tool observation; stronger evidence is protected by the host. Never claim your own output is verified, invent evidence, or emit feedback/quality fields. An explicit fresh user reaffirmation may use replaces with identical content, but aliases alone are not new evidence. Do not repeat unchanged facts unless enriching searchTerms or incorporating a fresh progress observation; do not rewrite unrelated memories. If evidence is ambiguous, omit it. A user source is the user's current statement, not proof that a technical task succeeded. A summary may describe old history, not just new facts. When nothing is supported, return exactly {"memories":[]}, never a bare []. No tools, shell commands, file changes or approval workflow.`;
 
 export function parseClaims(text: string): Claim[] { return parseMemoryOutput(text).claims; }
+/** Room left for what the estimate above does not itemise: message framing and role tokens the
+ * adapter adds around the prompt and the input, and the correction note on a retry. */
+const CONTEXT_SLACK_TOKENS = 400;
 
-/** One bounded model call per source. No lock held over network; stale results cannot commit. */
+/** One bounded model call per source. No lock held over network; stale results cannot commit.
+ * Returns false without claiming anything when the host has no model selected: that is transient
+ * (none configured yet, or an RPC client that has not chosen one), so the source stays pending for
+ * the recovery timer to pick up once one exists. It is not the `unavailable` pause, which is for a
+ * failed legacy import or a host without `registry.complete`, where waiting cannot help. */
 export async function evolve(store: MemoryStore, sourceId: string, ctx: ExtensionContext, signal: AbortSignal, complete: CompleteMemory = completeMemory, retry: RetryMode = false, timeoutMs = EVOLUTION_TIMEOUT_MS): Promise<boolean> {
 	signal.throwIfAborted();
 	const selectedModel = ctx.model;
-	const model = selectedModel ? modelLabel(`${selectedModel.provider}/${selectedModel.id}`) : 'unavailable';
+	if (!selectedModel) return false;
+	const model = modelLabel(`${selectedModel.provider}/${selectedModel.id}`);
 	// Exactly what the adapter will ask the provider for, so context arithmetic and the spend estimate
-	// cannot promise less room than the request permits. A model declaring no limit is sent none, and
-	// the provider's own default applies; this contract's worst legal reply is the estimate for that.
-	const answerReserve = answerCeiling(selectedModel?.maxTokens) ?? MAX_OUTPUT_TOKENS;
-	const run = store.beginEvolution(sourceId, retry, timeoutMs, Date.now(), model, selectedModel ? {
+	// cannot promise less room than the request permits. A model declaring no limit — or its whole
+	// window, which is the catalog's way of saying the same — is sent none, and the provider's own
+	// default applies; this contract's worst legal reply is the estimate for that.
+	const answerReserve = answerCeiling(selectedModel.maxTokens, selectedModel.contextWindow) ?? MAX_OUTPUT_TOKENS;
+	const run = store.beginEvolution(sourceId, retry, timeoutMs, Date.now(), model, {
 		provider: selectedModel.provider, pricing: selectedModel.cost,
 		outputTokens: answerReserve, promptBytes: Buffer.byteLength(PROMPT) + 1200,
-	} : undefined);
+	});
 	if (!run) return false;
 	signal = AbortSignal.any([signal, AbortSignal.timeout(run.timeoutMs)]);
 	let cancel: (() => void) | undefined;
@@ -49,12 +58,14 @@ export async function evolve(store: MemoryStore, sourceId: string, ctx: Extensio
 			// short list instead of searching a long one. Retrieval is the host's job; judgement is the model's.
 			existing: run.candidates.map(({ id, kind, content, layer, scope, searchTerms, evidence, feedback }) => ({ id, kind, content: clipBytes(redact(content), MAX_CLAIM_BYTES), layer, origin: scope, searchTerms, evidence, feedback })),
 		};
-		// Conservative byte/token upper estimate, never cut a progress JSON payload or a fact in half.
-		const capacity = selectedModel?.contextWindow;
+		// Conservative token estimate (limits.ts: one per CJK character, at most three bytes per token
+		// elsewhere), never cut a progress JSON payload or a fact in half. Bytes are not tokens: counted
+		// byte-for-byte, a source that fit a tight window with room to spare was refused unsent.
+		const capacity = selectedModel.contextWindow;
 		if (Number.isSafeInteger(capacity) && capacity! > 0) {
-			const available = capacity! - answerReserve - Buffer.byteLength(PROMPT) - 1200;
-			while (payload.existing.length && Buffer.byteLength(JSON.stringify(payload)) > available) payload.existing.pop();
-			if (Buffer.byteLength(JSON.stringify(payload)) > available) throw new EvolutionError('context_limit');
+			const available = capacity! - answerReserve - estimateTokens(PROMPT) - CONTEXT_SLACK_TOKENS;
+			while (payload.existing.length && estimateTokens(JSON.stringify(payload)) > available) payload.existing.pop();
+			if (estimateTokens(JSON.stringify(payload)) > available) throw new EvolutionError('context_limit');
 			run.candidates = run.candidates.slice(0, payload.existing.length);
 		}
 		const input = JSON.stringify(payload);

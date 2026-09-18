@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rankMemories, recallQuery, resolveRecallQuery, retrieveMemories, selectRelevantMemories } from './retriever.ts';
-import { queryFeatures, queryText } from './query.ts';
+import { pastedLiterals, queryFeatures, queryText } from './query.ts';
 import { buildRuntimeDigest } from '../injector/digest.ts';
 import type { DurableMemory } from './memory-store.ts';
 
@@ -148,3 +148,344 @@ test('lifecycle gates and digest trust/size limits survive conversational matchi
  assert.match(digest, /other-origin/);
 });
 
+
+// A task prompt is the normal way a coding session starts, and it is longer than a recall question
+// by nature. Relevance was measured only as the share of the prompt a record accounted for, so the
+// same record that matched "install dependencies" stopped matching once the same request was
+// written as a sentence. Nothing here is newly stored; it is what was already stored being offered.
+const project = [
+ memory('deps', 'The user prefers pnpm over npm for installing dependencies in all projects.', { kind: 'preference', searchTerms: ['pnpm', 'npm', 'package manager'] }),
+ memory('billing', 'We decided to use Postgres instead of MySQL for the billing service.', { kind: 'decision', searchTerms: ['postgres', 'mysql', 'billing'] }),
+ memory('staging', 'The staging database listens on port 7777 and requires TLS.', { searchTerms: ['database', 'port', 'staging'] }),
+ memory('style', 'The user wants concise answers with no filler and code that matches the surrounding style.', { kind: 'preference', searchTerms: ['concise', 'style'] }),
+];
+const task = 'I want to add a new endpoint to the API server for exporting invoices as CSV. It should stream the\n'
+ + 'response so large exports do not blow up memory, and it needs to respect the existing authentication\n'
+ + 'middleware. Please also add tests. Before you start, install the dependencies in this repo so the test\n'
+ + 'suite can run.';
+
+test('a record the task engages is injected however long the task description is', () => {
+ for (const prompt of ['install dependencies', 'Add a CSV export endpoint to the API server and install dependencies first.', task])
+  assert.deepEqual(ids(prompt, project), ['deps'], prompt);
+ assert.deepEqual(ids('Can you help me set up the database connection for the staging environment?', project), ['staging']);
+ assert.deepEqual(ids('Let us continue working on the billing service migration. Which database did we settle on?', project), ['billing']);
+});
+
+// The records above are on disjoint topics, so they cannot show what the subject side rejects —
+// only what it admits. A real store is full of unrelated short claims that share an everyday word
+// or two with any given task, and two coincidental matches are exactly as many as the two that
+// are a claim's actual topic, and score no lower. These are the records that must NOT come back.
+const clutter = [
+ memory('badge', 'Badge access to the server room needs security approval.'),
+ memory('onboarding', 'New hires get repo access on their first day.'),
+ memory('standup', 'Standup is at 9:15 and should run no longer than ten minutes.'),
+ memory('lunch', 'Lunch orders need to be submitted before eleven.'),
+ memory('keys', 'Spare keys are held by reception, not by the server room.'),
+ memory('bikes', 'Bike storage is in the basement and needs a fob.'),
+ memory('coffee-machine', 'The office coffee machine needs descaling every month.'),
+ memory('printer', 'The printer on the third floor jams with thick paper.'),
+ memory('recycling', 'Paper recycling goes in the blue bins on each floor.'),
+ memory('visitors', 'Visitors must be signed in at the front desk.'),
+];
+
+test('length-invariant relevance does not turn a long task prompt into unrelated filler', () => {
+ for (const prompt of ['Please review this pull request and tell me whether the approach is sound.',
+  'Refactor the payment retry loop to use exponential backoff.', 'What is the weather like in Oslo today?',
+  'Rewrite this function so it reads better.'])
+  assert.deepEqual(ids(prompt, project), [], prompt);
+ // Against clutter, the long task must still return exactly the record it is about. 'badge' and
+ // 'onboarding' are the two engaged on coincidence alone — server+needs and new+repo — and they
+ // outscore nothing, so only a match that NAMES a topic can separate them.
+ const store = [...project, ...clutter];
+ const diagnostics = retrieveMemories(store, resolveRecallQuery(task), 3, now).diagnostics;
+ assert.deepEqual(diagnostics.selected, ['deps']);
+ const reasons = new Map(diagnostics.candidates.map(c => [c.id, c.reason]));
+ for (const id of ['badge', 'onboarding']) assert.equal(reasons.get(id), 'incidental-overlap', id);
+ // They are engaged on as many features as the record that IS selected, so no count of matches
+ // can be what rejected them; only the topic-match requirement can be, and that is the point.
+ const matches = new Map(diagnostics.candidates.map(c => [c.id, c.matches.length]));
+ for (const id of ['badge', 'onboarding']) assert.ok(matches.get(id)! >= matches.get('deps')!, id);
+ const digest = buildRuntimeDigest(selectRelevantMemories(store, resolveRecallQuery(task), 3, now), resolveRecallQuery(task), now)!;
+ assert.match(digest, /pnpm/);
+ assert.ok(!/Postgres|7777|concise|Badge|hires/u.test(digest));
+ assert.ok(Buffer.byteLength(digest) <= 2048);
+});
+
+test('an everyday word shared with a short claim is not a topic, in any store size', () => {
+ const store = [...project, ...clutter];
+ // Shorter prompts must not regress into the same coincidence, and a prompt about the clutter
+ // itself must still reach it: the requirement is about naming a topic, not about suppression.
+ assert.deepEqual(ids('Add a CSV export endpoint to the API server and install dependencies first.', store), ['deps']);
+ assert.deepEqual(ids('Who approves access to the server room?', store).includes('badge'), true);
+});
+
+// The subject side is only as strong as the weakest alias. The evolution prompt asks for aliases
+// "grounded in that claim", so a compliant model writes `server` for a note about the server room —
+// and that everyday word then named a topic as surely as a rare one did. Review reproduced it: with
+// aliases ['server','access'] the badge note was injected on an ordinary task prompt about the API
+// server, while its alias-less twin was correctly held out. Naming a topic is a property of the
+// word, not of where it was written: an alias or concept names one only when it is rare in the
+// store (df <= max(3, 2% of records)), the same document frequency the weights already use.
+test('an everyday alias shared across the store does not name a topic; a rare one still does', () => {
+ const aliased = memory('badge-aliased', 'Badge access to the server room needs security approval.', { searchTerms: ['server', 'access'] });
+ const plain = memory('badge-plain', 'Badge access to the server room needs security approval.');
+ const store = [...project, ...clutter.filter(m => m.id !== 'badge'), aliased, plain,
+  memory('build-server', 'The build server has sixteen cores and forty gigabytes of memory.'),
+  memory('log-rotation', 'Server logs rotate weekly and are kept for ninety days.')];
+ const prompt = 'The invoice API server needs a health endpoint before the tests can run in staging.';
+ const diagnostics = retrieveMemories(store, resolveRecallQuery(prompt), 3, now).diagnostics;
+ const reasons = new Map(diagnostics.candidates.map(c => [c.id, c.reason]));
+ assert.equal(reasons.get('badge-plain'), 'incidental-overlap', 'the alias-less twin was always held out');
+ assert.equal(reasons.get('badge-aliased'), 'incidental-overlap', 'and an everyday alias must not carry its twin in');
+ assert.ok(!diagnostics.selected.includes('badge-aliased'));
+ // Positive control: an alias that is rare in the store still names the topic, whatever the prompt
+ // says besides. This is the drill's own case and must not regress.
+ const long = 'Reformat this module so it reads better, keep the public signatures as they are, and use tabs for\n'
+  + 'indentation like the rest of the tree. Then add a short comment above each exported function.';
+ const indent = memory('indent', 'The user prefers tabs over spaces for indentation.', { kind: 'preference', searchTerms: ['indentation', '缩进'] });
+ assert.deepEqual(ids(long, [...store, indent]), ['indent']);
+ // A rare concept still names a topic too; a concept every other record shares does not.
+ assert.deepEqual(ids('Can you help me set up the database connection for the staging environment?', project), ['staging']);
+ const ports = Array.from({ length: 6 }, (_, i) => memory(`port-${i}`, `Service ${i} listens on port ${9000 + i}.`));
+ const health = memory('health', 'The health endpoint on the API server answers on the admin port.', { searchTerms: ['health check'] });
+ assert.ok(!ids('The invoice API server needs a health endpoint before the tests can run in staging.', [...ports, ...clutter, health]).includes('port-3'));
+});
+
+// The floor of the rarity rule is where the two sides of the subject gate meet. A floor of 2
+// held out the everyday alias above only once three records mentioned servers — and, in any store
+// under 150 records, silenced a real topic as soon as three records carried it: three notes aliased
+// `billing` (a decision, a retry policy, a tax rule) made `billing` df 3, so none of them was carried
+// on the subject side and a long task prompt about the billing service injected nothing, where with
+// one or two billing records the decision was injected. A topic with several records is the ordinary
+// shape of a project store, and a long task prompt naming it is the case the subject side exists
+// for. The floor is 3: a topic keeps naming its records up to three of them (more as the store grows
+// past 150), and an everyday alias is held out from df 4 — the twin fixture above sits at df 5.
+test('a topic carried by three records still names them on a long task prompt', () => {
+ const billing = [
+  memory('billing-db', 'We decided to use Postgres instead of MySQL for the billing service.', { kind: 'decision', searchTerms: ['billing', 'postgres'] }),
+  memory('billing-retry', 'Billing webhooks are retried three times with exponential backoff.', { searchTerms: ['billing', 'webhooks'] }),
+  memory('billing-tax', 'Tax rates for billing come from the finance sheet, never hard-coded.', { searchTerms: ['billing', 'tax'] }),
+ ];
+ const store = [...project.filter(m => m.id !== 'billing'), ...clutter, ...billing];
+ const prompt = 'I want to add a monthly statement export to the billing service. It should stream the response so large\n'
+  + 'exports do not blow up memory, respect the existing authentication middleware, and include a test. Please\n'
+  + 'start by reading the current invoice module and telling me what you would change.';
+ const diagnostics = retrieveMemories(store, resolveRecallQuery(prompt), 3, now).diagnostics;
+ assert.equal(store.filter(m => m.searchTerms?.includes('billing')).length, 3, 'fixture: billing has df 3');
+ assert.ok(diagnostics.selected.includes('billing-db'), JSON.stringify(diagnostics.candidates.filter(c => c.id.startsWith('billing'))));
+ assert.ok(!diagnostics.candidates.some(c => c.id.startsWith('billing') && c.reason === 'incidental-overlap'), 'the topic still names its records');
+ // The same prompt, and nothing about billing stored: still nothing injected.
+ assert.deepEqual(ids(prompt, [...project.filter(m => m.id !== 'billing'), ...clutter]), []);
+ // An everyday alias shared by four records is held out; the badge twins above are the df-5 case.
+ const servers = [memory('build-server', 'The build server has sixteen cores.', { searchTerms: ['server'] }),
+  memory('log-server', 'The log server keeps ninety days.', { searchTerms: ['server'] }),
+  memory('mail-server', 'The mail server relays through the provider.', { searchTerms: ['server'] })];
+ const aliased = memory('badge-aliased', 'Badge access to the server room needs security approval.', { searchTerms: ['server', 'access'] });
+ const held = retrieveMemories([...project, ...clutter.filter(m => m.id !== 'badge'), ...servers, aliased], resolveRecallQuery('The invoice API server needs a health endpoint before the tests can run in staging.'), 3, now).diagnostics;
+ assert.equal(held.candidates.find(c => c.id === 'badge-aliased')?.reason, 'incidental-overlap');
+});
+
+test('multilingual incidental overlap cannot displace a named subject', () => {
+ const relevant = memory('deps-bilingual', 'The user prefers pnpm over npm for installing dependencies in all projects.', {
+  kind: 'preference', searchTerms: ['pnpm', 'npm', 'package manager', '包管理器', '依赖安装'],
+ });
+ const unrelated = [
+  memory('ops-cn', '仓库中的服务需要运行，日志由值班人员查看。'),
+  memory('files-cn', '文件需要整理，模块名称要保持一致，仓库管理员负责记录。'),
+ ];
+ const prompt = '请在仓库中安装依赖并运行测试；before you start, install the dependencies in this repository and run the test suite.';
+ const result = retrieveMemories([relevant, ...unrelated], resolveRecallQuery(prompt), 3, now);
+ assert.deepEqual(result.diagnostics.selected, ['deps-bilingual']);
+ const reasons = new Map(result.diagnostics.candidates.map(candidate => [candidate.id, candidate.reason]));
+ for (const id of unrelated.map(record => record.id)) {
+  assert.equal(reasons.get(id), 'incidental-overlap', id);
+  assert.ok(!result.selected.some(record => record.id === id), id);
+ }
+});
+
+// The price of the topic-match requirement, pinned so it is paid knowingly. A record with no
+// aliases whose subject is not in the concept vocabulary has nothing that NAMES its topic, so on a
+// long prompt it is indistinguishable from the clutter above and is deliberately not reachable on
+// the subject side. It stays reachable when the prompt is mostly about it, and evolution asks the
+// model for aliases even on unchanged facts, so the gap closes for any record that gets evolved.
+test('an alias-less record outside the concept vocabulary is reachable by query coverage, not by subject', () => {
+ const indent = memory('indent', 'The user prefers tabs over spaces for indentation.', { kind: 'preference' });
+ const store = [...project, ...clutter, indent];
+ const long = 'Reformat this module so it reads better, keep the public signatures as they are, and use tabs for\n'
+  + 'indentation like the rest of the tree. Then add a short comment above each exported function.';
+ const candidate = retrieveMemories(store, resolveRecallQuery(long), 3, now).diagnostics.candidates.find(c => c.id === 'indent')!;
+ assert.equal(candidate.reason, 'incidental-overlap');
+ assert.ok(candidate.coverage < 0.45, 'the query side does not carry it either; this is the subject-side price');
+ assert.deepEqual(ids('tabs or spaces for indentation?', store), ['indent']);
+ // One model-written alias is enough to name the topic, which is what evolution supplies.
+ assert.deepEqual(ids(long, [...project, ...clutter, { ...indent, searchTerms: ['indentation', '缩进'] }]), ['indent']);
+});
+
+// Nor may relevance depend on how much the CLAIM says. The first subject-side measure was the share
+// of the record's own vocabulary the prompt engaged: invariant to the prompt, but a claim may run to
+// 800 characters and carry eight bilingual aliases, so the same two matches that carried a one-line
+// claim were rejected once the claim explained itself — and once the model had written the full
+// alias budget for it, the aliases that named the topic pushed it under the bar. What the prompt
+// engages decides; what else the record says does not.
+test('the same engagement carries a claim whatever its length or alias count, however long the prompt', () => {
+ const verbose = memory('deps-verbose', 'The user prefers pnpm over npm for installing dependencies in all projects, because its lockfile is\n'
+  + 'stricter, its store is shared across checkouts, and CI restores it faster.',
+  { kind: 'preference', searchTerms: ['pnpm', 'npm', 'package manager', 'install dependencies', 'lockfile', 'workspace', '包管理器', '依赖安装'] });
+ const rest = [...project.filter(m => m.id !== 'deps'), ...clutter];
+ const sentence = 'Add a CSV export endpoint to the API server and install dependencies first.';
+ for (const [record, prompt] of [[project[0], sentence], [project[0], task], [verbose, sentence], [verbose, task]] as const) {
+  const diagnostics = retrieveMemories([...rest, record], resolveRecallQuery(prompt), 3, now).diagnostics;
+  assert.deepEqual(diagnostics.selected, [record.id], `${record.id} on: ${prompt.slice(0, 40)}`);
+  const candidate = diagnostics.candidates.find(c => c.id === record.id)!;
+  assert.deepEqual(candidate.matches, ['concept:installation', 'dependencies'], 'both claims are engaged on exactly the same two features');
+  assert.ok(candidate.coverage < 0.45, 'and neither prompt is mostly about the record, so the subject side is what carries it');
+ }
+ // The negative half: length is not what keeps clutter out either. A long note sharing the same two
+ // everyday words with the task as the short badge note is rejected for the same reason it is —
+ // it names no topic — not for being long.
+ const verboseBadge = memory('badge-verbose', 'Badge access to the server room needs security approval; the request form is on the\n'
+  + 'intranet under facilities and approvals take two working days.');
+ const diagnostics = retrieveMemories([...rest, project[0], verboseBadge], resolveRecallQuery(task), 3, now).diagnostics;
+ assert.deepEqual(diagnostics.selected, ['deps']);
+ const reasons = new Map(diagnostics.candidates.map(c => [c.id, c.reason]));
+ assert.equal(reasons.get('badge-verbose'), 'incidental-overlap');
+ assert.equal(reasons.get('badge'), 'incidental-overlap');
+});
+
+// A live task prompt is not a conversational history turn, and it is routinely longer than one:
+// a pasted stack trace, diff or spec ahead of the actual ask commonly runs past a single turn's
+// bound. query.ts once clipped the live prompt to the same 2,048-byte budget the bounded
+// REPLAYED HISTORY uses, so a task naming a stored record by name past byte 2048 recalled nothing
+// at all — not a low score, no candidate at all, because the naming words never reached feature
+// extraction. The two must stay separate bounds: MAX_HISTORY_TURN_BYTES governs replayed context,
+// MAX_QUERY_BYTES the live prompt.
+test('a topic named past the history byte budget is still recalled from a live task prompt', () => {
+ const filler = 'This is unrelated background context describing the repository layout and prior incidents. '.repeat(30);
+ assert.ok(Buffer.byteLength(filler) > 2048, 'the fixture must actually exceed the history-turn budget');
+ const late = `${filler}Before you start, please install the dependencies for this repo so the test suite can run.`;
+ const store = [...project, ...clutter];
+ assert.deepEqual(ids(late, store), ['deps']);
+ // The real hook (index.ts) calls resolveRecallQuery(event.prompt, recentUserMessages(ctx)), and
+ // Pi may already include the live turn in that history (query.ts's own comment on the dedup
+ // check says so). That self-copy must not shadow the live prompt's larger budget with its own
+ // history-clipped one: the topic must still be found this way, not only through the bare-string
+ // helper that never exercises recentUsers.
+ assert.deepEqual(selectRelevantMemories(store, resolveRecallQuery(late, [late]), 3, now).map(m => m.id), ['deps']);
+ // A positive control first, so the negative half below actually discriminates: a short prior
+ // turn does let a topic-less 'continue' inherit its subject in this codebase.
+ assert.deepEqual(selectRelevantMemories(store, resolveRecallQuery('continue', [task]), 3, now).map(m => m.id), ['deps']);
+ // Only the LIVE prompt's budget grew. The same long text replayed as a PRIOR turn, rather than
+ // asked directly, still loses its topic past the unchanged 2,048-byte history-turn bound, so a
+ // topic-less follow-up after it cannot inherit 'deps' — proving the two budgets stayed separate
+ // rather than the history bound being widened too.
+ assert.deepEqual(selectRelevantMemories(store, resolveRecallQuery('continue', [late]), 3, now).map(m => m.id), []);
+});
+
+// The case the live-prompt budget was widened for — "a pasted stack trace, diff or spec ahead of the
+// ask" — still recalled nothing whenever the paste contained a path, and traces and diffs always do:
+// every literal in the prompt was a mandatory constraint on every record, so a five-line Node trace
+// rejected the whole store as resource-mismatch before coverage or topic matching ran. The literal
+// even carried its frame suffix (`literal:/home/me/invoice-api/src/export.ts:3:1)`), so a record
+// naming the file could not have matched it either. A literal the user TYPES is a constraint and
+// stays one (the /srv/wrong.json and /srv/Atlas tests elsewhere are the feature); a literal that
+// arrived inside pasted material — a stack frame, a diff, fenced code, or a file:line:col reference
+// — keeps its weight but is not required of every record.
+const trace = [
+ 'TypeError: Cannot read properties of undefined (reading \'rows\')',
+ '    at exportInvoices (/home/me/invoice-api/src/export.ts:3:1)',
+ '    at Layer.handle [as handle_request] (/home/me/invoice-api/node_modules/express/lib/router/layer.js:95:5)',
+ '    at next (/home/me/invoice-api/node_modules/express/lib/router/route.js:149:13)',
+ '    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)',
+].join('\n');
+test('a stack trace, diff or fenced paste ahead of the ask does not block recall; a typed path still constrains it', () => {
+ const store = [...project, ...clutter];
+ const ask = 'Please install the dependencies and fix this.';
+ assert.deepEqual(ids(ask, store), ['deps'], 'the bare ask');
+ const afterTrace = retrieveMemories(store, resolveRecallQuery(`${trace}\n\n${ask}`), 3, now).diagnostics;
+ assert.deepEqual(afterTrace.selected, ['deps'], 'the same ask after a stack trace');
+ assert.ok(!afterTrace.candidates.some(c => c.reason === 'resource-mismatch'), JSON.stringify(afterTrace.candidates));
+ // The frame suffix is not part of the path (F15), and the literal is still a weighted query feature.
+ assert.ok(afterTrace.query.includes('literal:/home/me/invoice-api/src/export.ts'), afterTrace.query.join(' '));
+ assert.ok(!afterTrace.query.some(word => word.includes(':3:1')), afterTrace.query.join(' '));
+ const diff = ['--- a/src/export.ts', '+++ b/src/export.ts', '@@ -1,3 +1,4 @@', "+import { stream } from './util/stream.ts';",
+  " import { rows } from './db/rows.ts';", '-export function exportInvoices() {', '+export async function exportInvoices() {'].join('\n');
+ assert.deepEqual(ids(`${diff}\n\n${ask}`, store), ['deps'], 'the same ask after a diff');
+ const fenced = ['```ts', "import { rows } from './db/rows.ts';", 'const config = require(\'/etc/invoice-api/config.json\');', '```'].join('\n');
+ assert.deepEqual(ids(`${fenced}\n${ask}`, store), ['deps'], 'the same ask after fenced code');
+ assert.deepEqual(ids(`Compiler output: src/export.ts:3:1 - error TS2339. ${ask}`, store), ['deps'], 'the same ask after a file:line:col reference');
+ // A literal the user types is the ask, and stays mandatory: no record names this file.
+ const typed = retrieveMemories(store, resolveRecallQuery('Please install the dependencies for src/export.ts and fix this.'), 3, now).diagnostics;
+ assert.deepEqual(typed.selected, []);
+ assert.ok(typed.candidates.every(c => c.reason === 'resource-mismatch'), JSON.stringify(typed.candidates));
+ // Typed once and pasted once is typed: the trace does not launder a path the ask itself names.
+ assert.deepEqual(ids(`${trace}\n\nPlease install the dependencies for /home/me/invoice-api/src/export.ts and fix this.`, store), []);
+ // A pasted literal keeps its weight: a record that names the file is matched on it.
+ const bug = memory('export-bug', 'The stack trace from /home/me/invoice-api/src/export.ts is the CSV streaming bug; rows is undefined until the query resolves.', { searchTerms: ['csv export', 'streaming'] });
+ const withBug = retrieveMemories([...store, bug], resolveRecallQuery(`${trace}\n\n${ask}`), 3, now).diagnostics;
+ assert.ok(withBug.candidates.find(c => c.id === 'export-bug')!.matches.includes('literal:/home/me/invoice-api/src/export.ts'));
+});
+
+// A hunk header says how many body lines follow (`@@ -a,b +c,d @@`), so a well-formed hunk ends
+// exactly where the diff says — and the line after it is the ask again, even when it starts with
+// `-` (a markdown bullet), `+` or a space, which the body-shape heuristic alone read as more hunk.
+// Otherwise a path typed in a bullet right after a pasted diff, with no blank line between, was
+// laundered into the pasted set and stopped constraining, the one thing the fix promised not to do.
+test('a diff hunk ends where its header says, so a bullet ask right after it keeps its typed path', () => {
+ const store = [...project, ...clutter];
+ const ask = '- please install the dependencies for src/export.ts and fix this.';
+ const wellFormed = ['--- a/src/x.ts', '+++ b/src/x.ts', '@@ -1 +1 @@', '-old line', '+new line'].join('\n');
+ const mandatory = (text: string) => [...queryFeatures(text)].filter(w => w.startsWith('literal:') && !pastedLiterals(text).has(w));
+ assert.deepEqual(mandatory(`${wellFormed}\n${ask}`), ['literal:src/export.ts'], 'no blank line between the diff and the bullet');
+ const typed = retrieveMemories(store, resolveRecallQuery(`${wellFormed}\n${ask}`), 3, now).diagnostics;
+ assert.deepEqual(typed.selected, []);
+ assert.ok(typed.candidates.every(c => c.reason === 'resource-mismatch'), JSON.stringify(typed.candidates));
+ // Context lines count against both sides; an indented ask after a hunk with context is still the ask.
+ const context = ['@@ -1,3 +1,4 @@', "+import { stream } from './util/stream.ts';", " import { rows } from './db/rows.ts';", '-export function exportInvoices() {', '+export async function exportInvoices() {', ' }'].join('\n');
+ assert.deepEqual(mandatory(`${context}\n  please install the dependencies for src/export.ts`), ['literal:src/export.ts']);
+ assert.ok(pastedLiterals(`${context}\n  please install the dependencies for src/export.ts`).has('literal:./db/rows.ts'), 'the hunk body itself stays pasted');
+ // A truncated hunk (fewer body lines than declared) falls back to the shape heuristic: body-shaped
+ // lines stay hunk until a line that is not, so a plain-prose ask still ends it.
+ const truncated = ['@@ -1,2 +1,2 @@', '-old line', '+new line'].join('\n');
+ assert.deepEqual(mandatory(`${truncated}\nPlease install the dependencies for src/export.ts.`), ['literal:src/export.ts']);
+ assert.deepEqual(ids(`${truncated}\n\nPlease install the dependencies and fix this.`, store), ['deps']);
+ // An unfenced paste with a path on an ordinary line is typed, and stays required: this is the
+ // documented limit, pinned so that relaxing it is a decision rather than drift.
+ assert.deepEqual(mandatory("import { rows } from './db/rows.ts';\nPlease install the dependencies and fix this."), ['literal:./db/rows.ts']);
+});
+
+test('literal extraction strips frame suffixes and closing punctuation', () => {
+ assert.deepEqual([...queryFeatures('at exportInvoices (/home/me/invoice-api/src/export.ts:3:1)')].filter(w => w.startsWith('literal:')), ['literal:/home/me/invoice-api/src/export.ts']);
+ assert.deepEqual([...queryFeatures('see src/export.ts:12 and (also /srv/atlas.json).')].filter(w => w.startsWith('literal:')), ['literal:src/export.ts', 'literal:/srv/atlas.json']);
+ // A digit-bearing name is not a line reference.
+ assert.deepEqual([...queryFeatures('/srv/py3/config.json')].filter(w => w.startsWith('literal:')), ['literal:/srv/py3/config.json']);
+});
+
+// The widened live-prompt budget admits far more DISTINCT words than one repeated sentence does,
+// and diverse text is the realistic risk: a pasted log or spec has hundreds of different tokens,
+// any of which could coincidentally overlap a clutter record. Reusing clutter's own vocabulary at
+// length is the adversarial case — if the topic-match requirement only ever saw short clutter
+// notes, widening the prompt budget could let a long, wordy one accumulate enough incidental
+// overlap to look engaged. It must not: naming a topic, not overlap volume, is still what admits
+// a record, however many distinct words the now-longer prompt contributes.
+test('a long, vocabulary-diverse prompt still cannot admit clutter it never names as a topic', () => {
+ const officeLog = [
+  'Badge access to the server room needs security approval from facilities before anyone new is added.',
+  'New hires get repo access on their first day, along with a desk assignment and a laptop.',
+  'Standup is at 9:15 and should run no longer than ten minutes, ideally in the small meeting room.',
+  'Lunch orders need to be submitted before eleven or the vendor will not deliver on time.',
+  'Spare keys are held by reception, not by the server room, in case anyone gets locked out.',
+  'Bike storage is in the basement and needs a fob; ask facilities if yours does not work.',
+  'The office coffee machine needs descaling every month or the espresso starts tasting off.',
+  'The printer on the third floor jams with thick paper, so use the one near the kitchen instead.',
+  'Paper recycling goes in the blue bins on each floor, separate from general waste.',
+  'Visitors must be signed in at the front desk and given a temporary badge for the day.',
+ ].join(' ');
+ const filler = Array.from({ length: 6 }, (_, i) => `${officeLog} Note ${i}: none of this is the actual task.`).join(' ');
+ assert.ok(Buffer.byteLength(filler) > 2048, 'the fixture must actually exceed the history-turn budget');
+ const late = `${filler} Before you start, please install the dependencies for this repo so the test suite can run.`;
+ const store = [...project, ...clutter];
+ const diagnostics = retrieveMemories(store, resolveRecallQuery(late), 3, now).diagnostics;
+ assert.deepEqual(diagnostics.selected, ['deps']);
+ const clutterIds = new Set(clutter.map(m => m.id));
+ for (const candidate of diagnostics.candidates) if (clutterIds.has(candidate.id)) assert.equal(candidate.reason, 'incidental-overlap', candidate.id);
+});

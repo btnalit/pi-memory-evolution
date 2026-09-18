@@ -2,7 +2,8 @@ import type { DurableMemory } from "./memory-store.ts";
 import { clipBytes, fingerprint, redact } from "./privacy.ts";
 import { features, featureOffset } from "./search.ts";
 import { memoryQuality } from "./quality.ts";
-import { FACETS, queryFeatures, resolveRecallQuery, type RecallInput } from "./query.ts";
+import { MIN_FOCUS_COVERAGE } from "./limits.ts";
+import { FACETS, pastedLiterals, queryFeatures, resolveRecallQuery, type RecallInput } from "./query.ts";
 export { recallQuery, resolveRecallQuery } from "./query.ts";
 
 function overlap(text: string, query: Set<string>): number {
@@ -56,15 +57,35 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 		origin: new Set(memory.scope === "legacy" ? [] : [...tokenize(memory.scope),
 			...tokenize(memory.scope.split(/[\\/]/u).at(-1) ?? "")].filter((word) => !word.startsWith("concept:"))) }));
 	const unknown = new Set<string>();
+	const frequency = new Map<string, number>();
 	const weights = new Map([...query, ...context].map((word) => {
 		const df = documents.filter((d) => d.mentions.has(word) || d.aliases.has(word) || d.origin.has(word)).length;
+		frequency.set(word, df);
 		if (!df) unknown.add(word);
 		// No evidence is not rare evidence: unseen question words must not receive
 		// the largest IDF. Exact resource constraints and thin-match gates still apply.
 		return [word, (word.startsWith("literal:") ? 2 : 1) * (df ? 1 + Math.log((documents.length + 1) / (df + 1)) : 1)];
 	}));
+	// A word names a topic only if it is rare in the store. The subject side is only as strong as
+	// its weakest alias: the evolution prompt asks for aliases grounded in the claim, so a compliant
+	// model writes `server` for a note about the server room, and that everyday word then carried the
+	// note onto any task prompt mentioning a server — while its alias-less twin was correctly held
+	// out. Rarity is data-driven and prompt-invariant, the property the subject side already has:
+	// the same document frequency that weights the word decides whether it can name anything.
+	// Exact paths and filenames are identities, not vocabulary, and are exempt. The floor is where
+	// the rule's two costs meet: at 2 it silenced a real topic as soon as three records carried it
+	// (three notes aliased `billing` recalled nothing on a long billing prompt in any store under
+	// 150 records), which is the ordinary shape of a project store; at 3 a topic keeps naming its
+	// records up to three of them, and an everyday alias is held out from df 4. Below that the data
+	// cannot tell an everyday word from a topic: in a store where only one note talks about servers,
+	// "server" is that note's topic. See conversation-recall.test.ts for both sides of the line.
+	const rare = (word: string) => frequency.get(word)! <= Math.max(3, 0.02 * documents.length);
 	const total = [...query].reduce((sum, word) => sum + weights.get(word)!, 0);
-	const literals = [...query, ...context].filter(word => word.startsWith('literal:'));
+	// Every literal the user typed is a constraint on every record. One that arrived inside pasted
+	// material — a stack frame, a diff, fenced code, a file:line reference — keeps its weight above
+	// but is not required, or a trace ahead of the ask would reject the whole store (query.ts).
+	const pasted = new Set([...pastedLiterals(plan.query), ...pastedLiterals(plan.context ?? '')]);
+	const literals = [...query, ...context].filter(word => word.startsWith('literal:') && !pasted.has(word));
 	const subjects = [...context].filter(word => !FACETS.has(word));
 	const subjectWeight = subjects.reduce((sum, word) => sum + weights.get(word)!, 0);
 	const namedSubjects = subjects.filter(word => !word.startsWith('concept:'));
@@ -75,7 +96,7 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 	const directFacets = [...query].filter(word => FACETS.has(word) && !['concept:status', 'concept:progress', 'error', '错误'].includes(word));
 	const focusedDirect = !context.size && query.size <= 4 && directNames.length === 1 && directFacets.length > 0;
 	const evaluated: RankedMemory[] = documents.map(({ memory, body, mentions, aliases, origin }) => {
-		let score = 0, covered = 0, focusMatches = 0, evidenceMatches = 0;
+		let score = 0, covered = 0, focusMatches = 0, evidenceMatches = 0, topicMatches = 0;
 		const matches: string[] = [];
 		for (const [word, weight] of weights) {
 			const factor = body.has(word) ? 1 : aliases.has(word) ? 0.8 : mentions.has(word) ? 0.25 : origin.has(word) ? 0.2 : 0;
@@ -84,6 +105,11 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 				if (query.has(word)) {
 					covered += weight; focusMatches++;
 					if (body.has(word) || aliases.has(word) || origin.has(word)) evidenceMatches++;
+					// Something that names a topic, as opposed to a word that merely occurs in one:
+					// an exact resource identity, or — when rare in the store — a curated concept
+					// synonym or one of the aliases the model wrote for this very claim. See the
+					// subject gate below, and `rare` above for why an everyday alias is not a name.
+					if (word.startsWith('literal:') || ((word.startsWith('concept:') || aliases.has(word)) && rare(word))) topicMatches++;
 				}
 				matches.push(word);
 			}
@@ -99,7 +125,22 @@ function evaluate(memories: readonly DurableMemory[], prompt: RecallInput, now: 
 				|| directFacets.some(word => !body.has(word) && !aliases.has(word))) ? 'subject-attribute-mismatch'
 			: (namedSubjects.length ? namedSubjects.some(word => !matches.includes(word))
 				: subjects.length && subjects.filter(word => matches.includes(word)).reduce((sum, word) => sum + weights.get(word)!, 0) / subjectWeight < 0.6) ? 'context-mismatch'
-			: coverage < 0.45 ? 'low-coverage'
+			// Either side may carry a record: the prompt is mostly about it (the query-side floor), or
+			// the prompt NAMES its topic. Requiring the query side alone made injection fail precisely
+			// as a user said more, which is the normal shape of a task prompt. Measuring the subject
+			// side as a share of the record's own vocabulary — the store's candidate containment —
+			// made it fail as the CLAIM said more instead: a claim may run to 800 characters and carry
+			// eight bilingual aliases, so the same two matches that carried a one-line claim sank once
+			// it explained itself, and the aliases written to widen a record's recall narrowed it. No
+			// share of the record can be the floor here; what the prompt engages is. See limits.ts.
+			// Bare prose words cannot carry a record on this side: on a long prompt two coincidental
+			// everyday words ("server", "needs") are as many matches as the two words that are a
+			// claim's actual topic, and score no lower. Measured on a 20-record store, an unrelated
+			// badge-access note and an unrelated onboarding note were both injected next to the correct
+			// preference on one ordinary task prompt. So require at least one match that NAMES a topic —
+			// a curated concept synonym, an exact path/filename, or one of the model-written aliases for
+			// this claim. The query side is unaffected: a prompt that really is about a record needs none.
+			: coverage < MIN_FOCUS_COVERAGE && !topicMatches ? 'incidental-overlap'
 			: (query.size >= 3 && focusMatches < 2) || (focusMatches === 1 && [...query].some(word => unknown.has(word) && !FACETS.has(word))) ? 'thin-match'
 			: undefined;
 		const quality = qualities.get(memory.id)!;

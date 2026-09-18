@@ -35,7 +35,7 @@ full product acceptance; updates must preserve unverified or still-pending claus
 
 The public active-branch context facade remains the only context source. A bounded scan
 now considers up to 4096 entries and 4096 messages, retaining at most six sanitized user
-texts of 2048 bytes each. Repeated consecutive topic-less continuations share a slot.
+texts of 2,048 bytes each. Repeated consecutive topic-less continuations share a slot.
 Reset and unknown-topic barriers are kept, not replaced by an older successful topic.
 Assistant/tool text, raw compaction summaries, injected digests and slash commands do not
 supply user topics. Retained user tails remain supported. No full-session archive replay,

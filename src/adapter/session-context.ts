@@ -1,6 +1,7 @@
 import type { ExtensionContext, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 import { clipBytes, redact } from "../memory/privacy.ts";
 import { resolveRecallQuery } from "../memory/query.ts";
+import { MAX_HISTORY_TURN_BYTES } from "../memory/limits.ts";
 
 /** Read only the active branch; never index full session files or use injected/assistant
  * messages as a topic. Pi's context entries honor /tree, /resume and compaction tails. */
@@ -21,7 +22,7 @@ export function recentUserMessages(ctx: ExtensionContext): string[] {
 				if (message.role !== "user") continue;
 				const content = typeof message.content === "string" ? message.content
 					: message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
-				const clean = clipBytes(redact(content), 2048).trim();
+				const clean = clipBytes(redact(content), MAX_HISTORY_TURN_BYTES).trim();
 				if (clean && !/^\/\w/u.test(clean)) {
 					// Repeated topic-less continuations must not consume every subject slot.
 					// Reset/unknown-topic messages are retained as hard inheritance barriers.

@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
 	MAX_CANDIDATES, MAX_CLAIMS, MAX_CLAIM_BYTES, MAX_CLAIM_CHARS, MIN_CLAIM_CHARS, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS, RELATED_CONTAINMENT,
-	MAX_SEARCH_TERMS, MAX_SEARCH_TERM_CHARS, MIN_SEARCH_TERM_CHARS, SCHEMA_VERSION,
+	MAX_SEARCH_TERMS, MAX_SEARCH_TERM_CHARS, MIN_SEARCH_TERM_CHARS, MIN_FOCUS_COVERAGE, MAX_HISTORY_TURN_BYTES, MAX_QUERY_BYTES, SCHEMA_VERSION,
 } from '../src/memory/limits.ts';
 import { AGING } from '../src/memory/quality.ts';
 
@@ -72,8 +72,16 @@ const BOUNDS = [
 	['docs/design.md', /up to (\d+) existing active claims/, [MAX_CANDIDATES], 'candidate cap'],
 	['docs/usage.md', /using up to (\d+)\n  recently updated active memories/, [MAX_CANDIDATES], 'candidate cap'],
 	['docs/design.md', /mentions at\nleast ([\d.]+) of its vocabulary/, [RELATED_CONTAINMENT], 'candidate threshold'],
+	['docs/design.md', /be \*\*>=([\d.]+)\*\*; that is the right measure for a recall question/, [MIN_FOCUS_COVERAGE], 'focus coverage floor'],
+	['docs/design.md', /a claim may run to (\d+) characters and carry (\d+) bilingual aliases/, [MAX_CLAIM_CHARS, MAX_SEARCH_TERMS], 'why the subject side has no share floor'],
 	['docs/design.md', /validated JSON \(an outer Markdown fence is tolerated\), at most ([\d,]+) bytes/, [group(MAX_OUTPUT_BYTES)], 'output size guard'],
 	['docs/design.md', /declaring no limit is reserved ([\d,]+) tokens/, [group(MAX_OUTPUT_TOKENS)], 'reserved answer budget'],
+	['docs/design.md', /up to\s+([\d,]+) UTF-8 bytes reach feature extraction, not the ([\d,]+)-byte-per-turn budget/,
+		[group(MAX_QUERY_BYTES), group(MAX_HISTORY_TURN_BYTES)], 'live-prompt vs replayed-history query budgets'],
+	['docs/usage.md', /run up to ([\d,]+) UTF-8 bytes before feature extraction/, [group(MAX_QUERY_BYTES)], 'live-prompt query budget'],
+	['docs/usage.md', /keeps the smaller\n  ([\d,]+)-byte-per-turn budget/, [group(MAX_HISTORY_TURN_BYTES)], 'replayed-history query budget'],
+	['docs/design.md', /selecting at most 6 user\ntexts of ([\d,]+) UTF-8 bytes each/, [group(MAX_HISTORY_TURN_BYTES)], 'per-turn history scan budget'],
+	['docs/progress-pipeline.md', /retaining at most six sanitized user\ntexts of ([\d,]+) bytes each/, [group(MAX_HISTORY_TURN_BYTES)], 'per-turn history scan budget'],
 ];
 for (const [file, pattern, expected, what] of BOUNDS) {
 	const body = read.get(file);
@@ -124,7 +132,6 @@ assert.ok(!/\bEVOLUTION_MAX_TOKENS\b/u.test(readdirSync('src', { recursive: true
 // Each survivor is allowed by name with the reason it is not the model's mistake to fix.
 const AUTHORITY_ERRORS = [
 	['Invalid memory diagnostics', 'rejects a malformed argument from a caller, before any model output is read'],
-	['Invalid replacement target', 'pinned, cross-origin, or a record already newer than this source'],
 	['Invalid or sensitive claim', 'the model echoed something credential-shaped; retrying would resend the same\n'
 		+ '    unredacted source to another call and, invalid_output being sibling-eligible, to another vendor'],
 ];
@@ -156,6 +163,21 @@ for (const m of finish.matchAll(/throw new Error\((["'])(.*?)\1\)/gu))
 		+ "    EvolutionError('invalid_output', { reason }) instead. If the store is refusing on its own\n"
 		+ '    authority, add it to AUTHORITY_ERRORS in this script with the reason it cannot be corrected.');
 
+// The replacement-authority refusal (pinned, cross-origin, or a record already newer than the source)
+// is the one authority error that is typed rather than bare: its reason must reach /memory status,
+// because it used to pause the source with an empty diagnostic. It must stay write_rejected — the
+// same evidence is refused however often it is offered — and it is defence in depth only, because
+// selectCandidates withholds those records before the model is asked (evolution.test.ts pins both).
+assert.ok(/throw new EvolutionError\('write_rejected', \{ \.\.\.diagnostic, reason: refusal/u.test(finish),
+	'finishEvolution must refuse a pinned, cross-origin or newer replacement target with\n'
+	+ "    EvolutionError('write_rejected', { ...diagnostic, reason: refusal, ... }): typed so the reason is\n"
+	+ '    recorded, and write_rejected because the store\'s own authority is not the model\'s mistake to correct.');
+for (const reason of ['pinned_replaces', 'origin_replaces', 'newer_replaces'])
+	assert.ok(finish.includes(`'${reason}'`), `finishEvolution no longer names the authority refusal reason ${reason}`);
+assert.ok(!/invalid_output[^;]*(?:pinned|origin|newer)_replaces/u.test(finish),
+	'an authority refusal must never be raised as invalid_output: that makes it correctable, and the\n'
+	+ '    same evidence would be refused again on the next paid call');
+
 // The set shown to the model is the set it may name. If those ever come apart, the model can be
 // offered a record the store will then refuse, turning a good reply into a paid rejected write.
 assert.ok(/run\.candidates\.find\(\(m\) => m\.id === claim\.replaces\)/u.test(readFileSync('src/memory/memory-store.ts', 'utf8')),
@@ -185,6 +207,7 @@ assert.ok(MAX_OUTPUT_BYTES >= MAX_CLAIMS * (MAX_CLAIM_BYTES + 1024),
 assert.ok(MAX_OUTPUT_TOKENS === MAX_CLAIMS * MAX_CLAIM_CHARS, 'MAX_OUTPUT_TOKENS must stay derived from the claim contract');
 assert.ok(MAX_CLAIM_BYTES === MAX_CLAIM_CHARS * 3, 'MAX_CLAIM_BYTES must stay worst-case UTF-8 for MAX_CLAIM_CHARS');
 assert.ok(MAX_SEARCH_TERM_CHARS > MIN_SEARCH_TERM_CHARS && MAX_CLAIM_CHARS > MIN_CLAIM_CHARS, 'bounds inverted');
+assert.ok(MAX_QUERY_BYTES > MAX_HISTORY_TURN_BYTES, 'the live-prompt budget must stay larger than the replayed-history budget, or the live prompt is clipped back down to one turn\'s bound');
 
 // The aging table has never been gated, and constant drift has shipped before. Each kind states a
 // half-life, a floor and a dormancy horizon, and all three change ranking or what gets injected.
@@ -238,6 +261,96 @@ assert.ok(MAX_SEARCH_TERM_CHARS > MIN_SEARCH_TERM_CHARS && MAX_CLAIM_CHARS > MIN
 	assert.ok(start > 0 && !/includeDormant/u.test(injection),
 		'automatic injection must NOT include dormant records: not being pushed unprompted is the\n'
 		+ '    entire meaning of dormancy.');
+}
+
+// Injection relevance has two sides on purpose, and only one of them survives a long prompt. Asking
+// the query side alone is what made automatic injection look dead outside short questions: coverage is
+// a fraction of everything asked, so it falls as the user says more about the very task the record is
+// about. Anchor the pairing, its order, and what the subject side is measured by.
+{
+	const retriever = readFileSync('src/memory/retriever.ts', 'utf8');
+	// The subject side must be carried by naming, never by a share of the record's own vocabulary. The
+	// store's candidate containment was tried there and it made recall depend on claim length: a claim
+	// may run to MAX_CLAIM_CHARS characters and carry MAX_SEARCH_TERMS bilingual aliases, so the two
+	// matches that carried a one-line claim were rejected once it explained itself, and the aliases
+	// written to widen a record's recall narrowed it. Review reproduced both.
+	assert.ok(!/\bcontainment\(/u.test(retriever) && !/\bmentions\([^)]*searchTerms/u.test(retriever),
+		'retriever.ts must not measure relevance as a share of a record\'s own vocabulary (containment or\n'
+		+ '    mentions). Any such share makes a record harder to recall the more it says or the more aliases\n'
+		+ '    it carries; the subject side is carried by a match that names the topic, see limits.ts.');
+	// The gates before the floor are what keep unrelated records out. If the floor were moved ahead of
+	// those, a record could clear it that the subject gates would have refused.
+	const chain = ['resource-mismatch', 'no-focus-match', 'question-only', 'subject-attribute-mismatch', 'context-mismatch', 'incidental-overlap', 'thin-match']
+		.map(reason => retriever.indexOf(`'${reason}'`));
+	chain.forEach((at, i) => assert.ok(at > 0 && (i === 0 || at > chain[i - 1]),
+		'the relevance gates must stay in order, with the coverage floor after the literal, focus and\n'
+		+ '    subject gates: those decide relatedness, the floor only decides aboutness.'));
+	// The subject side is crossed by coincidence otherwise: two everyday words shared with a long prompt
+	// are as many matches as the claim's real topic, and score as high. Review reproduced an unrelated
+	// badge-access note being injected on an ordinary task prompt. Only a match that names a topic
+	// separates them, so the requirement is not optional — and it is the whole subject side now, so the
+	// query-side floor must stay paired with it: dropping either half restores a single-sided gate.
+	assert.ok(/coverage < MIN_FOCUS_COVERAGE && !topicMatches \? 'incidental-overlap'/u.test(retriever),
+		'a record the prompt is not mostly about must still match a concept, a literal or one of its own\n'
+		+ '    searchTerms, and nothing else may reject it for being that. Requiring query-side coverage\n'
+		+ '    alone makes a relevant record unreachable in proportion to how fully the user described the\n'
+		+ '    task; without the topic match, two coincidental everyday words inject an unrelated claim.');
+	assert.ok(!/MIN_FOCUS_COVERAGE\s*&&(?!\s*!topicMatches)/u.test(retriever),
+		'the query-side floor may be paired only with the topic-match requirement: any second condition\n'
+		+ '    on the subject side is a floor on the record, and that is what made recall depend on claim length.');
+	// What may count as naming a topic — an exact resource, or a concept or model-written alias that is
+	// rare in the store, never a bare prose word — is pinned by behaviour rather than by the shape of
+	// the statement: src/memory/conversation-recall.test.ts holds the clutter fixtures that go red when
+	// a prose word counts, the aliased/alias-less twin pair that goes red when an everyday alias counts,
+	// and the rare-alias positive control that goes red when a rare one stops counting.
+}
+
+// The live current-turn prompt and replayed history turns must keep separate byte budgets, or
+// this regresses to the defect the fix above found: the live prompt clipped to a REPLAYED turn's
+// bound, silently discarding a task's own topic past byte 2048 before any feature was extracted.
+{
+	const query = readFileSync('src/memory/query.ts', 'utf8');
+	const sessionContext = readFileSync('src/adapter/session-context.ts', 'utf8');
+	assert.ok(query.includes('MAX_QUERY_BYTES') && query.includes('MAX_HISTORY_TURN_BYTES'),
+		'query.ts must source the live-prompt and replayed-history budgets from limits.ts by name, not\n'
+		+ '    reintroduce a shared literal that collapses the two back into one bound');
+	assert.ok(!/\b2048\b/u.test(query) && !/\b2048\b/u.test(sessionContext),
+		'query.ts and session-context.ts must not clip by a bare 2048 literal; use MAX_HISTORY_TURN_BYTES\n'
+		+ '    so the replayed-history bound cannot drift from the one enforced at its source');
+}
+
+// docs/usage.md lists the English directive cues by name. That list is the feature's user-facing
+// contract and there is no number in it for the checks above to catch, so anchor the cues
+// themselves: dropping one, or dropping the sentence-start anchor that keeps "Do you always ...?"
+// a question, must fail here rather than leave the documentation quietly wrong.
+{
+	const learning = readFileSync('src/memory/learning.ts', 'utf8');
+	const directive = /^const DIRECTIVE = .*$/mu.exec(learning);
+	assert.ok(directive, 'learning.ts must declare DIRECTIVE in one statement; this check cannot verify it');
+	for (const cue of ['from now on', 'going forward', 'in (?:the )?future', 'always', 'never', "don['’]?t", 'do not'])
+		assert.ok(directive[0].includes(cue), `DIRECTIVE no longer contains the cue ${cue} that docs/usage.md promises`);
+	// One regex, one anchor: every alternative must sit inside the single group that follows the
+	// sentence-start anchor, so no cue can be appended as a top-level `|` alternative and thereby
+	// match mid-sentence. "in the future" is the case that was once unanchored: unanchored it turned
+	// "will this work in the future?" into a directive and overrode the recall-question gate. The
+	// walk below checks that the group opened right after the anchor closes only at the very end.
+	const prefix = "const DIRECTIVE = /(?:^|[.!?。！？\\n]\\s*)(?:please\\s+)?(?:";
+	const anchored = () => {
+		if (!directive[0].startsWith(prefix) || !directive[0].endsWith(')/iu;')) return false;
+		let depth = 1;
+		const inner = directive[0].slice(prefix.length, -'/iu;'.length);
+		for (let i = 0; i < inner.length - 1; i++) {
+			if (inner[i] === '\\') { i++; continue; }
+			if (inner[i] === '(') depth++; else if (inner[i] === ')' && --depth === 0) return false;
+		}
+		return depth === 1 && inner.at(-1) === ')';
+	};
+	assert.ok(anchored(),
+		'every DIRECTIVE alternative must stay behind the sentence-start anchor, inside the one group that\n'
+		+ '    follows it. Position is the only thing separating a standing rule from a question about one.');
+	const usage = read.get('docs/usage.md');
+	for (const cue of ['from now on', 'going forward', 'in the future', 'always', 'never', "don't", 'do not'])
+		assert.ok(usage.includes(`\`${cue}\``), `docs/usage.md no longer documents the ${cue} cue that learning.ts implements`);
 }
 
 if (failures.length) {
