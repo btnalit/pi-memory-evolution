@@ -2,6 +2,23 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
+## [0.4.2](https://github.com/btnalit/pi-memory-evolution/compare/v0.4.1...v0.4.2) (2026-09-18)
+
+
+### Bug Fixes
+
+* a stack-frame line is one that carries a location, not any line that opens with "at" ([#36](https://github.com/btnalit/pi-memory-evolution/issues/36)) ([684d6f0](https://github.com/btnalit/pi-memory-evolution/commit/684d6f0f8c7cc68af9d8ce52f1ac1338725616a2))
+
+
+### Automation
+
+* wait up to five minutes for npm to show a published version, not eighteen seconds ([#34](https://github.com/btnalit/pi-memory-evolution/issues/34)) ([72461e6](https://github.com/btnalit/pi-memory-evolution/commit/72461e6fa99ff7811494b99bec740aa5039d594c))
+
+
+### Maintenance
+
+* **deps-dev:** bump the development-minor-patch group across 1 directory with 3 updates ([#33](https://github.com/btnalit/pi-memory-evolution/issues/33)) ([7d39c05](https://github.com/btnalit/pi-memory-evolution/commit/7d39c053859aaed1aa62f4c683b88fca51347a57))
+
 ## [0.4.1](https://github.com/btnalit/pi-memory-evolution/compare/v0.4.0...v0.4.1) (2026-09-18)
 
 
