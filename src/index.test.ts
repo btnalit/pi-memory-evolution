@@ -29,6 +29,21 @@ test('factory has no filesystem writes; five relevant hooks, no approval/signal 
 test('subagent factory registers nothing and never creates state',()=>fixture(async({stateDir,hooks})=>{
 	assert.equal(hooks.size,0);assert.equal(existsSync(stateDir),false);
 },undefined,{PI_SUBAGENT_AGENT_ID:'child'}));
+test('subagent factory registers nothing when PI_SUBAGENT_CHILD or PI_SUBAGENT_RUNNER_PID is set',async()=>{
+	await fixture(async({hooks})=>{ assert.equal(hooks.size,0); },undefined,{PI_SUBAGENT_CHILD:'1'});
+	await fixture(async({hooks})=>{ assert.equal(hooks.size,0); },undefined,{PI_SUBAGENT_RUNNER_PID:'9999'});
+});
+test('before_agent_start handles missing prompt, custom messages and content-block arrays safely',()=>fixture(async({call})=>{
+	await call('session_compact',compact());
+	// Custom message without prompt property
+	assert.equal(await call('before_agent_start',{messageType:'custom',message:{role:'user',content:'test'},systemPrompt:'Base'}),undefined);
+	// Undefined / empty prompt
+	assert.equal(await call('before_agent_start',{prompt:'',systemPrompt:'Base'}),undefined);
+	assert.equal(await call('before_agent_start',{systemPrompt:'Base'}),undefined);
+	// Array content blocks
+	const arrayResult = await call('before_agent_start',{prompt:[{type:'text',text:'Database port'}],systemPrompt:'Base prompt'});
+	assert.match(arrayResult.systemPrompt,/5432/);
+}));
 test('compaction automatically persists and recall follows the topic across directories and sessions',()=>fixture(async({stateDir,call,ctx})=>{
 	await call('session_compact',compact());
 	const result=await call('before_agent_start',{prompt:'Database port',systemPrompt:'Base prompt'});
