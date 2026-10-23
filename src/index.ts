@@ -168,12 +168,12 @@ export default async function memoryEvolution(pi: ExtensionAPI, dependencies: Me
 		if (captured) void enqueue(id, ctx);
 	}));
 	pi.on("before_agent_start", guard((event, ctx) => {
-		lastRecall = 'Last automatic recall failed before completing; see /memory status.';
 		const rawPrompt = 'prompt' in event ? event.prompt : undefined;
 		const promptText = typeof rawPrompt === 'string' ? rawPrompt
 			: Array.isArray(rawPrompt) ? (rawPrompt as { type?: string; text?: string }[]).filter(b => b?.type === 'text' && typeof b?.text === 'string').map(b => b.text).join('\n')
 			: '';
 		if (!promptText.trim()) return;
+		lastRecall = 'Last automatic recall failed before completing; see /memory status.';
 		const query = resolveRecallQuery(promptText, recentUserMessages(ctx));
 		const { selected, diagnostics } = retrieveMemories(query.query ? getStore().readMemories() : [], query);
 		const digest = buildRuntimeDigest(selected, query);
