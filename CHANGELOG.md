@@ -2,6 +2,13 @@
 
 All notable changes to pi-memory-evolution are documented here.
 
+## [0.4.3](https://github.com/btnalit/pi-memory-evolution/compare/v0.4.2...v0.4.3) (2026-10-23)
+
+
+### Bug Fixes
+
+* adapt before_agent_start prompt extraction and child process detection for modern Pi ([#42](https://github.com/btnalit/pi-memory-evolution/issues/42)) ([4d78bcd](https://github.com/btnalit/pi-memory-evolution/commit/4d78bcd8297c25c2991a9ca71871eef93c228676))
+
 ## [0.4.2](https://github.com/btnalit/pi-memory-evolution/compare/v0.4.1...v0.4.2) (2026-09-18)
 
 
